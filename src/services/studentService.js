@@ -258,6 +258,7 @@ export function parseStudentCsv(rawText) {
   const headers = parseCsvLine(lines[0]).map(h => h.trim().toLowerCase());
   
   const students = [];
+  const batchStamp = Date.now().toString(36).toUpperCase();
   for (let i = 1; i < lines.length; i++) {
     const values = parseCsvLine(lines[i]);
     if (values.length === 0 || !values.some(v => v.trim())) continue;
@@ -288,7 +289,7 @@ export function parseStudentCsv(rawText) {
     const kinPhone = row['emergency phone'] || phone;
 
     students.push({
-      id: `STU-${new Date().getFullYear()}-${String(100 + i).padStart(3, '0')}`,
+      id: `STU-${new Date().getFullYear()}-${batchStamp}-${String(i).padStart(3, '0')}`,
       legalFirstName: firstName,
       legalMiddleName: middleName,
       legalFamilyName: familyName,

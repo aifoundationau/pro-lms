@@ -1,8 +1,7 @@
 // src/components/StudentRegistration.jsx
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { db } from '../firebase';
-import { collection, getDocs, doc, setDoc, deleteDoc } from 'firebase/firestore';
+import { listSiteStudents, saveStudent, deleteStudent, validateStudent, isDbAvailable } from '../services/lmsRepository';
 import { 
   INITIAL_STUDENT_FORM, 
   INITIAL_SAMPLE_STUDENTS, 
@@ -39,36 +38,26 @@ export default function StudentRegistration({ myCourses = [], onUpdateCourses })
   // Dossier View Modal State
   const [selectedStudentForDossier, setSelectedStudentForDossier] = useState(null);
 
-  // Load students from Firestore on mount
+  // Load students from Firestore (lms_students + unmigrated legacy) on mount
   useEffect(() => {
+    let cancelled = false;
     const loadStudents = async () => {
       setLoading(true);
       try {
-        const snap = await getDocs(collection(db, "students"));
-        if (!snap.empty) {
-          const list = [];
-          snap.forEach(d => list.push({ id: d.id, ...d.data() }));
-          setStudents(list);
-        } else {
-          // If empty, seed with realistic university sample students
-          setStudents(INITIAL_SAMPLE_STUDENTS);
-          // Auto-persist sample students so Firestore has live records
-          for (const s of INITIAL_SAMPLE_STUDENTS) {
-            try {
-              await setDoc(doc(db, "students", s.id), s);
-            } catch (err) {
-              console.warn("Firestore sample seed warning:", err);
-            }
-          }
-        }
+        if (!isDbAvailable()) throw new Error('Database unavailable');
+        const { students: list } = await listSiteStudents();
+        if (cancelled) return;
+        // Demo records are shown locally only; they are never auto-written to the shared network DB.
+        setStudents(list.length ? list : INITIAL_SAMPLE_STUDENTS);
       } catch (err) {
         console.warn("Firestore load students error, using local state:", err);
-        setStudents(INITIAL_SAMPLE_STUDENTS);
+        if (!cancelled) setStudents(INITIAL_SAMPLE_STUDENTS);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     loadStudents();
+    return () => { cancelled = true; };
   }, []);
 
   const handleInputChange = (field, value) => {
@@ -93,49 +82,52 @@ export default function StudentRegistration({ myCourses = [], onUpdateCourses })
   };
 
   const handleSaveStudent = async () => {
-    if (!formData.legalFirstName || !formData.legalFamilyName) {
-      alert("Please enter the student's legal first name and family name.");
+    const validationErrors = validateStudent(formData);
+    if (validationErrors.length) {
+      alert(validationErrors.join('\n'));
       setActiveStep(1);
       return;
     }
 
     const studentToSave = {
       ...formData,
-      id: isEditingId || formData.id || `STU-${new Date().getFullYear()}-${String(Date.now()).slice(-4)}`,
+      id: isEditingId || formData.id || `STU-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`,
       lastUpdated: new Date().toISOString()
     };
 
+    // Only courses newly added in this save should bump enrolment counters.
+    const previous = isEditingId ? students.find(s => s.id === isEditingId) : null;
+    const previousIds = new Set((previous?.enrolledCourseIds || []).map(String));
+    const newlyAddedCourseIds = (studentToSave.enrolledCourseIds || []).map(String).filter(id => !previousIds.has(id));
+
     // Update local state
-    let updatedList;
-    if (isEditingId) {
-      updatedList = students.map(s => s.id === isEditingId ? studentToSave : s);
-    } else {
-      updatedList = [studentToSave, ...students];
-    }
-    setStudents(updatedList);
+    setStudents(prev => isEditingId
+      ? prev.map(s => s.id === isEditingId ? studentToSave : s)
+      : [studentToSave, ...prev]);
     setIsEnrolModalOpen(false);
 
-    // Save to Cloud Firestore
+    // Save to Cloud Firestore (lms_students + private/sensitive)
     try {
-      await setDoc(doc(db, "students", studentToSave.id), studentToSave, { merge: true });
+      await saveStudent(studentToSave);
     } catch (err) {
       console.error("Error saving student to Firestore:", err);
+      alert('Student updated locally, but saving to the cloud failed. Please try again.\n\n' + (err?.message || ''));
+      return;
     }
 
-    // Refresh course enrollment counters if callback provided
-    if (onUpdateCourses && studentToSave.enrolledCourseIds?.length) {
-      onUpdateCourses(studentToSave.enrolledCourseIds);
+    if (onUpdateCourses && newlyAddedCourseIds.length) {
+      onUpdateCourses(newlyAddedCourseIds);
     }
   };
 
   const handleDeleteStudent = async (studentId) => {
     if (!window.confirm("Are you sure you want to remove this enrolled student record?")) return;
-    setStudents(students.filter(s => s.id !== studentId));
+    setStudents(prev => prev.filter(s => s.id !== studentId));
     if (selectedStudentForDossier?.id === studentId) {
       setSelectedStudentForDossier(null);
     }
     try {
-      await deleteDoc(doc(db, "students", studentId));
+      await deleteStudent(studentId);
     } catch (err) {
       console.error("Error deleting student from Firestore:", err);
     }
@@ -160,17 +152,21 @@ export default function StudentRegistration({ myCourses = [], onUpdateCourses })
     if (bulkParsedStudents.length === 0) return;
     
     // Merge with current students
-    const newStudents = [...bulkParsedStudents, ...students];
-    setStudents(newStudents);
+    setStudents(prev => [...bulkParsedStudents, ...prev]);
     setBulkSuccessMsg(`Successfully enrolled ${bulkParsedStudents.length} students!`);
 
-    // Sync each to Firestore
+    // Sync each to Firestore (lms_students)
+    let failed = 0;
     for (const stu of bulkParsedStudents) {
       try {
-        await setDoc(doc(db, "students", stu.id), stu, { merge: true });
+        await saveStudent(stu);
       } catch (err) {
+        failed++;
         console.warn("Firestore bulk item save note:", err);
       }
+    }
+    if (failed) {
+      setBulkSuccessMsg(`Enrolled ${bulkParsedStudents.length - failed} of ${bulkParsedStudents.length} to the cloud. ${failed} saved locally only.`);
     }
 
     setTimeout(() => {

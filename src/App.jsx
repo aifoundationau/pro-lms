@@ -1,10 +1,36 @@
 import React, { useState, useEffect } from 'react';
-import { db } from './firebase';
-import { collection, addDoc, getDocs, doc, setDoc } from 'firebase/firestore';
+import {
+  listSiteCourses, saveCourse, newCourseId, setCourseArchived,
+  copyCourseToSite, incrementCourseEnrolments, saveLead, isDbAvailable
+} from './services/lmsRepository';
 import { parseCourseSheetWithAI, SAMPLE_SHEET_CSV, DEFAULT_GEMINI_KEY, formatLocalizedDate } from './services/geminiCourseService';
 import StudentRegistration from './components/StudentRegistration';
 import { ALL_GLOBAL_COURSES } from './services/globalCoursesData';
 import './App.css';
+
+const IMGBB_API_KEY = import.meta.env.VITE_IMGBB_API_KEY || '';
+
+async function uploadToImgbb(file) {
+  if (!IMGBB_API_KEY) throw new Error('Image uploads are not configured (VITE_IMGBB_API_KEY missing).');
+  const formData = new FormData();
+  formData.append('image', file);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(`https://api.imgbb.com/1/upload?key=${encodeURIComponent(IMGBB_API_KEY)}`, {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data?.success || !data?.data?.url) {
+      throw new Error(data?.error?.message || `Upload failed (HTTP ${response.status})`);
+    }
+    return data.data.url;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function App() {
   const [isContactOpen, setIsContactOpen] = useState(false);
@@ -39,54 +65,46 @@ function App() {
   const [archivedCourses, setArchivedCourses] = useState([]);
   const [showArchive, setShowArchive] = useState(false);
 
-  // Synchronize courses from Cloud Firestore on mount
+  // Synchronize courses from Cloud Firestore (lms_courses + unmigrated legacy) on mount
   useEffect(() => {
-    const loadCoursesFromFirestore = async () => {
+    let cancelled = false;
+    const loadCourses = async () => {
+      if (!isDbAvailable()) return;
       try {
-        const snap = await getDocs(collection(db, "courses"));
-        if (!snap.empty) {
-          const loaded = [];
-          snap.forEach(d => {
-            const data = d.data();
-            if (!data.archived) {
-              loaded.push({ id: d.id, ...data });
-            }
-          });
-          if (loaded.length > 0) {
-            setMyCourses(loaded);
-          }
-        }
+        const { courses } = await listSiteCourses();
+        if (cancelled || !courses.length) return;
+        const active = courses.filter(c => !c.archived);
+        const archived = courses.filter(c => c.archived);
+        if (active.length > 0) setMyCourses(active);
+        setArchivedCourses(archived);
       } catch (err) {
         console.warn("Firestore sync note:", err);
       }
     };
-    loadCoursesFromFirestore();
+    loadCourses();
+    return () => { cancelled = true; };
   }, []);
 
   const handleDeleteCourse = (course) => {
-    setMyCourses(myCourses.filter(c => c.id !== course.id));
-    setArchivedCourses([{ ...course, archivedAt: Date.now() }, ...archivedCourses]);
+    setMyCourses(prev => prev.filter(c => c.id !== course.id));
+    setArchivedCourses(prev => [{ ...course, archived: true, archivedAt: Date.now() }, ...prev]);
+    setCourseArchived(course, true).catch(err => console.warn("Archive save note:", err));
   };
 
   const handleRestoreCourse = (course) => {
-    setArchivedCourses(archivedCourses.filter(c => c.id !== course.id));
-    setMyCourses([{ ...course, archivedAt: undefined }, ...myCourses]);
+    setArchivedCourses(prev => prev.filter(c => c.id !== course.id));
+    setMyCourses(prev => [{ ...course, archived: false, archivedAt: undefined }, ...prev]);
+    setCourseArchived(course, false).catch(err => console.warn("Restore save note:", err));
   };
 
+  // Receives only NEWLY added course IDs for a student; counts are incremented atomically in Firestore.
   const handleUpdateCourseEnrollments = (enrolledCourseIds) => {
     if (!enrolledCourseIds || !enrolledCourseIds.length) return;
-    setMyCourses(prev => prev.map(c => {
-      if (enrolledCourseIds.includes(c.id)) {
-        const updated = { ...c, students: (c.students || 0) + 1 };
-        try {
-          setDoc(doc(db, "courses", String(c.id)), updated, { merge: true });
-        } catch (e) {
-          console.warn("Course student update note:", e);
-        }
-        return updated;
-      }
-      return c;
-    }));
+    const ids = enrolledCourseIds.map(String);
+    setMyCourses(prev => prev.map(c =>
+      ids.includes(String(c.id)) ? { ...c, students: (Number(c.students) || 0) + 1 } : c
+    ));
+    incrementCourseEnrolments(ids, 1).catch(err => console.warn("Course student update note:", err));
   };
   const [editingCourse, setEditingCourse] = useState(null);
   const [courseModules, setCourseModules] = useState([]);
@@ -125,23 +143,12 @@ function App() {
     if (!file) return;
 
     setIsUploadingThumbnail(true);
-    const formData = new FormData();
-    formData.append('image', file);
-
     try {
-      const response = await fetch('https://api.imgbb.com/1/upload?key=6d7007353630f7eaf44016384dd9761e', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await response.json();
-      if (data.success) {
-        setEditingThumbnail(data.data.url);
-      } else {
-        alert('Upload failed: ' + data.error.message);
-      }
+      const url = await uploadToImgbb(file);
+      setEditingThumbnail(url);
     } catch (error) {
       console.error('Error uploading image:', error);
-      alert('Failed to upload thumbnail.');
+      alert('Failed to upload thumbnail: ' + error.message);
     } finally {
       setIsUploadingThumbnail(false);
     }
@@ -153,24 +160,13 @@ function App() {
 
     const uploadKey = `${id}_${fieldName}`;
     setUploadingAssessments(prev => ({ ...prev, [uploadKey]: true }));
-    
-    const formData = new FormData();
-    formData.append('image', file);
 
     try {
-      const response = await fetch('https://api.imgbb.com/1/upload?key=6d7007353630f7eaf44016384dd9761e', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await response.json();
-      if (data.success) {
-        handleUpdateAssessment(id, fieldName, data.data.url);
-      } else {
-        alert('Upload failed: ' + data.error.message);
-      }
+      const url = await uploadToImgbb(file);
+      handleUpdateAssessment(id, fieldName, url);
     } catch (error) {
       console.error('Error uploading file:', error);
-      alert('Failed to upload file.');
+      alert('Failed to upload file: ' + error.message);
     } finally {
       setUploadingAssessments(prev => ({ ...prev, [uploadKey]: false }));
     }
@@ -219,48 +215,35 @@ function App() {
     setCourseAssessments(courseAssessments.filter(a => a.id !== id));
   };
 
-  const handleSaveCourse = () => {
-    setMyCourses(myCourses.map(c => 
-      c.id === editingCourse.id 
-        ? { 
-            ...c, 
-            modules: courseModules, 
-            assessments: courseAssessments,
-            description: editingDescription, 
-            thumbnail: editingThumbnail,
-            title: editingTitle,
-            startDate: editingStartDate,
-            year: editingYear,
-            outcomes: editingOutcomes,
-            knowledge: editingKnowledge
-          } 
-        : c
-    ));
-
-    // Persist complete course document to Cloud Firestore
-    setDoc(doc(db, "courses", String(editingCourse.id)), {
+  const handleSaveCourse = async () => {
+    const courseData = {
+      modules: courseModules,
+      assessments: courseAssessments,
+      description: editingDescription,
+      thumbnail: editingThumbnail,
       title: editingTitle,
       startDate: editingStartDate,
       year: editingYear,
-      description: editingDescription,
-      thumbnail: editingThumbnail,
       outcomes: editingOutcomes,
-      knowledge: editingKnowledge,
-      modules: courseModules,
-      assessments: courseAssessments,
-      updatedAt: Date.now()
-    }, { merge: true }).catch(err => {
-      console.warn("Firestore save note:", err);
-    });
+      knowledge: editingKnowledge
+    };
+    setMyCourses(prev => prev.map(c => c.id === editingCourse.id ? { ...c, ...courseData } : c));
 
-    alert('Course saved successfully!');
+    // Persist complete course document to lms_courses (same ID as local state)
+    try {
+      await saveCourse(editingCourse.id, { ...editingCourse, ...courseData });
+      alert('Course saved successfully!');
+    } catch (err) {
+      console.warn("Firestore save note:", err);
+      alert('Course updated locally, but saving to the cloud failed. Please try again.\n\n' + (err?.message || ''));
+    }
   };
 
-  const handleCreateBlankCourse = () => {
+  const buildBlankCourse = () => {
     const todayIso = new Date().toISOString().split('T')[0];
-    const newCourse = { 
-      id: Date.now().toString(), 
-      title: 'New Course', 
+    return {
+      id: newCourseId(),
+      title: 'New Course',
       startDate: todayIso,
       students: 0,
       year: new Date().getFullYear() + ' Semester 1',
@@ -269,58 +252,38 @@ function App() {
       knowledge: '',
       modules: [],
       assessments: [],
-      createdAt: Date.now() 
+      createdAt: Date.now()
     };
-    setMyCourses([newCourse, ...myCourses]);
+  };
+
+  const openCourseInBuilder = (newCourse) => {
+    setMyCourses(prev => [newCourse, ...prev]);
     setEditingCourse(newCourse);
-    setEditingTitle('New Course');
-    setEditingStartDate(todayIso);
+    setEditingTitle(newCourse.title);
+    setEditingStartDate(newCourse.startDate);
     setEditingYear(newCourse.year);
     setEditingDescription('');
     setEditingOutcomes('');
     setEditingKnowledge('');
     setCourseModules([]);
     setCourseAssessments([]);
-    
-    addDoc(collection(db, "courses"), {
-      title: 'New Course',
-      startDate: todayIso,
-      students: 0,
-      createdAt: Date.now()
-    }).catch(error => {
-      console.error("Error adding document to Firebase: ", error);
+  };
+
+  const handleCreateBlankCourse = () => {
+    const newCourse = buildBlankCourse();
+    openCourseInBuilder(newCourse);
+    saveCourse(newCourse.id, newCourse, { isNew: true }).catch(error => {
+      console.error("Error adding course to Firebase: ", error);
     });
   };
 
   const handleUploadSheetClick = () => {
-    const todayIso = new Date().toISOString().split('T')[0];
-    const newCourse = { 
-      id: Date.now().toString(), 
-      title: 'New Course', 
-      startDate: todayIso,
-      students: 0,
-      year: new Date().getFullYear() + ' Semester 1',
-      description: '',
-      outcomes: '',
-      knowledge: '',
-      modules: [],
-      assessments: [],
-      createdAt: Date.now() 
-    };
-    setMyCourses([newCourse, ...myCourses]);
-    setEditingCourse(newCourse);
-    setEditingTitle('New Course');
-    setEditingStartDate(todayIso);
-    setEditingYear(newCourse.year);
-    setEditingDescription('');
-    setEditingOutcomes('');
-    setEditingKnowledge('');
-    setCourseModules([]);
-    setCourseAssessments([]);
-    
+    openCourseInBuilder(buildBlankCourse());
     setAiError('');
     setIsAiImportOpen(true);
   };
+
+
 
   const handleSheetFileUpload = (e) => {
     const file = e.target.files[0];
@@ -374,17 +337,22 @@ function App() {
         if (parsed.assessments?.length) setCourseAssessments(parsed.assessments);
 
         const updatedTitle = parsed.title || editingTitle || editingCourse.title;
-        setMyCourses(prev => prev.map(c => c.id === editingCourse.id ? {
-          ...c,
+        const mergedCourse = {
+          ...editingCourse,
           title: updatedTitle,
-          startDate: parsed.startDate || editingStartDate || c.startDate,
-          year: parsed.year || c.year,
-          description: parsed.description || c.description,
-          outcomes: parsed.outcomes || c.outcomes,
-          knowledge: parsed.knowledge || c.knowledge,
-          modules: parsed.modules?.length ? parsed.modules : c.modules,
-          assessments: parsed.assessments?.length ? parsed.assessments : c.assessments
-        } : c));
+          startDate: parsed.startDate || editingStartDate || editingCourse.startDate,
+          year: parsed.year || editingYear || editingCourse.year,
+          description: parsed.description || editingDescription,
+          outcomes: parsed.outcomes || editingOutcomes,
+          knowledge: parsed.knowledge || editingKnowledge,
+          thumbnail: editingThumbnail,
+          modules: parsed.modules?.length ? parsed.modules : courseModules,
+          assessments: parsed.assessments?.length ? parsed.assessments : courseAssessments
+        };
+        setMyCourses(prev => prev.map(c => c.id === editingCourse.id ? { ...c, ...mergedCourse } : c));
+
+        // Persist the full AI-generated content so it survives a reload
+        saveCourse(editingCourse.id, mergedCourse).catch(err => console.warn("AI import save note:", err));
 
         setIsAiImportOpen(false);
         setSheetText('');
@@ -392,7 +360,7 @@ function App() {
       } else {
         // Creating brand new course from My Courses
         const newCourse = {
-          id: Date.now().toString(),
+          id: newCourseId(),
           title: parsed.title || 'Untitled Course',
           startDate: parsed.startDate || new Date().toISOString().split('T')[0],
           year: parsed.year || '2026 Semester 1',
@@ -412,13 +380,8 @@ function App() {
         setIsAiImportOpen(false);
         setSheetText('');
 
-        addDoc(collection(db, "courses"), {
-          title: newCourse.title,
-          startDate: newCourse.startDate,
-          students: 0,
-          createdAt: Date.now()
-        }).catch(error => {
-          console.error("Error adding document to Firebase: ", error);
+        saveCourse(newCourse.id, newCourse, { isNew: true }).catch(error => {
+          console.error("Error adding course to Firebase: ", error);
         });
 
         alert(`Course "${newCourse.title}" created with AI!\n\n• ${newCourse.modules.length} Modules parsed\n• ${newCourse.assessments.length} Assessments parsed\n\nYou can now review and complete any missing information manually.`);
@@ -440,23 +403,12 @@ function App() {
     if (!file) return;
 
     setIsUploading(true);
-    const formData = new FormData();
-    formData.append('image', file);
-
     try {
-      const response = await fetch('https://api.imgbb.com/1/upload?key=6d7007353630f7eaf44016384dd9761e', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await response.json();
-      if (data.success) {
-        setUploadedImages(prev => [data.data.url, ...prev]);
-      } else {
-        alert('Upload failed: ' + data.error.message);
-      }
+      const url = await uploadToImgbb(file);
+      setUploadedImages(prev => [url, ...prev]);
     } catch (error) {
       console.error('Error uploading image:', error);
-      alert('Failed to upload image.');
+      alert('Failed to upload image: ' + error.message);
     } finally {
       setIsUploading(false);
     }
@@ -467,9 +419,24 @@ function App() {
   const [globalCategory, setGlobalCategory] = useState('ALL');
   const COURSES_PER_PAGE = 24;
 
-  const handleCopyCourse = (course) => {
-    if (!myCourses.find(c => c.id === course.id)) {
-      setMyCourses([...myCourses, { ...course, students: 0 }]);
+  const [copyingCourseIds, setCopyingCourseIds] = useState({});
+
+  // Copies a catalog/network course into this site, persisted with lineage (sourceCourseId).
+  const handleCopyCourse = async (course) => {
+    const key = String(course.id);
+    if (copyingCourseIds[key]) return;
+    if (myCourses.some(c => String(c.id) === key || String(c.sourceCourseId) === key)) return;
+
+    setCopyingCourseIds(prev => ({ ...prev, [key]: true }));
+    try {
+      const copied = await copyCourseToSite(course);
+      setMyCourses(prev => [...prev, copied]);
+    } catch (err) {
+      console.warn("Course copy save note:", err);
+      // Graceful degradation: keep the copy locally so the user isn't blocked.
+      setMyCourses(prev => [...prev, { ...course, id: newCourseId(), sourceCourseId: key, students: 0 }]);
+    } finally {
+      setCopyingCourseIds(prev => ({ ...prev, [key]: false }));
     }
   };
 
@@ -506,7 +473,12 @@ function App() {
   const handleContactSubmit = (e) => {
     e.preventDefault();
     if (!isMathCorrect) return;
-    
+
+    // Store the enquiry in lms_leads (fire-and-forget: the email always opens regardless)
+    if (isDbAvailable()) {
+      saveLead(contactForm).catch(err => console.warn("Lead save note:", err));
+    }
+
     const subject = encodeURIComponent(`Contact from ${contactForm.name}`);
     const body = encodeURIComponent(
       `Name: ${contactForm.name}\n` +
