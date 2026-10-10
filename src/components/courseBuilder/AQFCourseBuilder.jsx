@@ -593,30 +593,55 @@ export default function AQFCourseBuilder({
             <div>
               {/* Unit Header Card */}
               <div className="unit-editor-header">
-                <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr 100px', gap: '10px', alignItems: 'center' }}>
-                  <input
-                    type="text"
-                    className="form-input"
-                    value={currentUnit.unitCode || ''}
-                    onChange={e => handleUpdateUnit(currentUnit.id, 'unitCode', e.target.value)}
-                    placeholder="Unit Code"
-                  />
-                  <input
-                    type="text"
-                    className="form-input"
-                    style={{ fontWeight: 700, fontSize: '1.1rem' }}
-                    value={currentUnit.unitTitle || ''}
-                    onChange={e => handleUpdateUnit(currentUnit.id, 'unitTitle', e.target.value)}
-                    placeholder="Unit Title"
-                  />
-                  <input
-                    type="number"
-                    className="form-input"
-                    value={currentUnit.nominalHours || 40}
-                    onChange={e => handleUpdateUnit(currentUnit.id, 'nominalHours', Number(e.target.value) || 0)}
-                    placeholder="Hours"
-                    title="Nominal Guided Learning Hours"
-                  />
+                <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr 120px', gap: '12px', alignItems: 'flex-start' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}>
+                      Unit Code
+                    </label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      value={currentUnit.unitCode || ''}
+                      onChange={e => handleUpdateUnit(currentUnit.id, 'unitCode', e.target.value)}
+                      placeholder="e.g. BSBTEC301"
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}>
+                      Unit Title
+                    </label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      style={{ fontWeight: 700, fontSize: '1.05rem' }}
+                      value={currentUnit.unitTitle || ''}
+                      onChange={e => handleUpdateUnit(currentUnit.id, 'unitTitle', e.target.value)}
+                      placeholder="e.g. Design and produce business documents"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}
+                      title="Nominal Guided Learning Hours: the estimated study and instructional hours allocated to complete this unit."
+                    >
+                      Nominal Hours
+                    </label>
+                    <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                      <input
+                        type="number"
+                        min="1"
+                        className="form-input"
+                        style={{ paddingRight: '36px' }}
+                        value={currentUnit.nominalHours || 40}
+                        onChange={e => handleUpdateUnit(currentUnit.id, 'nominalHours', Number(e.target.value) || 0)}
+                        placeholder="40"
+                        title="Nominal Guided Learning Hours (guided instructional and study time)"
+                      />
+                      <span style={{ position: 'absolute', right: '10px', fontSize: '0.78rem', color: '#94a3b8', pointerEvents: 'none', fontWeight: 600 }}>
+                        hrs
+                      </span>
+                    </div>
+                  </div>
                 </div>
                 <textarea
                   rows="2"
