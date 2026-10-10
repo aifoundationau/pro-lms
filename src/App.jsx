@@ -10,6 +10,7 @@ import DonationModal from './components/DonationModal';
 import TeacherApplicationPostcard from './components/TeacherApplicationPostcard';
 import SuperAdminTokenPanel from './components/SuperAdminTokenPanel';
 import AQFCourseBuilder from './components/courseBuilder/AQFCourseBuilder';
+import CourseAddPeopleModal from './components/course/CourseAddPeopleModal';
 import { createBlankCourse, generateEntityId, createBlankUnit, createBlankLesson } from './types/courseBuilderTypes';
 import { createCheckoutSession } from './services/stripeService';
 import { getUserTokenBalance, creditUserTokens, donateToTokenFund } from './services/tokenService';
@@ -190,6 +191,8 @@ function App() {
 
   const [activeTab, setActiveTab] = useState('my-courses');
   const [searchQuery, setSearchQuery] = useState('');
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [managingPeopleCourse, setManagingPeopleCourse] = useState(null);
   
   const [myCourses, setMyCourses] = useState([
     { id: 1, title: 'Introduction to AI', students: 42, startDate: '2026-03-02' },
@@ -1209,20 +1212,38 @@ function App() {
         </div>
 
         <header className="glass header animate-fade-in">
-          <button className="logo-btn" onClick={() => setShowFrontPage(true)} title="Go to Front Page">
+          <button className="logo-btn" onClick={() => { setShowFrontPage(true); setIsMobileMenuOpen(false); }} title="Go to Front Page">
             <h1>OzEdu Admin</h1>
           </button>
-          <nav style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-            <button className={`nav-btn ${activeTab === 'my-courses' ? 'primary' : 'secondary'}`} onClick={() => setActiveTab('my-courses')}>My Courses</button>
+
+          {/* Android / Mobile Collapsible Hamburger Button */}
+          <button 
+            className={`mobile-menu-toggle ${isMobileMenuOpen ? 'open' : ''}`}
+            onClick={() => setIsMobileMenuOpen(prev => !prev)}
+            aria-label="Toggle navigation menu"
+            aria-expanded={isMobileMenuOpen}
+          >
+            <span className="hamburger-line"></span>
+            <span className="hamburger-line"></span>
+            <span className="hamburger-line"></span>
+          </button>
+
+          {/* Collapsible Backdrop on Mobile */}
+          {isMobileMenuOpen && (
+            <div className="mobile-nav-backdrop" onClick={() => setIsMobileMenuOpen(false)} />
+          )}
+
+          <nav className={`header-nav ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
+            <button className={`nav-btn ${activeTab === 'my-courses' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('my-courses'); setIsMobileMenuOpen(false); }}>My Courses</button>
             {privileges.isStaff && (
-              <button className={`nav-btn ${activeTab === 'students' ? 'primary' : 'secondary'}`} onClick={() => setActiveTab('students')}>Student Registration</button>
+              <button className={`nav-btn ${activeTab === 'students' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('students'); setIsMobileMenuOpen(false); }}>Student Registration</button>
             )}
-            <button className={`nav-btn ${activeTab === 'global' ? 'primary' : 'secondary'}`} onClick={() => setActiveTab('global')}>Global Search</button>
+            <button className={`nav-btn ${activeTab === 'global' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('global'); setIsMobileMenuOpen(false); }}>Global Search</button>
             
             {/* Teacher Postcard Registration Tab */}
             <button 
               className={`nav-btn ${activeTab === 'teacher-app' ? 'primary' : 'secondary'}`} 
-              onClick={() => setActiveTab('teacher-app')}
+              onClick={() => { setActiveTab('teacher-app'); setIsMobileMenuOpen(false); }}
               style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
               title="Postcard Application to join the OzEdu Faculty as a Teacher"
             >
@@ -1232,7 +1253,7 @@ function App() {
             {/* User Token Balance & Buy Button */}
             <button
               className="nav-btn secondary token-badge-btn"
-              onClick={() => setIsDonationModalOpen(true)}
+              onClick={() => { setIsDonationModalOpen(true); setIsMobileMenuOpen(false); }}
               style={{
                 borderColor: '#f59e0b', color: '#fef08a', display: 'flex', alignItems: 'center', gap: '6px',
                 background: 'rgba(245, 158, 11, 0.15)', cursor: 'pointer'
@@ -1249,7 +1270,7 @@ function App() {
             {privileges.isSuperadmin && (
               <button 
                 className="nav-btn secondary" 
-                onClick={() => setIsSuperAdminPanelOpen(true)}
+                onClick={() => { setIsSuperAdminPanelOpen(true); setIsMobileMenuOpen(false); }}
                 style={{ borderColor: '#f59e0b', color: '#fef08a', display: 'flex', alignItems: 'center', gap: '6px' }}
                 title="Super Admin: Set token value, redistribute fund, approve teachers, manage roles"
               >
@@ -1281,7 +1302,7 @@ function App() {
               </span>
             </div>
 
-            <button className="nav-btn secondary" onClick={handleLogout}>Logout</button>
+            <button className="nav-btn secondary" onClick={() => { handleLogout(); setIsMobileMenuOpen(false); }}>Logout</button>
           </nav>
         </header>
 
@@ -1341,9 +1362,27 @@ function App() {
                         🪙 {course.token_cost !== undefined ? `${course.token_cost} Tokens` : '10 Tokens'}
                       </span>
                     </div>
-                    <div style={{display: 'flex', gap: '8px', marginTop: '16px'}}>
-                      <button className="nav-btn secondary" style={{flex: 1}} onClick={() => setEditingCourse(course)}>Manage</button>
-                      <button className="nav-btn primary" style={{background: '#e11d48', border: 'none', color: 'white'}} onClick={() => handleDeleteCourse(course)}>Delete</button>
+                    <div style={{display: 'flex', gap: '8px', marginTop: '16px', flexWrap: 'wrap'}}>
+                      <button 
+                        className="nav-btn primary" 
+                        style={{
+                          flex: '1 1 100%', 
+                          background: 'linear-gradient(135deg, #059669, #10b981)', 
+                          color: '#fff',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '6px',
+                          fontSize: '0.85rem',
+                          padding: '9px 12px'
+                        }} 
+                        onClick={() => setManagingPeopleCourse(course)}
+                        title="Free Teacher Privilege: Add any students, teachers, or colleagues at 0 tokens"
+                      >
+                        👥 Add People (0 Tokens)
+                      </button>
+                      <button className="nav-btn secondary" style={{flex: 1, fontSize: '0.85rem'}} onClick={() => setEditingCourse(course)}>Manage</button>
+                      <button className="nav-btn primary" style={{background: '#e11d48', border: 'none', color: 'white', padding: '8px 14px', fontSize: '0.85rem'}} onClick={() => handleDeleteCourse(course)}>Delete</button>
                     </div>
                   </div>
                 ))}
@@ -1583,16 +1622,34 @@ function App() {
       </div>
 
       <header className="glass header animate-fade-in">
-        <button className="logo-btn" onClick={() => setShowFrontPage(true)} title="OzEdu Learning Platform">
+        <button className="logo-btn" onClick={() => { setShowFrontPage(true); setIsMobileMenuOpen(false); }} title="OzEdu Learning Platform">
           <h1>OzEdu</h1>
         </button>
-        <nav style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-          <button className="nav-btn secondary" onClick={() => setIsContactOpen(true)}>Contact</button>
+
+        {/* Android / Mobile Collapsible Hamburger Button */}
+        <button 
+          className={`mobile-menu-toggle ${isMobileMenuOpen ? 'open' : ''}`}
+          onClick={() => setIsMobileMenuOpen(prev => !prev)}
+          aria-label="Toggle navigation menu"
+          aria-expanded={isMobileMenuOpen}
+        >
+          <span className="hamburger-line"></span>
+          <span className="hamburger-line"></span>
+          <span className="hamburger-line"></span>
+        </button>
+
+        {/* Collapsible Backdrop on Mobile */}
+        {isMobileMenuOpen && (
+          <div className="mobile-nav-backdrop" onClick={() => setIsMobileMenuOpen(false)} />
+        )}
+
+        <nav className={`header-nav ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
+          <button className="nav-btn secondary" onClick={() => { setIsContactOpen(true); setIsMobileMenuOpen(false); }}>Contact</button>
           {isLoggedIn ? (
             <>
               <button 
                 className="nav-btn primary" 
-                onClick={() => setShowFrontPage(false)}
+                onClick={() => { setShowFrontPage(false); setIsMobileMenuOpen(false); }}
                 style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
                 title="Return to OzEdu Admin Dashboard"
               >
@@ -1620,7 +1677,7 @@ function App() {
                   {privileges.role}
                 </span>
               </div>
-              <button className="nav-btn secondary" onClick={handleLogout}>Logout</button>
+              <button className="nav-btn secondary" onClick={() => { handleLogout(); setIsMobileMenuOpen(false); }}>Logout</button>
             </>
           ) : (
             <button 
@@ -1798,6 +1855,16 @@ function App() {
           currentUser={authUser}
           isOpen={isDonationModalOpen}
           onClose={() => setIsDonationModalOpen(false)}
+        />
+      )}
+      {managingPeopleCourse && (
+        <CourseAddPeopleModal
+          course={managingPeopleCourse}
+          currentUser={authUser}
+          onClose={() => setManagingPeopleCourse(null)}
+          onMemberAdded={(courseId, delta = 1) => {
+            setMyCourses(prev => prev.map(c => c.id === courseId ? { ...c, students: Math.max(0, (c.students || 0) + delta) } : c));
+          }}
         />
       )}
     </div>

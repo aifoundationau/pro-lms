@@ -905,7 +905,20 @@ export default function StudentRegistration({ myCourses = [], onUpdateCourses })
                   </div>
 
                   <div className="form-group" style={{ marginTop: '16px' }}>
-                    <label>LMS Unit / Course Enrolments (Select active courses to assign student):</label>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', flexWrap: 'wrap', gap: '8px' }}>
+                      <label style={{ margin: 0 }}>LMS Unit / Course Enrolments (Select active courses to assign student):</label>
+                      <span style={{
+                        fontSize: '0.78rem',
+                        background: 'rgba(52, 211, 153, 0.15)',
+                        border: '1px solid rgba(52, 211, 153, 0.35)',
+                        color: '#86efac',
+                        padding: '3px 10px',
+                        borderRadius: '999px',
+                        fontWeight: 700
+                      }}>
+                        🎓 Teacher Privilege: 0 Tokens Required
+                      </span>
+                    </div>
                     <div className="course-enrol-checkbox-grid">
                       {myCourses.map(course => {
                         const isEnrolled = formData.enrolledCourseIds?.includes(course.id);

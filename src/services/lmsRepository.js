@@ -1,13 +1,13 @@
 // src/services/lmsRepository.js
 // Single data-access layer for the shared `lms` namespace.
 // All Firestore reads/writes for courses, students and leads go through here.
-import { db } from '../firebase';
+import { db } from '../firebase.js';
 import {
   collection, doc, getDocs, getDoc, setDoc, updateDoc, deleteDoc, query, where,
   increment, serverTimestamp, writeBatch
 } from 'firebase/firestore';
 
-export const LMS_SITE_ID = (import.meta.env.VITE_LMS_SITE_ID || 'lms').trim();
+export const LMS_SITE_ID = (import.meta?.env?.VITE_LMS_SITE_ID || (typeof process !== 'undefined' ? process.env?.VITE_LMS_SITE_ID : '') || 'lms').trim();
 
 export const LMS_COLLECTIONS = {
   courses: 'lms_courses',
@@ -18,7 +18,7 @@ export const LMS_COLLECTIONS = {
 const LEGACY_COLLECTIONS = { courses: 'courses', students: 'students' };
 
 // Keep reading legacy collections (read-only) until migration is verified.
-export const LEGACY_READ_ENABLED = import.meta.env.VITE_LMS_LEGACY_READ !== 'false';
+export const LEGACY_READ_ENABLED = (import.meta?.env?.VITE_LMS_LEGACY_READ ?? (typeof process !== 'undefined' ? process.env?.VITE_LMS_LEGACY_READ : undefined)) !== 'false';
 
 async function readLegacy(name) {
   if (!LEGACY_READ_ENABLED) return [];

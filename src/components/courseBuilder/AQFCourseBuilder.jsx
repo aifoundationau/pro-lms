@@ -25,6 +25,7 @@ import {
   AI_INGEST_COST_TOKENS
 } from '../../services/aqfAiIngestService';
 import { getUserTokenBalance } from '../../services/tokenService';
+import CourseAddPeopleModal from '../course/CourseAddPeopleModal.jsx';
 
 export default function AQFCourseBuilder({
   course,
@@ -39,6 +40,9 @@ export default function AQFCourseBuilder({
   const [currentCourse, setCurrentCourse] = useState(course);
   const [activeUnitId, setActiveUnitId] = useState(course.units?.[0]?.id || null);
   const [activeTab, setActiveTab] = useState('curriculum'); // 'curriculum' | 'assessments' | 'settings'
+
+  // Add People / Enrol Members Modal State (0 Tokens)
+  const [isAddPeopleOpen, setIsAddPeopleOpen] = useState(false);
 
   // AI Ingest Modal / Banner State
   const [isAiIngestOpen, setIsAiIngestOpen] = useState(false);
@@ -465,6 +469,15 @@ export default function AQFCourseBuilder({
             title="Auto-Fill with Gemini AI (Costs 10 Tokens • Free for Charity Teachers)"
           >
             <span>✨</span> AI Ingest (10 Tokens)
+          </button>
+
+          <button
+            className="nav-btn secondary"
+            style={{ borderColor: 'rgba(52, 211, 153, 0.5)', color: '#86efac', display: 'flex', alignItems: 'center', gap: '6px' }}
+            onClick={() => setIsAddPeopleOpen(true)}
+            title="Free Teacher Privilege: Add any students, teachers, or colleagues at 0 tokens"
+          >
+            👥 Add People (0 🪙)
           </button>
 
           <button className="nav-btn secondary" onClick={handleSave}>
@@ -1287,6 +1300,16 @@ export default function AQFCourseBuilder({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Course Add People Modal (0 Tokens) */}
+      {isAddPeopleOpen && (
+        <CourseAddPeopleModal
+          course={currentCourse}
+          currentUser={currentUser}
+          onClose={() => setIsAddPeopleOpen(false)}
+          onMemberAdded={() => {}}
+        />
       )}
 
       {/* Scoped CSS Styles for AQF Course Builder */}

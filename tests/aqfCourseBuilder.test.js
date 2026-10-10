@@ -30,6 +30,11 @@ import {
   ingestCourseSyllabusWithAI
 } from '../src/services/aqfAiIngestService.js';
 
+import {
+  addMemberToCourseFree,
+  listCourseMembers
+} from '../src/services/courseEnrollmentService.js';
+
 async function runTestSuite() {
   console.log('🧪 Starting AQF Course Builder & Marketplace Test Suite...\n');
 
@@ -129,7 +134,31 @@ Unit 2: Container Orchestration with Kubernetes`,
   assert(aiResult.course.units[0].assessments.length >= 1, 'Units must contain assessment tasks');
   console.log('✅ Test 6 Passed: 10-Token AI Ingestion correctly hydrates full AQF Course schema.');
 
-  console.log('\n🎉 ALL AQF COURSE BUILDER & CONTENT MARKETPLACE TESTS PASSED (6/6)!\n');
+  // Test 7: Teachers can add any student, teacher, or person to any course (0 Tokens Required)
+  console.log('\nTest 7: Teacher Free Member Course Enrollment (0 Tokens)');
+  const teacherEnrollment = await addMemberToCourseFree({
+    courseId: 'course_ict40120',
+    courseTitle: 'Certificate IV in Information Technology',
+    memberName: 'Samantha Reed',
+    memberEmail: 'samantha.reed@example.com',
+    memberRole: 'student',
+    addedByUid: 'teacher_sarah',
+    addedByName: 'Dr. Sarah Mitchell'
+  });
+
+  assert.strictEqual(teacherEnrollment.success, true);
+  assert.strictEqual(teacherEnrollment.tokenCost, 0, 'Teacher course enrollment must cost exactly 0 tokens');
+  assert.strictEqual(teacherEnrollment.member.isFreeTeacherGrant, true);
+  assert.strictEqual(teacherEnrollment.member.memberRole, 'student');
+
+  // Verify enrolled roster retrieval
+  const roster = await listCourseMembers('course_ict40120');
+  assert(roster.length >= 1, 'Roster must contain the enrolled member');
+  assert(roster.some(m => m.memberEmail === 'samantha.reed@example.com'));
+  console.log('✅ Test 7 Passed: Teachers can add any student, teacher, or participant with 0 tokens.');
+
+  console.log('\n🎉 ALL AQF COURSE BUILDER & CONTENT MARKETPLACE TESTS PASSED (7/7)!\n');
+  process.exit(0);
 }
 
 runTestSuite().catch(err => {
