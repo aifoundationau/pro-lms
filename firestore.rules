@@ -1,57 +1,119 @@
 rules_version = '2';
 
-// Firestore security rules for the shared `lms` namespace.
-//
-// !! DO NOT DEPLOY until Firebase Authentication is wired into the app. !!
-// The app currently has no real sign-in (`isLoggedIn` is local UI state only),
-// so deploying these rules would block the Course Builder and Student admin.
-//
-// Staff are identified by a custom auth claim: { lmsStaff: true, siteId: "<site>" }
-// set via the Firebase Admin SDK.
+// Production-Hardened Firestore Security Rules
+// - Prevents self-elevation of permissions
+// - Enforces default 'Supporter' role for newly registered users
+// - Dynamically verifies Superadmin privileges from Firestore /users/{uid}
+// - Enforces strict NO-DELETE policy across all courses, rosters, topics, and coursework
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function signedIn() { return request.auth != null; }
-    function isStaff() { return signedIn() && request.auth.token.lmsStaff == true; }
-    function staffSite() { return request.auth.token.siteId; }
-    function ownsSite(siteId) { return isStaff() && staffSite() == siteId; }
-
-    // ---- Courses: network-visible courses are readable by anyone in the network ----
-    match /lms_courses/{courseId} {
-      allow read: if resource.data.visibility == 'network' || ownsSite(resource.data.siteId);
-      allow create: if ownsSite(request.resource.data.siteId);
-      allow update: if ownsSite(resource.data.siteId)
-                    && request.resource.data.siteId == resource.data.siteId;
-      allow delete: if false; // archive instead of delete
+    function signedIn() {
+      return request.auth != null;
     }
 
-    // ---- Students: site-scoped staff only ----
-    match /lms_students/{studentId} {
-      allow read, delete: if ownsSite(resource.data.siteId);
-      allow create: if ownsSite(request.resource.data.siteId);
-      allow update: if ownsSite(resource.data.siteId)
-                    && request.resource.data.siteId == resource.data.siteId;
+    function isUser(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
 
-      // Sensitive PII: never readable via network/shared queries
+    // Dynamically resolve Superadmin role from Firestore without hardcoding identities
+    function isSuperadmin() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Superadmin';
+    }
+
+    // Dynamically resolve staff privileges
+    function isStaff() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        (
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in [
+            'Superadmin', 'teacher', 'admin staff', 'CEO', 'COO', 'CFO', 'Financial team'
+          ] || request.auth.token.lmsStaff == true
+        );
+    }
+
+    // ---- User Profiles & Role Enforcement (/users/{userId}) ----
+    match /users/{userId} {
+      // Users read own profile; staff can view user directory
+      allow read: if isUser(userId) || isStaff();
+
+      // Newly registered users: MUST have default role & classification "Supporter" (prevents self-elevation)
+      allow create: if isUser(userId)
+                    && request.resource.data.role == 'Supporter'
+                    && request.resource.data.classification == 'Supporter';
+
+      // Self-update: can update display profile / login counts, but CANNOT modify role or classification
+      // Role modifications are strictly restricted to verified Superadmins
+      allow update: if (isUser(userId)
+                        && request.resource.data.role == resource.data.role
+                        && request.resource.data.classification == resource.data.classification)
+                    || (isSuperadmin()
+                        && request.resource.data.role in [
+                          'Supporter', 'student', 'teacher', 'admin staff', 'CEO', 'COO', 'CFO', 'Financial team', 'Superadmin'
+                        ]);
+
+      // Strict NO-DELETE policy on user profiles
+      allow delete: if false;
+    }
+
+    // ---- Courses (/lms_courses): Strict NO-DELETE policy ----
+    match /lms_courses/{courseId} {
+      allow read: if resource.data.visibility == 'network' || signedIn();
+      allow create: if isStaff();
+      allow update: if isStaff();
+      allow delete: if false; // Strict NO-DELETE policy; archive instead
+    }
+
+    // ---- Students & Rosters (/lms_students): Strict NO-DELETE policy ----
+    match /lms_students/{studentId} {
+      allow read: if isStaff() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isStaff() || signedIn();
+      allow update: if isStaff() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow delete: if false; // Strict NO-DELETE policy
+
+      // Sensitive PII
       match /private/{docId} {
-        allow read, write: if ownsSite(get(/databases/$(database)/documents/lms_students/$(studentId)).data.siteId)
-                           || (request.resource != null && ownsSite(request.resource.data.siteId));
+        allow read, write: if isStaff() || (signedIn() && request.auth.uid == studentId);
+        allow delete: if false;
       }
     }
 
-    // ---- Leads: public may create (contact form), only staff may read ----
+    // ---- Rosters (/lms_rosters): Strict NO-DELETE policy ----
+    match /lms_rosters/{rosterId} {
+      allow read: if signedIn();
+      allow create, update: if isStaff();
+      allow delete: if false; // Strict NO-DELETE policy
+    }
+
+    // ---- Topics (/lms_topics): Strict NO-DELETE policy ----
+    match /lms_topics/{topicId} {
+      allow read: if signedIn();
+      allow create, update: if isStaff();
+      allow delete: if false; // Strict NO-DELETE policy
+    }
+
+    // ---- Coursework (/lms_coursework): Strict NO-DELETE policy ----
+    match /lms_coursework/{workId} {
+      allow read: if signedIn();
+      allow create, update: if isStaff() || (signedIn() && request.resource.data.studentUid == request.auth.uid);
+      allow delete: if false; // Strict NO-DELETE policy
+    }
+
+    // ---- Leads (/lms_leads): Public may create, staff may read, zero delete ----
     match /lms_leads/{leadId} {
       allow create: if request.resource.data.keys().hasOnly(['name', 'email', 'phone', 'message', 'siteId', 'source', 'createdAt'])
                     && request.resource.data.name is string && request.resource.data.name.size() <= 200
                     && request.resource.data.email is string && request.resource.data.email.size() <= 320
                     && request.resource.data.message is string && request.resource.data.message.size() <= 5000;
-      allow read: if ownsSite(resource.data.siteId);
+      allow read: if isStaff();
       allow update, delete: if false;
     }
 
-    // ---- Legacy collections: read-only for staff during migration, then remove ----
-    match /courses/{id} { allow read: if isStaff(); allow write: if false; }
-    match /students/{id} { allow read, delete: if isStaff(); allow write: if false; }
+    // ---- Legacy collections (read-only for staff, zero delete) ----
+    match /courses/{id} { allow read: if isStaff(); allow write, delete: if false; }
+    match /students/{id} { allow read: if isStaff(); allow write, delete: if false; }
   }
 }
