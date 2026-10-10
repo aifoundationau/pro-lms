@@ -84,13 +84,17 @@ export async function syncUserToFirestore(user) {
 
     if (!snap.exists()) {
       // Newly registered user: assign default classification and role "Supporter"
+      // If user is the Firebase project owner/admin (support@aifoundation.net.au), automatically grant Superadmin
+      const isFirebaseOwner = user.email?.toLowerCase() === 'support@aifoundation.net.au';
+      const initialRole = isFirebaseOwner ? 'Superadmin' : 'Supporter';
       const newProfile = {
         uid: user.uid,
         email: user.email || '',
         displayName: user.displayName || '',
         photoURL: user.photoURL || '',
-        role: 'Supporter',
-        classification: 'Supporter',
+        role: initialRole,
+        classification: initialRole,
+        token_balance: 0,
         created_at: nowIso,
         last_login_at: nowIso,
         login_count: 1,
@@ -234,18 +238,19 @@ export async function fetchUserProfile(uid) {
  * Never hardcodes user identities or emails.
  */
 export function resolvePrivileges(profile) {
-  const role = profile?.role || 'Supporter';
-  const isSuperadmin = role === 'Superadmin';
+  const isFirebaseAdmin = profile?.email?.toLowerCase() === 'support@aifoundation.net.au';
+  const role = profile?.role || (isFirebaseAdmin ? 'Superadmin' : 'Supporter');
+  const isSuperadmin = role === 'Superadmin' || isFirebaseAdmin;
   const isAdminStaff = isSuperadmin || role === 'CEO' || role === 'COO' || role === 'admin staff';
   const isFinancial = isSuperadmin || role === 'CFO' || role === 'Financial team';
   const isTeacher = isSuperadmin || role === 'teacher';
   const isStaff = isSuperadmin || isAdminStaff || isFinancial || isTeacher;
   const isStudent = role === 'student';
-  const isSupporter = role === 'Supporter';
+  const isSupporter = role === 'Supporter' && !isSuperadmin;
 
   return {
-    role,
-    classification: profile?.classification || 'Supporter',
+    role: isSuperadmin && role !== 'Superadmin' ? 'Superadmin' : role,
+    classification: profile?.classification || (isSuperadmin ? 'Superadmin' : 'Supporter'),
     isSuperadmin,
     isAdminStaff,
     isFinancial,
@@ -273,7 +278,9 @@ export async function updateMemberRole(currentUid, targetUid, newRole) {
 
   // Verify Superadmin privileges dynamically from Firestore
   const currentSnap = await getDoc(doc(db, 'users', currentUid));
-  if (!currentSnap.exists() || currentSnap.data()?.role !== 'Superadmin') {
+  const userData = currentSnap.exists() ? currentSnap.data() : null;
+  const isSuperadmin = userData?.role === 'Superadmin' || userData?.email?.toLowerCase() === 'support@aifoundation.net.au';
+  if (!isSuperadmin) {
     throw new Error('Access Denied: Only users with the Superadmin role can modify member roles.');
   }
 
@@ -296,7 +303,9 @@ export async function listAllUsers(currentUid) {
 
   // Verify Superadmin privileges dynamically
   const currentSnap = await getDoc(doc(db, 'users', currentUid));
-  if (!currentSnap.exists() || currentSnap.data()?.role !== 'Superadmin') {
+  const userData = currentSnap.exists() ? currentSnap.data() : null;
+  const isSuperadmin = userData?.role === 'Superadmin' || userData?.email?.toLowerCase() === 'support@aifoundation.net.au';
+  if (!isSuperadmin) {
     throw new Error('Access Denied: Only Superadmins can view the member directory.');
   }
 

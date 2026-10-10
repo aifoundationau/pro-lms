@@ -36,13 +36,25 @@ export default async function handler(req) {
     const payload = await req.json().catch(() => ({}));
     const {
       type = 'token_pool',
-      amount = 52, // Amount in AUD
+      amount = null,
+      tokens = null,
+      tokenPriceAud = 1.00,
       studentEmail = '',
       donorEmail = '',
-      donorName = ''
+      donorName = '',
+      targetUid = ''
     } = payload;
 
-    const validatedAmount = Math.max(1, Number(amount) || 52);
+    // People can buy any amount through Stripe, minimum is 50 tokens
+    let tokenCount = tokens !== null && tokens !== undefined ? Math.max(50, Math.floor(Number(tokens) || 50)) : null;
+    const pricePerToken = Math.max(0.01, Number(tokenPriceAud) || 1.00);
+
+    let validatedAmount;
+    if (tokenCount !== null) {
+      validatedAmount = Math.round(tokenCount * pricePerToken * 100) / 100;
+    } else {
+      validatedAmount = Math.max(1, Number(amount) || 52);
+    }
     const amountInCents = Math.round(validatedAmount * 100);
 
     // Resolve base host dynamically
@@ -51,18 +63,24 @@ export default async function handler(req) {
     const dynamicBase = `${proto}://${host}`;
 
     let productName = 'Global Token Pool Contribution';
-    let productDesc = 'Contribution to the token pool for disadvantaged students around the world.';
+    let productDesc = 'Contribution to the accumulated token fund for disadvantaged students and teachers around the world.';
 
-    if (type === 'student_sponsorship') {
+    if (type === 'token_purchase') {
+      productName = `Purchase ${tokenCount || 50} OzEdu Tokens ($${validatedAmount} AUD)`;
+      productDesc = `Add ${tokenCount || 50} tokens to user account balance at $${pricePerToken.toFixed(2)} AUD per token.`;
+    } else if (type === 'student_sponsorship') {
       productName = `Student Annual Access Sponsorship ($${validatedAmount} AUD)`;
       productDesc = studentEmail
         ? `Fully fund annual LMS and AI course access for student: ${studentEmail}`
         : 'Fully fund annual LMS and AI course access for an identified student.';
+    } else if (tokenCount !== null) {
+      productName = `Accumulated Token Fund Donation: ${tokenCount} Tokens ($${validatedAmount} AUD)`;
+      productDesc = `Donate ${tokenCount} tokens into the accumulated fund to redistribute to students and teachers with under 26 tokens.`;
     }
 
     const params = new URLSearchParams();
     params.append('mode', 'payment');
-    params.append('success_url', `${dynamicBase}/?payment=success&session_id={CHECKOUT_SESSION_ID}`);
+    params.append('success_url', `${dynamicBase}/?payment=success&session_id={CHECKOUT_SESSION_ID}&tokens=${tokenCount || ''}&type=${type}`);
     params.append('cancel_url', `${dynamicBase}/?payment=cancelled`);
     params.append('line_items[0][price_data][currency]', 'aud');
     params.append('line_items[0][price_data][unit_amount]', String(amountInCents));
@@ -72,6 +90,9 @@ export default async function handler(req) {
     params.append('metadata[tag]', 'lms');
     params.append('metadata[site_id]', 'ozedu');
     params.append('metadata[donation_type]', type);
+    if (tokenCount) params.append('metadata[tokens]', String(tokenCount));
+    params.append('metadata[token_price_aud]', String(pricePerToken));
+    if (targetUid) params.append('metadata[target_uid]', targetUid);
 
     if (studentEmail) params.append('metadata[student_email]', studentEmail);
     if (donorEmail) {

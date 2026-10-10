@@ -9,15 +9,18 @@ export const STRIPE_PUBLISHABLE_KEY =
 
 /**
  * Initiates Stripe Checkout for:
- * 1. Student Sponsorship ($52 AUD)
- * 2. Token Pool Donation (e.g. $10, $25, $52, $100 AUD)
+ * 1. Token Pool Donation or Token Purchase (minimum 50 tokens, no limits)
+ * 2. Student Sponsorship ($52 AUD)
  */
 export async function createCheckoutSession({
   type = 'token_pool',
-  amount = 52,
+  amount = null,
+  tokens = null,
+  tokenPriceAud = 1.00,
   studentEmail = '',
   donorEmail = '',
-  donorName = ''
+  donorName = '',
+  targetUid = ''
 }) {
   const response = await fetch('/api/stripe/checkout', {
     method: 'POST',
@@ -25,9 +28,12 @@ export async function createCheckoutSession({
     body: JSON.stringify({
       type,
       amount,
+      tokens,
+      tokenPriceAud,
       studentEmail: studentEmail.trim(),
       donorEmail: donorEmail.trim(),
-      donorName: donorName.trim()
+      donorName: donorName.trim(),
+      targetUid
     })
   });
 

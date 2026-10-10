@@ -7,7 +7,10 @@ import { parseCourseSheetWithAI, SAMPLE_SHEET_CSV, DEFAULT_GEMINI_KEY, formatLoc
 import StudentRegistration from './components/StudentRegistration';
 import UserRoleManagementModal from './components/UserRoleManagementModal';
 import DonationModal from './components/DonationModal';
+import TeacherApplicationPostcard from './components/TeacherApplicationPostcard';
+import SuperAdminTokenPanel from './components/SuperAdminTokenPanel';
 import { createCheckoutSession } from './services/stripeService';
+import { getUserTokenBalance, creditUserTokens, donateToTokenFund } from './services/tokenService';
 import { ALL_GLOBAL_COURSES } from './services/globalCoursesData';
 import {
   signInWithGoogle,
@@ -69,6 +72,8 @@ function App() {
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
   const [isUserRolesOpen, setIsUserRolesOpen] = useState(false);
+  const [isSuperAdminPanelOpen, setIsSuperAdminPanelOpen] = useState(false);
+  const [userTokenBalance, setUserTokenBalance] = useState(0);
 
   const privileges = resolvePrivileges(userProfile);
   const isLoggedIn = !!authUser;
@@ -83,6 +88,16 @@ function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (authUser?.uid) {
+      getUserTokenBalance(authUser.uid).then(bal => {
+        setUserTokenBalance(bal || 0);
+      }).catch(err => console.warn('Could not fetch token balance:', err));
+    } else {
+      setUserTokenBalance(0);
+    }
+  }, [authUser]);
 
   const handleSignIn = async () => {
     setAuthError('');
@@ -116,18 +131,38 @@ function App() {
   const [sponsorStudentEmail, setSponsorStudentEmail] = useState('');
   const [isDonationModalOpen, setIsDonationModalOpen] = useState(false);
   const [isFundingLoading, setIsFundingLoading] = useState(false);
-  const [paymentNotice, setPaymentNotice] = useState(() => {
+  const [paymentNotice, setPaymentNotice] = useState(null);
+
+  useEffect(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       if (params.get('payment') === 'success') {
-        return { type: 'success', message: '🎉 Thank you for your contribution! Your sponsorship payment has been processed successfully.' };
+        const tokensParam = Number(params.get('tokens')) || 50;
+        const typeParam = params.get('type') || 'token_pool';
+
+        if (typeParam === 'token_purchase' && authUser?.uid) {
+          creditUserTokens(authUser.uid, tokensParam).then(() => {
+            setUserTokenBalance(prev => prev + tokensParam);
+          });
+          setPaymentNotice({
+            type: 'success',
+            message: `🎉 Success! ${tokensParam} tokens have been added to your account balance.`
+          });
+        } else {
+          donateToTokenFund(tokensParam).then(() => {});
+          setPaymentNotice({
+            type: 'success',
+            message: `🎉 Thank you! Your donation of ${tokensParam} tokens has been added to the accumulated token fund.`
+          });
+        }
+      } else if (params.get('payment') === 'cancelled') {
+        setPaymentNotice({ type: 'info', message: 'Stripe checkout was cancelled.' });
       }
-      if (params.get('payment') === 'cancelled') {
-        return { type: 'info', message: 'Stripe checkout was cancelled.' };
+      if (params.has('payment')) {
+        window.history.replaceState({}, document.title, window.location.pathname);
       }
     }
-    return null;
-  });
+  }, [authUser]);
 
   const handleSponsorStudent = async (e) => {
     if (e) e.preventDefault();
@@ -210,6 +245,7 @@ function App() {
   const [editingYear, setEditingYear] = useState('');
   const [editingOutcomes, setEditingOutcomes] = useState('');
   const [editingKnowledge, setEditingKnowledge] = useState('');
+  const [editingTokenCost, setEditingTokenCost] = useState(10);
   const [isUploadingThumbnail, setIsUploadingThumbnail] = useState(false);
   const [uploadingAssessments, setUploadingAssessments] = useState({});
   const [expandedCards, setExpandedCards] = useState({ info: true, assessments: true, modules: true });
@@ -229,6 +265,7 @@ function App() {
       setEditingYear(editingCourse.year || '');
       setEditingOutcomes(editingCourse.outcomes || '');
       setEditingKnowledge(editingCourse.knowledge || '');
+      setEditingTokenCost(editingCourse.token_cost !== undefined ? editingCourse.token_cost : 10);
     }
   }, [editingCourse]);
 
@@ -319,7 +356,8 @@ function App() {
       startDate: editingStartDate,
       year: editingYear,
       outcomes: editingOutcomes,
-      knowledge: editingKnowledge
+      knowledge: editingKnowledge,
+      token_cost: Math.max(0, Number(editingTokenCost) || 0)
     };
     setMyCourses(prev => prev.map(c => c.id === editingCourse.id ? { ...c, ...courseData } : c));
 
@@ -340,6 +378,7 @@ function App() {
       title: 'New Course',
       startDate: todayIso,
       students: 0,
+      token_cost: 10,
       year: new Date().getFullYear() + ' Semester 1',
       description: '',
       outcomes: '',
@@ -848,6 +887,34 @@ function App() {
                     value={editingKnowledge}
                     onChange={(e) => setEditingKnowledge(e.target.value)}
                   ></textarea>
+
+                  {/* Teacher Course Token Pricing */}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: '14px', background: 'rgba(255,255,255,0.06)',
+                    padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.14)'
+                  }}>
+                    <span style={{ fontSize: '1.6rem' }}>🪙</span>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ display: 'block', fontSize: '0.88rem', fontWeight: 600, color: '#fef08a', marginBottom: '4px' }}>
+                        Course Token Pricing (Cost for Students to Enroll)
+                      </label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          placeholder="e.g. 10"
+                          className="form-input"
+                          style={{ width: '130px', fontWeight: 700, margin: 0 }}
+                          value={editingTokenCost}
+                          onChange={(e) => setEditingTokenCost(e.target.value)}
+                        />
+                        <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                          Teachers can choose how many tokens this course costs (0 = Free enrollment)
+                        </span>
+                      </div>
+                    </div>
+                  </div>
                   
                   <div style={{display: 'flex', gap: '12px', alignItems: 'center'}}>
                     <input 
@@ -1103,14 +1170,41 @@ function App() {
             )}
             <button className={`nav-btn ${activeTab === 'global' ? 'primary' : 'secondary'}`} onClick={() => setActiveTab('global')}>Global Search</button>
             
+            {/* Teacher Postcard Registration Tab */}
+            <button 
+              className={`nav-btn ${activeTab === 'teacher-app' ? 'primary' : 'secondary'}`} 
+              onClick={() => setActiveTab('teacher-app')}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+              title="Postcard Application to join the OzEdu Faculty as a Teacher"
+            >
+              📮 Join as Teacher
+            </button>
+
+            {/* User Token Balance & Buy Button */}
+            <button
+              className="nav-btn secondary token-badge-btn"
+              onClick={() => setIsDonationModalOpen(true)}
+              style={{
+                borderColor: '#f59e0b', color: '#fef08a', display: 'flex', alignItems: 'center', gap: '6px',
+                background: 'rgba(245, 158, 11, 0.15)', cursor: 'pointer'
+              }}
+              title="Click to buy tokens or contribute to the accumulated token fund (Minimum 50 tokens)"
+            >
+              <span>🪙 {userTokenBalance} Tokens</span>
+              <span style={{ fontSize: '0.72rem', background: '#d97706', color: '#fff', padding: '1px 6px', borderRadius: '6px', fontWeight: 700 }}>
+                +Buy/Donate
+              </span>
+            </button>
+
+            {/* Super Admin Control Panel */}
             {privileges.isSuperadmin && (
               <button 
                 className="nav-btn secondary" 
-                onClick={() => setIsUserRolesOpen(true)}
+                onClick={() => setIsSuperAdminPanelOpen(true)}
                 style={{ borderColor: '#f59e0b', color: '#fef08a', display: 'flex', alignItems: 'center', gap: '6px' }}
-                title="Superadmin: Manage member roles"
+                title="Super Admin: Set token value, redistribute fund, approve teachers, manage roles"
               >
-                🛡️ Manage Roles
+                🛡️ Super Admin Control
               </button>
             )}
 
@@ -1184,7 +1278,20 @@ function App() {
                         📅 Starts: {formatLocalizedDate(course.startDate)}
                       </p>
                     )}
-                    <p>Active Students: {course.students}</p>
+                    <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '4px 0 8px 0'}}>
+                      <p style={{margin: 0}}>Active Students: {course.students}</p>
+                      <span style={{
+                        background: 'rgba(245, 158, 11, 0.2)',
+                        border: '1px solid rgba(245, 158, 11, 0.45)',
+                        color: '#fef08a',
+                        fontSize: '0.82rem',
+                        fontWeight: 700,
+                        padding: '3px 9px',
+                        borderRadius: '8px'
+                      }}>
+                        🪙 {course.token_cost !== undefined ? `${course.token_cost} Tokens` : '10 Tokens'}
+                      </span>
+                    </div>
                     <div style={{display: 'flex', gap: '8px', marginTop: '16px'}}>
                       <button className="nav-btn secondary" style={{flex: 1}} onClick={() => setEditingCourse(course)}>Manage</button>
                       <button className="nav-btn primary" style={{background: '#e11d48', border: 'none', color: 'white'}} onClick={() => handleDeleteCourse(course)}>Delete</button>
@@ -1375,12 +1482,43 @@ function App() {
               </div>
             </div>
           )}
+
+          {activeTab === 'teacher-app' && (
+            <TeacherApplicationPostcard
+              currentUser={authUser}
+              onSubmitted={() => {}}
+            />
+          )}
         </main>
         {isUserRolesOpen && (
           <UserRoleManagementModal
             currentUser={authUser}
             isOpen={isUserRolesOpen}
             onClose={() => setIsUserRolesOpen(false)}
+          />
+        )}
+        {isSuperAdminPanelOpen && (
+          <SuperAdminTokenPanel
+            currentUser={authUser}
+            isOpen={isSuperAdminPanelOpen}
+            onClose={() => {
+              setIsSuperAdminPanelOpen(false);
+              if (authUser?.uid) {
+                getUserTokenBalance(authUser.uid).then(bal => setUserTokenBalance(bal || 0));
+              }
+            }}
+          />
+        )}
+        {isDonationModalOpen && (
+          <DonationModal
+            currentUser={authUser}
+            isOpen={isDonationModalOpen}
+            onClose={() => {
+              setIsDonationModalOpen(false);
+              if (authUser?.uid) {
+                getUserTokenBalance(authUser.uid).then(bal => setUserTokenBalance(bal || 0));
+              }
+            }}
           />
         )}
       </div>
@@ -1572,6 +1710,7 @@ function App() {
       {isAiImportOpen && renderAiModal()}
       {isDonationModalOpen && (
         <DonationModal
+          currentUser={authUser}
           isOpen={isDonationModalOpen}
           onClose={() => setIsDonationModalOpen(false)}
         />

@@ -221,7 +221,6 @@ export default function StudentRegistration({ myCourses = [], onUpdateCourses })
       <div className="glass student-header-card student-centered-hero">
         <div className="badge-row" style={{ justifyContent: 'center' }}>
           <span className="gold-pill">🏛️ Academic Registry</span>
-          <span className="badge-green">Live Firestore Synchronised</span>
         </div>
         <h2 style={{ fontSize: '2.2rem', margin: '8px 0 6px 0', color: 'var(--text-primary)', textAlign: 'center' }}>
           Student Enrolment & Admissions Registry

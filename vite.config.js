@@ -24,26 +24,55 @@ function devApiPlugin() {
               res.setHeader('Content-Type', 'application/json');
               return res.end(JSON.stringify({ error: 'Missing STRIPE_SECRET_KEY in .env' }));
             }
-            const { type = 'token_pool', amount = 52, studentEmail = '', donorEmail = '' } = payload;
-            const validatedAmount = Math.max(1, Number(amount) || 52);
+            const {
+              type = 'token_pool',
+              amount = null,
+              tokens = null,
+              tokenPriceAud = 1.00,
+              studentEmail = '',
+              donorEmail = '',
+              targetUid = ''
+            } = payload;
+
+            let tokenCount = tokens !== null && tokens !== undefined ? Math.max(50, Math.floor(Number(tokens) || 50)) : null;
+            const pricePerToken = Math.max(0.01, Number(tokenPriceAud) || 1.00);
+
+            let validatedAmount;
+            if (tokenCount !== null) {
+              validatedAmount = Math.round(tokenCount * pricePerToken * 100) / 100;
+            } else {
+              validatedAmount = Math.max(1, Number(amount) || 52);
+            }
             const amountInCents = Math.round(validatedAmount * 100);
+
+            let prodName = 'Global Token Pool Contribution';
+            let prodDesc = 'Contribute to our token pool for disadvantaged students around the world.';
+
+            if (type === 'token_purchase') {
+              prodName = `Purchase ${tokenCount || 50} OzEdu Tokens ($${validatedAmount} AUD)`;
+              prodDesc = `Add ${tokenCount || 50} tokens to user account balance at $${pricePerToken.toFixed(2)} AUD per token.`;
+            } else if (type === 'student_sponsorship') {
+              prodName = `Student Annual Access Sponsorship ($${validatedAmount} AUD)`;
+              prodDesc = studentEmail ? `Funded for student: ${studentEmail}` : 'Annual student LMS access';
+            } else if (tokenCount !== null) {
+              prodName = `Accumulated Token Fund Donation: ${tokenCount} Tokens ($${validatedAmount} AUD)`;
+              prodDesc = `Donate ${tokenCount} tokens into the accumulated fund to redistribute to students and teachers with under 26 tokens.`;
+            }
 
             const postData = querystring.stringify({
               mode: 'payment',
-              success_url: `http://${req.headers.host || 'localhost:5173'}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+              success_url: `http://${req.headers.host || 'localhost:5173'}/?payment=success&session_id={CHECKOUT_SESSION_ID}&tokens=${tokenCount || ''}&type=${type}`,
               cancel_url: `http://${req.headers.host || 'localhost:5173'}/?payment=cancelled`,
               'line_items[0][price_data][currency]': 'aud',
               'line_items[0][price_data][unit_amount]': String(amountInCents),
-              'line_items[0][price_data][product_data][name]': type === 'student_sponsorship'
-                ? `Student Annual Access Sponsorship ($${validatedAmount} AUD)`
-                : 'Global Token Pool Contribution',
-              'line_items[0][price_data][product_data][description]': type === 'student_sponsorship'
-                ? (studentEmail ? `Funded for student: ${studentEmail}` : 'Annual student LMS access')
-                : 'Contribute to our token pool for disadvantaged students around the world.',
+              'line_items[0][price_data][product_data][name]': prodName,
+              'line_items[0][price_data][product_data][description]': prodDesc,
               'line_items[0][quantity]': '1',
               'metadata[tag]': 'lms',
               'metadata[site_id]': 'ozedu',
               'metadata[donation_type]': type,
+              ...(tokenCount ? { 'metadata[tokens]': String(tokenCount) } : {}),
+              ...(targetUid ? { 'metadata[target_uid]': targetUid } : {}),
               ...(studentEmail ? { 'metadata[student_email]': studentEmail } : {}),
               ...(donorEmail ? { customer_email: donorEmail } : {})
             });
