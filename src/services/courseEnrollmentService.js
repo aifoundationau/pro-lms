@@ -89,7 +89,9 @@ export async function addMemberToCourseFree({
     isFreeTeacherGrant: true,
     addedByUid,
     addedByName,
-    enrolledAt: nowIso
+    enrolledAt: nowIso,
+    tag: 'lms',
+    tags: ['lms', memberRole]
   };
 
   // 1. Save to local storage cache for instant reactive display
@@ -219,4 +221,85 @@ export async function removeMemberFromCourse({ courseId, memberId, memberEmail }
   }
 
   return true;
+}
+
+/**
+ * Records completion of a course for a member/student under tag 'lms'.
+ * Updates local member cache, course_members collection, and creates an audit record.
+ */
+export async function completeMemberCourse({
+  courseId,
+  memberId,
+  memberEmail,
+  grade = 'Competent / Completed',
+  feedback = 'Course requirements completed successfully.'
+}) {
+  if (!courseId) {
+    throw new Error('courseId is required to record completion.');
+  }
+
+  const cid = String(courseId);
+  const nowIso = new Date().toISOString();
+
+  // 1. Update local storage cache
+  let updatedMember = null;
+  try {
+    const raw = safeGetStorage(STORAGE_COURSE_MEMBERS_KEY);
+    if (raw) {
+      const list = JSON.parse(raw);
+      const target = list.find(m => m.courseId === cid && (m.id === memberId || (memberEmail && m.memberEmail === memberEmail)));
+      if (target) {
+        target.status = 'completed';
+        target.grade = grade;
+        target.feedback = feedback;
+        target.completedAt = nowIso;
+        target.tag = 'lms';
+        updatedMember = target;
+        safeSetStorage(STORAGE_COURSE_MEMBERS_KEY, JSON.stringify(list));
+      }
+    }
+  } catch (err) {
+    console.warn('Local cache member completion note:', err);
+  }
+
+  // 2. Persist to Firestore
+  if (db) {
+    try {
+      if (memberId) {
+        const mRef = doc(db, 'course_members', memberId);
+        await updateDoc(mRef, {
+          status: 'completed',
+          grade,
+          feedback,
+          completedAt: nowIso,
+          tag: 'lms'
+        }).catch(() => {});
+      }
+
+      // Record in lms_course_completions
+      const compRef = doc(collection(db, 'lms_course_completions'));
+      await setDoc(compRef, {
+        courseId: cid,
+        memberId: memberId || '',
+        memberEmail: memberEmail || '',
+        grade,
+        feedback,
+        completedAt: nowIso,
+        tag: 'lms'
+      });
+    } catch (dbErr) {
+      console.warn('Firestore member completion warning:', dbErr);
+    }
+  }
+
+  return {
+    success: true,
+    courseId: cid,
+    memberId,
+    memberEmail,
+    grade,
+    completedAt: nowIso,
+    tag: 'lms',
+    member: updatedMember
+  };
 }

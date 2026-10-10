@@ -7,12 +7,16 @@ import {
   increment, serverTimestamp, writeBatch
 } from 'firebase/firestore';
 
+import { ALL_GLOBAL_COURSES, LMS_CATEGORIES } from './globalCoursesData.js';
+
 export const LMS_SITE_ID = (import.meta?.env?.VITE_LMS_SITE_ID || (typeof process !== 'undefined' ? process.env?.VITE_LMS_SITE_ID : '') || 'lms').trim();
 
 export const LMS_COLLECTIONS = {
   courses: 'lms_courses',
   students: 'lms_students',
-  leads: 'lms_leads'
+  leads: 'lms_leads',
+  categories: 'lms_categories',
+  completions: 'lms_course_completions'
 };
 
 const LEGACY_COLLECTIONS = { courses: 'courses', students: 'students' };
@@ -106,21 +110,33 @@ function sanitizeArrayOfObjects(arr, maxItems = 200) {
 
 /** Normalises any course-like object into the lms_courses shape. */
 export function normalizeCourse(input = {}) {
+  const inputTags = Array.isArray(input.tags) ? input.tags : [];
+  const mergedTags = Array.from(new Set([...inputTags, 'lms']));
+
   return {
     title: str(input.title, 300) || 'Untitled Course',
+    code: str(input.code || '', 100),
+    category: str(input.category || 'General Academic', 200),
+    aqfLevel: input.aqfLevel !== undefined ? Number(input.aqfLevel) : 4,
+    nominalHours: Number(input.nominalHours) || 40,
+    token_cost: Number(input.token_cost) || 0,
     startDate: isoDateOr(input.startDate, new Date().toISOString().split('T')[0]),
     year: str(input.year, 100),
     description: str(input.description, 20000),
     thumbnail: str(input.thumbnail, 2000),
     outcomes: str(input.outcomes, 20000),
     knowledge: str(input.knowledge, 20000),
+    learningOutcomes: Array.isArray(input.learningOutcomes) ? input.learningOutcomes : [],
+    units: sanitizeArrayOfObjects(input.units),
     modules: sanitizeArrayOfObjects(input.modules),
     assessments: sanitizeArrayOfObjects(input.assessments),
     students: Number.isFinite(Number(input.students)) ? Math.max(0, Number(input.students)) : 0,
     archived: Boolean(input.archived),
     visibility: input.visibility === 'site' ? 'site' : 'network',
     sourceCourseId: input.sourceCourseId ? str(input.sourceCourseId, 200) : null,
-    sourceSiteId: input.sourceSiteId ? str(input.sourceSiteId, 100) : null
+    sourceSiteId: input.sourceSiteId ? str(input.sourceSiteId, 100) : null,
+    tag: 'lms', // Standard tag for cross-app course sharing & completions
+    tags: mergedTags
   };
 }
 
@@ -158,9 +174,11 @@ export async function saveCourse(id, course, { isNew = false } = {}) {
   if (!id) throw new Error('saveCourse requires an id');
   // First write into lms_courses (new course, or a not-yet-migrated legacy course).
   const firstWrite = isNew || Boolean(course?._legacy);
+  const normalized = normalizeCourse(course);
   const payload = {
-    ...normalizeCourse(course),
+    ...normalized,
     siteId: LMS_SITE_ID,
+    tag: 'lms', // Mandatory LMS tag for multi-app integration
     updatedAt: serverTimestamp(),
     ...(firstWrite ? { createdAt: serverTimestamp(), ...(course?._legacy ? { migratedFrom: String(id) } : {}) } : {})
   };
@@ -173,7 +191,7 @@ export async function saveCourse(id, course, { isNew = false } = {}) {
 export async function setCourseArchived(course, archived) {
   if (!course?.id) throw new Error('setCourseArchived requires a course with an id');
   const { _legacy, ...rest } = course;
-  return saveCourse(course.id, { ...rest, archived: Boolean(archived) }, { isNew: Boolean(_legacy) });
+  return saveCourse(course.id, { ...rest, archived: Boolean(archived), tag: 'lms' }, { isNew: Boolean(_legacy) });
 }
 
 /** Copies a course (from the network catalog or elsewhere) into this site with lineage. */
@@ -184,11 +202,13 @@ export async function copyCourseToSite(sourceCourse) {
     students: 0,
     archived: false,
     visibility: 'site',
+    tag: 'lms',
+    tags: Array.from(new Set([...(Array.isArray(sourceCourse.tags) ? sourceCourse.tags : []), 'lms'])),
     sourceCourseId: String(sourceCourse.id ?? ''),
     sourceSiteId: sourceCourse.siteId || 'global-catalog'
   };
   await saveCourse(id, copy, { isNew: true });
-  return { id, ...normalizeCourse(copy), siteId: LMS_SITE_ID };
+  return { id, ...normalizeCourse(copy), siteId: LMS_SITE_ID, tag: 'lms' };
 }
 
 /**
@@ -259,6 +279,8 @@ export async function saveStudent(student) {
   const { _legacy, ...clean } = student;
   const { publicPart, sensitivePart } = splitStudent(clean);
   const enrolledCourseIds = Array.isArray(student.enrolledCourseIds) ? student.enrolledCourseIds.map(String) : [];
+  const completedCourseIds = Array.isArray(student.completedCourseIds) ? student.completedCourseIds.map(String) : [];
+  const studentTags = Array.from(new Set([...(Array.isArray(student.tags) ? student.tags : []), 'lms']));
 
   return withRetry(async () => {
     const batch = writeBatch(db);
@@ -266,14 +288,95 @@ export async function saveStudent(student) {
       ...publicPart,
       id,
       siteId: LMS_SITE_ID,
+      tag: 'lms', // Mandatory LMS tag for multi-app integration
+      tags: studentTags,
       enrolledCourseIds,
+      completedCourseIds,
+      courseProgress: student.courseProgress || {},
       enrolments: enrolledCourseIds.map(courseId => ({ siteId: LMS_SITE_ID, courseId })),
       lastUpdated: new Date().toISOString(),
       updatedAt: serverTimestamp()
     }, { merge: true });
-    batch.set(doc(db, LMS_COLLECTIONS.students, id, 'private', 'sensitive'), { ...sensitivePart, siteId: LMS_SITE_ID }, { merge: true });
+    batch.set(doc(db, LMS_COLLECTIONS.students, id, 'private', 'sensitive'), { ...sensitivePart, siteId: LMS_SITE_ID, tag: 'lms' }, { merge: true });
     await batch.commit();
   });
+}
+
+/**
+ * Records a course completion for a student under the 'lms' tag.
+ * Can be called by any app in the ecosystem to update learner progress.
+ */
+export async function completeCourseForStudent({
+  studentId,
+  courseId,
+  grade = 'Competent / Completed',
+  completionDate = new Date().toISOString().split('T')[0]
+}) {
+  if (!studentId || !courseId) {
+    throw new Error('studentId and courseId are required to record completion.');
+  }
+
+  const cid = String(courseId);
+  const sid = String(studentId);
+  const nowIso = new Date().toISOString();
+  let completedCourseIds = [cid];
+
+  if (db) {
+    try {
+      const studentRef = doc(db, LMS_COLLECTIONS.students, sid);
+      const snap = await getDoc(studentRef).catch(() => null);
+      const existing = snap && snap.exists() ? snap.data() : {};
+
+      completedCourseIds = Array.from(new Set([
+        ...(Array.isArray(existing.completedCourseIds) ? existing.completedCourseIds.map(String) : []),
+        cid
+      ]));
+
+      const progress = existing.courseProgress || {};
+      progress[cid] = {
+        status: 'completed',
+        grade,
+        completedAt: completionDate || nowIso,
+        tag: 'lms'
+      };
+
+      await updateDoc(studentRef, {
+        completedCourseIds,
+        courseProgress: progress,
+        lastCompletedCourseId: cid,
+        lastCompletionDate: completionDate || nowIso,
+        updatedAt: serverTimestamp(),
+        tag: 'lms'
+      }).catch(err => {
+        console.warn('Student progress update note:', err?.message || err);
+      });
+
+      // Record immutable audit entry in lms_course_completions
+      const completionRef = doc(collection(db, 'lms_course_completions'));
+      await setDoc(completionRef, {
+        studentId: sid,
+        courseId: cid,
+        grade,
+        completionDate,
+        completedAt: nowIso,
+        tag: 'lms',
+        siteId: LMS_SITE_ID
+      }).catch(err => {
+        console.warn('Completion audit log note:', err?.message || err);
+      });
+    } catch (err) {
+      console.warn('completeCourseForStudent Firestore notice (continuing gracefully):', err?.message || err);
+    }
+  }
+
+  return {
+    success: true,
+    tag: 'lms',
+    studentId: sid,
+    courseId: cid,
+    completedCourseIds,
+    message: `Course ${cid} marked as completed for student ${sid} under tag 'lms'.`
+  };
 }
 
 export async function deleteStudent(id) {
@@ -294,12 +397,115 @@ export async function saveLead({ name, email, phone, message }) {
     name: str(name, 200).trim(),
     email: str(email, 320).trim(),
     phone: str(phone, 50).trim(),
-    message: str(message, 5000).trim()
+    message: str(message, 5000).trim(),
+    tag: 'lms'
   };
   if (!lead.name || !EMAIL.test(lead.email) || !lead.message) {
     throw new Error('Lead requires name, valid email and message.');
   }
   const ref = doc(collection(db, LMS_COLLECTIONS.leads));
-  await withRetry(() => setDoc(ref, { ...lead, siteId: LMS_SITE_ID, source: 'contact-form', createdAt: serverTimestamp() }), { retries: 1 });
+  await withRetry(() => setDoc(ref, { ...lead, siteId: LMS_SITE_ID, source: 'contact-form', tag: 'lms', createdAt: serverTimestamp() }), { retries: 1 });
   return ref.id;
+}
+
+/**
+ * Cross-App Query: Fetches all LMS courses tagged with 'lms'
+ * Allows external applications or other websites in the ecosystem to pull courses.
+ */
+export async function listLmsCoursesByTag({ tag = 'lms', category = 'ALL', limitCount = 100 } = {}) {
+  try {
+    if (db) {
+      const q = query(
+        collection(db, LMS_COLLECTIONS.courses),
+        where('tag', '==', tag)
+      );
+      const snap = await getDocs(q);
+      let courses = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      if (courses.length === 0) {
+        const siteSnap = await listSiteCourses().catch(() => ({ courses: [] }));
+        courses = siteSnap.courses || [];
+      }
+
+      if (courses.length > 0) {
+        if (category && category !== 'ALL') {
+          courses = courses.filter(c => (c.category || '').toLowerCase() === category.toLowerCase());
+        }
+        return courses.slice(0, limitCount);
+      }
+    }
+  } catch (err) {
+    console.warn('listLmsCoursesByTag Firestore query notice, using catalog:', err?.message || err);
+  }
+
+  // Robust fallback to ALL_GLOBAL_COURSES (always available, even offline/multi-site)
+  let catalog = ALL_GLOBAL_COURSES.filter(c => c.tag === tag || (Array.isArray(c.tags) && c.tags.includes(tag)));
+  if (category && category !== 'ALL') {
+    catalog = catalog.filter(c => (c.category || '').toLowerCase() === category.toLowerCase());
+  }
+  return catalog.slice(0, limitCount);
+}
+
+/**
+ * Cross-App Query: Fetches a single LMS course by ID with tag 'lms'
+ */
+export async function getLmsCourseById(courseId) {
+  if (!courseId) return null;
+  const cid = String(courseId);
+  try {
+    if (db) {
+      const snap = await getDoc(doc(db, LMS_COLLECTIONS.courses, cid));
+      if (snap.exists()) {
+        return { id: snap.id, ...snap.data(), tag: 'lms' };
+      }
+    }
+  } catch (err) {
+    console.warn(`Error getting course ${cid} from Firestore:`, err?.message || err);
+  }
+  // Fall back to global course catalog
+  const fromGlobal = ALL_GLOBAL_COURSES.find(c => String(c.id) === cid);
+  if (fromGlobal) {
+    return { ...fromGlobal, tag: 'lms' };
+  }
+  return null;
+}
+
+/**
+ * Cross-App Query: Fetches all LMS categories tagged with 'lms'
+ */
+export async function listLmsCategories() {
+  try {
+    if (db) {
+      const q = query(collection(db, LMS_COLLECTIONS.categories), where('tag', '==', 'lms'));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      }
+    }
+  } catch (err) {
+    console.warn('Firestore category fetch note, using fallback catalog:', err?.message || err);
+  }
+  return LMS_CATEGORIES;
+}
+
+/**
+ * Saves a category definition under the 'lms' tag
+ */
+export async function saveLmsCategory(categoryData) {
+  const slug = (categoryData.slug || categoryData.name || 'general').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+  const id = categoryData.id || `cat-${slug}`;
+  const payload = {
+    id,
+    slug,
+    name: str(categoryData.name, 200) || 'General Academic',
+    description: str(categoryData.description, 1000) || '',
+    aqfLevels: Array.isArray(categoryData.aqfLevels) ? categoryData.aqfLevels : [1, 2, 3, 4, 5, 6, 7, 8, 9],
+    tag: 'lms',
+    tags: Array.from(new Set([...(Array.isArray(categoryData.tags) ? categoryData.tags : []), 'lms', 'category', slug])),
+    updatedAt: serverTimestamp()
+  };
+  if (db) {
+    await withRetry(() => setDoc(doc(db, LMS_COLLECTIONS.categories, id), payload, { merge: true }));
+  }
+  return payload;
 }

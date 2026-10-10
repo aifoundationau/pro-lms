@@ -284,10 +284,10 @@ const LEVEL_VARIANTS = [
  */
 export function generate900GlobalCourses() {
   const initialBaseCourses = [
-    { id: 101, title: 'Advanced React Patterns', author: 'Jane Doe', students: 304, category: 'Computer Science & Software Systems' },
-    { id: 102, title: 'Data Structures in Python', author: 'Alan Smith', students: 890, category: 'Computer Science & Software Systems' },
-    { id: 103, title: 'Machine Learning Basics', author: 'AI Foundation', students: 1200, category: 'Artificial Intelligence & Data Science' },
-    { id: 104, title: 'UI/UX Masterclass', author: 'Design Co.', students: 450, category: 'Design & Architecture' },
+    { id: 101, title: 'Advanced React Patterns', author: 'Jane Doe', students: 304, category: 'Computer Science & Software Systems', tag: 'lms', tags: ['lms', 'Computer Science & Software Systems'] },
+    { id: 102, title: 'Data Structures in Python', author: 'Alan Smith', students: 890, category: 'Computer Science & Software Systems', tag: 'lms', tags: ['lms', 'Computer Science & Software Systems'] },
+    { id: 103, title: 'Machine Learning Basics', author: 'AI Foundation', students: 1200, category: 'Artificial Intelligence & Data Science', tag: 'lms', tags: ['lms', 'Artificial Intelligence & Data Science'] },
+    { id: 104, title: 'UI/UX Masterclass', author: 'Design Co.', students: 450, category: 'Design & Architecture', tag: 'lms', tags: ['lms', 'Design & Architecture'] },
   ];
 
   const generated = [...initialBaseCourses];
@@ -333,7 +333,9 @@ export function generate900GlobalCourses() {
           author: author,
           students: students,
           category: group.category,
-          startDate: startDate
+          startDate: startDate,
+          tag: 'lms',
+          tags: ['lms', group.category]
         });
 
         currentId++;
@@ -345,3 +347,21 @@ export function generate900GlobalCourses() {
 }
 
 export const ALL_GLOBAL_COURSES = generate900GlobalCourses();
+
+/**
+ * Standard LMS categories tagged with 'lms' for cross-app sharing
+ */
+export const LMS_CATEGORIES = SUBJECT_TEMPLATES.map((tmpl, idx) => {
+  const slug = tmpl.category.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+  return {
+    id: `cat-${slug}`,
+    slug,
+    name: tmpl.category,
+    description: `Comprehensive academic and vocational curriculum in ${tmpl.category}.`,
+    aqfLevels: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+    tag: 'lms',
+    tags: ['lms', 'category', slug],
+    sampleAuthors: tmpl.authors.slice(0, 3),
+    courseCount: ALL_GLOBAL_COURSES.filter(c => c.category === tmpl.category).length || 78
+  };
+});

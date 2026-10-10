@@ -98,6 +98,8 @@ export async function syncUserToFirestore(user) {
         created_at: nowIso,
         last_login_at: nowIso,
         login_count: 1,
+        tag: 'lms',
+        tags: ['lms', initialRole],
         lms_tags: ['lms']
       };
       await setDoc(userRef, newProfile);
@@ -109,7 +111,8 @@ export async function syncUserToFirestore(user) {
         displayName: user.displayName || existing.displayName || '',
         photoURL: user.photoURL || existing.photoURL || '',
         last_login_at: nowIso,
-        login_count: increment(1)
+        login_count: increment(1),
+        tag: 'lms'
       };
       await updateDoc(userRef, updates);
       return {

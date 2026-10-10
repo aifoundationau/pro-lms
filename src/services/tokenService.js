@@ -30,7 +30,8 @@ export const DEFAULT_TOKEN_CONFIG = {
   pool_balance: 1560, // Starting accumulated pool in fund
   total_donated_tokens: 4200,
   total_redistributed_tokens: 2640,
-  last_updated_at: new Date().toISOString()
+  last_updated_at: new Date().toISOString(),
+  tag: 'lms'
 };
 
 /**
@@ -259,7 +260,8 @@ export async function redistributeTokensFromPool(adminUid, { tokensPerAccount = 
     recipients_count: accountsToFund.length,
     total_tokens_disbursed: totalTokensNeeded,
     created_at: nowIso,
-    allocations: allocations.map(a => ({ uid: a.uid, tokens: a.tokensToAdd }))
+    allocations: allocations.map(a => ({ uid: a.uid, tokens: a.tokensToAdd })),
+    tag: 'lms'
   });
 
   return {
@@ -306,7 +308,8 @@ export async function enrollWithTokens(studentUid, courseId, courseTitle, tokenC
     course_title: courseTitle || 'Course',
     tokens_spent: cost,
     type: 'course_enrollment',
-    created_at: nowIso
+    created_at: nowIso,
+    tag: 'lms'
   });
 
   return {

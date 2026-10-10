@@ -185,7 +185,8 @@ export function createBlankContentBlock(type = 'text_description', order = 0) {
       fileName: '',
       fileSize: 0,
       mimeType: ''
-    }
+    },
+    tag: 'lms'
   };
 }
 
@@ -198,6 +199,7 @@ export function createBlankLesson(order = 0, title = 'Lesson 1: Introduction') {
     title,
     order,
     estimatedMinutes: 45,
+    tag: 'lms',
     blocks: [
       createBlankContentBlock('text_description', 0)
     ]
@@ -216,6 +218,7 @@ export function createBlankAssessment(type = 'formative', title = 'Assessment Ta
     dueDate: '',
     nominalWeight: type === 'summative' ? 50 : 20,
     externalSubmissionLinks: [],
+    tag: 'lms',
     rubric: createDefaultRubric()
   };
 }
@@ -231,6 +234,7 @@ export function createBlankUnit(unitCode = 'UNIT-101', unitTitle = 'Unit 1: Fund
     nominalHours: 40,
     description: '',
     learningOutcomes: [],
+    tag: 'lms',
     lessons: [createBlankLesson(0, 'Lesson 1: Core Concepts')],
     assessments: [createBlankAssessment('formative', 'Knowledge Check 1')]
   };
@@ -257,7 +261,8 @@ export function createBlankCourse(authorId = 'anonymous', authorName = 'Educator
       'Analyse fundamental principles and solve discipline-specific problems.',
       'Demonstrate technical proficiency adhering to safety and quality protocols.'
     ],
-    tags: ['OzEdu', 'AQF'],
+    tag: 'lms',
+    tags: ['lms', 'OzEdu', 'AQF'],
     units: [createBlankUnit('UNIT-101', 'Unit 1: Foundation Knowledge')],
     createdAt: Date.now(),
     updatedAt: Date.now()

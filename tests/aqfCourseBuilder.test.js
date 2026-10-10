@@ -32,8 +32,15 @@ import {
 
 import {
   addMemberToCourseFree,
-  listCourseMembers
+  listCourseMembers,
+  completeMemberCourse
 } from '../src/services/courseEnrollmentService.js';
+
+import {
+  fetchLmsCategories,
+  fetchLmsCourses,
+  completeLmsCourse
+} from '../src/services/lmsCrossAppService.js';
 
 async function runTestSuite() {
   console.log('🧪 Starting AQF Course Builder & Marketplace Test Suite...\n');
@@ -157,7 +164,67 @@ Unit 2: Container Orchestration with Kubernetes`,
   assert(roster.some(m => m.memberEmail === 'samantha.reed@example.com'));
   console.log('✅ Test 7 Passed: Teachers can add any student, teacher, or participant with 0 tokens.');
 
-  console.log('\n🎉 ALL AQF COURSE BUILDER & CONTENT MARKETPLACE TESTS PASSED (7/7)!\n');
+  // Test 8: System-Wide LMS Tag ("lms") Verification
+  console.log('\nTest 8: System-Wide LMS Tag ("lms") Verification');
+  const blankCourse = createBlankCourse('author_test', 'Prof Test');
+  assert.strictEqual(blankCourse.tag, 'lms', 'Course must have tag "lms"');
+  assert(blankCourse.tags.includes('lms'), 'Course tags must contain "lms"');
+  assert.strictEqual(blankCourse.units[0].tag, 'lms', 'Unit must have tag "lms"');
+  assert.strictEqual(blankCourse.units[0].lessons[0].tag, 'lms', 'Lesson must have tag "lms"');
+  assert.strictEqual(blankCourse.units[0].lessons[0].blocks[0].tag, 'lms', 'Block must have tag "lms"');
+  assert.strictEqual(blankCourse.units[0].assessments[0].tag, 'lms', 'Assessment must have tag "lms"');
+
+  // Verify categories have tag 'lms'
+  const categories = await fetchLmsCategories();
+  assert(categories.length >= 12, 'Must have at least 12 academic categories');
+  categories.forEach(cat => {
+    assert.strictEqual(cat.tag, 'lms', `Category ${cat.name} must have tag "lms"`);
+    assert(cat.tags.includes('lms'), `Category ${cat.name} tags must contain "lms"`);
+  });
+
+  // Verify enrolled member has tag 'lms'
+  assert.strictEqual(teacherEnrollment.member.tag, 'lms', 'Enrolled member record must have tag "lms"');
+  assert(teacherEnrollment.member.tags.includes('lms'), 'Enrolled member tags must contain "lms"');
+  console.log('✅ Test 8 Passed: Every category, course, unit, lesson, block, assessment, and enrollment possesses tag "lms".');
+
+  // Test 9: Cross-App Course Query & Course Completion under "lms" Tag
+  console.log('\nTest 9: Cross-App Course Query & Course Completion under "lms" Tag');
+  const lmsCourses = await fetchLmsCourses({ category: 'Computer Science & Software Systems', limit: 5 });
+  assert(lmsCourses.length > 0, 'Cross-app query must return courses for category');
+  lmsCourses.forEach(c => {
+    assert.strictEqual(c.tag, 'lms', 'Every returned course must have tag "lms"');
+    assert(c.tags.includes('lms'), 'Every returned course tags must contain "lms"');
+  });
+
+  // Cross-app course completion
+  const completion = await completeLmsCourse({
+    studentId: 'student_cross_app_123',
+    studentEmail: 'learner@cross-site.edu',
+    studentName: 'Alex Learner',
+    courseId: '101',
+    courseTitle: 'Advanced React 19 Patterns & Concurrent Architectures',
+    grade: 'High Distinction',
+    appSource: 'https://other-edu-app.example.com'
+  });
+
+  assert.strictEqual(completion.success, true, 'Cross-app completion must succeed');
+  assert.strictEqual(completion.tag, 'lms', 'Completion record must have tag "lms"');
+  assert.strictEqual(completion.studentId, 'student_cross_app_123');
+  assert.strictEqual(completion.courseId, '101');
+  assert.strictEqual(completion.grade, 'High Distinction');
+
+  // Member course completion in enrollment service
+  const memberComp = await completeMemberCourse({
+    courseId: 'course_ict40120',
+    memberId: teacherEnrollment.member.id,
+    memberEmail: 'samantha.reed@example.com',
+    grade: 'Competent'
+  });
+  assert.strictEqual(memberComp.success, true);
+  assert.strictEqual(memberComp.tag, 'lms');
+  console.log('✅ Test 9 Passed: Cross-application course drawing and completions under tag "lms" validated successfully.');
+
+  console.log('\n🎉 ALL AQF COURSE BUILDER & CROSS-APP LMS TESTS PASSED (9/9)!\n');
   process.exit(0);
 }
 

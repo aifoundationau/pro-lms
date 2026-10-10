@@ -147,6 +147,7 @@ export async function createFreeContentRequest({
     targetEntityTitle,
     reasonMessage: reasonMessage.trim() || 'Requesting free educational access for under-resourced students.',
     status: 'pending', // 'pending' | 'approved' | 'rejected'
+    tag: 'lms',
     createdAt: Date.now()
   };
 
@@ -239,7 +240,8 @@ const SEED_MARKETPLACE_COURSES = [
     code: 'ICT40120',
     aqfLevel: 4,
     description: 'Comprehensive AQF Level 4 qualification covering client-side JavaScript, responsive layout architectures, and RESTful API endpoints.',
-    tags: ['Web Development', 'ICT40120', 'JavaScript', 'Frontend', 'AQF4'],
+    tag: 'lms',
+    tags: ['lms', 'Web Development', 'ICT40120', 'JavaScript', 'Frontend', 'AQF4'],
     token_cost: 10,
     units: [
       {
@@ -248,11 +250,13 @@ const SEED_MARKETPLACE_COURSES = [
         unitTitle: 'Produce client-side script for dynamic web pages',
         nominalHours: 50,
         description: 'Design and write client-side script that enhances web page interactivity and verifies data structures.',
+        tag: 'lms',
         lessons: [
           {
             id: 'l_js_dom',
             title: 'Lesson 1: DOM Manipulation & Event Listeners',
             order: 0,
+            tag: 'lms',
             blocks: [
               {
                 id: 'b_js_intro',
@@ -260,7 +264,8 @@ const SEED_MARKETPLACE_COURSES = [
                 order: 0,
                 title: 'Core Concepts of Modern DOM Architecture',
                 content: 'The Document Object Model (DOM) provides a structured tree representation of web documents enabling dynamic scripting.',
-                metadata: {}
+                metadata: {},
+                tag: 'lms'
               },
               {
                 id: 'b_js_tg',
@@ -268,7 +273,8 @@ const SEED_MARKETPLACE_COURSES = [
                 order: 1,
                 title: 'Pedagogy Guide & Lab Instructions',
                 content: 'Allocate 20 minutes for live coding before students attempt Exercise 1. Remind students that bubbling propagates upwards.',
-                metadata: {}
+                metadata: {},
+                tag: 'lms'
               },
               {
                 id: 'b_js_yt',
@@ -276,7 +282,8 @@ const SEED_MARKETPLACE_COURSES = [
                 order: 2,
                 title: 'Interactive DOM Event Propagation Demo',
                 content: 'https://www.youtube.com/watch?v=XF1_UKAPrsg',
-                metadata: { youtubeUrl: 'https://www.youtube.com/watch?v=XF1_UKAPrsg' }
+                metadata: { youtubeUrl: 'https://www.youtube.com/watch?v=XF1_UKAPrsg' },
+                tag: 'lms'
               }
             ]
           }
@@ -287,7 +294,8 @@ const SEED_MARKETPLACE_COURSES = [
             title: 'Project 1: Interactive Client Application',
             type: 'summative',
             description: 'Implement a fully responsive web application utilizing asynchronous data fetching and DOM mutation.',
-            rubric: []
+            rubric: [],
+            tag: 'lms'
           }
         ]
       }
@@ -301,7 +309,8 @@ const SEED_MARKETPLACE_COURSES = [
     code: 'ICT50220',
     aqfLevel: 5,
     description: 'AQF Level 5 Diploma curriculum focusing on threat modeling, vulnerability scanning, security compliance, and network defense.',
-    tags: ['Cyber Security', 'ICT50220', 'Risk Assessment', 'AQF5'],
+    tag: 'lms',
+    tags: ['lms', 'Cyber Security', 'ICT50220', 'Risk Assessment', 'AQF5'],
     token_cost: 15,
     units: [
       {
@@ -310,11 +319,13 @@ const SEED_MARKETPLACE_COURSES = [
         unitTitle: 'Evaluate and implement security practices for network management',
         nominalHours: 60,
         description: 'Conduct comprehensive security audits, identify perimeter vulnerabilities, and draft mitigation policies.',
+        tag: 'lms',
         lessons: [
           {
             id: 'l_threat_model',
             title: 'Lesson 1: STRIDE Threat Modeling Framework',
             order: 0,
+            tag: 'lms',
             blocks: [
               {
                 id: 'b_stride_overview',
@@ -322,7 +333,8 @@ const SEED_MARKETPLACE_COURSES = [
                 order: 0,
                 title: 'STRIDE Security Taxonomy Overview',
                 content: 'STRIDE assesses Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, and Elevation of Privilege.',
-                metadata: {}
+                metadata: {},
+                tag: 'lms'
               },
               {
                 id: 'b_stride_drive',
@@ -330,7 +342,8 @@ const SEED_MARKETPLACE_COURSES = [
                 order: 1,
                 title: 'STRIDE Threat Assessment Matrix Template',
                 content: 'https://drive.google.com/drive/folders/1exampleDriveFolder',
-                metadata: { driveUrl: 'https://drive.google.com/drive/folders/1exampleDriveFolder' }
+                metadata: { driveUrl: 'https://drive.google.com/drive/folders/1exampleDriveFolder' },
+                tag: 'lms'
               }
             ]
           }
@@ -341,7 +354,8 @@ const SEED_MARKETPLACE_COURSES = [
             title: 'Summative Case Study: Enterprise Perimeter Audit',
             type: 'summative',
             description: 'Evaluate a corporate network architecture diagram and compile a formal vulnerability mitigation brief.',
-            rubric: []
+            rubric: [],
+            tag: 'lms'
           }
         ]
       }
@@ -355,7 +369,8 @@ const SEED_MARKETPLACE_COURSES = [
     code: 'BSB30120',
     aqfLevel: 3,
     description: 'Foundational practical office technology, workplace spreadsheets, and collaborative team communication.',
-    tags: ['Business', 'BSB30120', 'Productivity', 'AQF3'],
+    tag: 'lms',
+    tags: ['lms', 'Business', 'BSB30120', 'Productivity', 'AQF3'],
     token_cost: 8,
     units: [
       {
@@ -364,6 +379,7 @@ const SEED_MARKETPLACE_COURSES = [
         unitTitle: 'Design and produce business documents',
         nominalHours: 35,
         description: 'Select appropriate software, apply corporate style guidelines, and verify data accuracy.',
+        tag: 'lms',
         lessons: [],
         assessments: []
       }
@@ -428,7 +444,14 @@ export async function publishCourseToMarketplace(course) {
     const raw = safeGetStorage(STORAGE_MARKETPLACE_COURSES);
     const list = raw ? JSON.parse(raw) : [];
     const filtered = list.filter(c => c.id !== course.id);
-    filtered.unshift({ ...course, isPublished: true, publishedAt: Date.now() });
+    const courseTags = Array.from(new Set([...(Array.isArray(course.tags) ? course.tags : []), 'lms']));
+    filtered.unshift({
+      ...course,
+      tag: 'lms',
+      tags: courseTags,
+      isPublished: true,
+      publishedAt: Date.now()
+    });
     safeSetStorage(STORAGE_MARKETPLACE_COURSES, JSON.stringify(filtered));
   } catch (err) {
     console.warn('Error saving to marketplace cache:', err);
