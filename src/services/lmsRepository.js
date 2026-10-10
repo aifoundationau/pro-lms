@@ -110,8 +110,17 @@ function sanitizeArrayOfObjects(arr, maxItems = 200) {
 
 /** Normalises any course-like object into the lms_courses shape. */
 export function normalizeCourse(input = {}) {
+  const isPublished = Boolean(input.isPublished || input.status === 'published');
+  const isDraft = !isPublished && (input.isDraft !== false);
+
   const inputTags = Array.isArray(input.tags) ? input.tags : [];
-  const mergedTags = Array.from(new Set([...inputTags, 'lms']));
+  let mergedTags;
+  if (isDraft) {
+    mergedTags = Array.from(new Set([...inputTags, 'lms', 'Draft']));
+  } else {
+    // When published, ensure 'Draft' is completely stripped from tags
+    mergedTags = Array.from(new Set([...inputTags.filter(t => t.toLowerCase() !== 'draft'), 'lms']));
+  }
 
   return {
     title: str(input.title, 300) || 'Untitled Course',
@@ -132,7 +141,10 @@ export function normalizeCourse(input = {}) {
     assessments: sanitizeArrayOfObjects(input.assessments),
     students: Number.isFinite(Number(input.students)) ? Math.max(0, Number(input.students)) : 0,
     archived: Boolean(input.archived),
-    visibility: input.visibility === 'site' ? 'site' : 'network',
+    isDraft,
+    isPublished,
+    status: isPublished ? 'published' : 'draft',
+    visibility: isPublished ? (input.visibility || 'network') : 'site',
     sourceCourseId: input.sourceCourseId ? str(input.sourceCourseId, 200) : null,
     sourceSiteId: input.sourceSiteId ? str(input.sourceSiteId, 100) : null,
     tag: 'lms', // Standard tag for cross-app course sharing & completions
@@ -161,11 +173,13 @@ export async function listSiteCourses() {
   });
 }
 
-/** Courses any site in the network has published for reuse. */
+/** Courses any site in the network has published for reuse (Drafts excluded). */
 export async function listNetworkCourses() {
   return withRetry(async () => {
     const snap = await getDocs(query(collection(db, LMS_COLLECTIONS.courses), where('visibility', '==', 'network')));
-    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    // Draft courses must NEVER be visible to other teachers and students
+    return all.filter(c => !c.isDraft && c.status !== 'draft' && !c.tags?.includes('Draft'));
   });
 }
 
@@ -412,7 +426,7 @@ export async function saveLead({ name, email, phone, message }) {
  * Cross-App Query: Fetches all LMS courses tagged with 'lms'
  * Allows external applications or other websites in the ecosystem to pull courses.
  */
-export async function listLmsCoursesByTag({ tag = 'lms', category = 'ALL', limitCount = 100 } = {}) {
+export async function listLmsCoursesByTag({ tag = 'lms', category = 'ALL', limitCount = 100, includeDrafts = false } = {}) {
   try {
     if (db) {
       const q = query(
@@ -425,6 +439,11 @@ export async function listLmsCoursesByTag({ tag = 'lms', category = 'ALL', limit
       if (courses.length === 0) {
         const siteSnap = await listSiteCourses().catch(() => ({ courses: [] }));
         courses = siteSnap.courses || [];
+      }
+
+      // Filter out draft courses from public queries
+      if (!includeDrafts) {
+        courses = courses.filter(c => !c.isDraft && c.status !== 'draft' && !c.tags?.includes('Draft'));
       }
 
       if (courses.length > 0) {
@@ -440,6 +459,9 @@ export async function listLmsCoursesByTag({ tag = 'lms', category = 'ALL', limit
 
   // Robust fallback to ALL_GLOBAL_COURSES (always available, even offline/multi-site)
   let catalog = ALL_GLOBAL_COURSES.filter(c => c.tag === tag || (Array.isArray(c.tags) && c.tags.includes(tag)));
+  if (!includeDrafts) {
+    catalog = catalog.filter(c => !c.isDraft && c.status !== 'draft' && !c.tags?.includes('Draft'));
+  }
   if (category && category !== 'ALL') {
     catalog = catalog.filter(c => (c.category || '').toLowerCase() === category.toLowerCase());
   }

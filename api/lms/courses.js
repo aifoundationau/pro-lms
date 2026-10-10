@@ -113,7 +113,11 @@ export default async function handler(req) {
       }
     }
 
-    let results = SAMPLE_LMS_COURSES.filter(c => c.tag === tag || (c.tags && c.tags.includes(tag)));
+    // Draft courses are private to their author and never exposed publicly
+    let results = SAMPLE_LMS_COURSES.filter(c =>
+      (c.tag === tag || (c.tags && c.tags.includes(tag))) &&
+      !c.isDraft && c.status !== 'draft' && !c.tags?.includes('Draft')
+    );
 
     if (category && category !== 'ALL') {
       results = results.filter(c => (c.category || '').toLowerCase() === category.toLowerCase());

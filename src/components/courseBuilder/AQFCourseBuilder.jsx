@@ -388,18 +388,48 @@ export default function AQFCourseBuilder({
     }
   };
 
-  // Save Course
+  // Save Course as Draft
   const handleSave = () => {
-    onSaveCourse(currentCourse);
-    setSaveNotice({ type: 'success', message: '✅ Course saved successfully to your repository.' });
-    setTimeout(() => setSaveNotice(null), 3000);
+    const draftTags = Array.from(new Set([...(Array.isArray(currentCourse.tags) ? currentCourse.tags : []), 'lms', 'Draft']));
+    const draftCourse = {
+      ...currentCourse,
+      isDraft: true,
+      isPublished: false,
+      status: 'draft',
+      visibility: 'site',
+      tag: 'lms',
+      tags: draftTags,
+      updatedAt: Date.now()
+    };
+    setCurrentCourse(draftCourse);
+    onSaveCourse(draftCourse);
+    setSaveNotice({ type: 'success', message: '📝 Course saved as Draft (Tag "Draft" added. Hidden from other teachers & students).' });
+    setTimeout(() => setSaveNotice(null), 3500);
   };
 
+  // Publish Course (Removes Draft tag & makes public)
   const handlePublish = async () => {
-    await publishCourseToMarketplace(currentCourse);
-    onSaveCourse({ ...currentCourse, isPublished: true });
-    setSaveNotice({ type: 'success', message: '🚀 Published to the OzEdu Content Exchange Marketplace!' });
-    setTimeout(() => setSaveNotice(null), 3500);
+    // Strip 'Draft' tag when publishing
+    const cleanTags = (Array.isArray(currentCourse.tags) ? currentCourse.tags : [])
+      .filter(t => t.toLowerCase() !== 'draft');
+    if (!cleanTags.includes('lms')) cleanTags.push('lms');
+
+    const publishedCourse = {
+      ...currentCourse,
+      isDraft: false,
+      isPublished: true,
+      status: 'published',
+      visibility: 'network',
+      tag: 'lms',
+      tags: cleanTags,
+      publishedAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    setCurrentCourse(publishedCourse);
+    await publishCourseToMarketplace(publishedCourse);
+    onSaveCourse(publishedCourse);
+    setSaveNotice({ type: 'success', message: '🚀 Published to the OzEdu Marketplace! Course is now public with no Draft messaging.' });
+    setTimeout(() => setSaveNotice(null), 4000);
   };
 
   const currentUnit = currentCourse.units?.find(u => u.id === activeUnitId) || currentCourse.units?.[0];
@@ -413,13 +443,22 @@ export default function AQFCourseBuilder({
             ← Back
           </button>
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
               <h2 style={{ margin: 0, fontSize: '1.4rem', color: '#fef08a' }}>
                 Course Builder: {currentCourse.title || 'Untitled Course'}
               </h2>
               <span className="aqf-badge-pill" style={{ background: '#0284c7' }}>
                 {selectedAqf.shortTitle}
               </span>
+              {currentCourse.isDraft || currentCourse.tags?.includes('Draft') ? (
+                <span className="aqf-badge-pill" style={{ background: '#d97706', color: '#fff', border: '1px dashed #fef08a' }}>
+                  📝 Draft
+                </span>
+              ) : (
+                <span className="aqf-badge-pill" style={{ background: '#059669', color: '#fff' }}>
+                  🌐 Published
+                </span>
+              )}
             </div>
             <p style={{ margin: '2px 0 0 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
               Australian Qualifications Framework (AQF Levels 1–9) • Every Category is Optional & Customizable
@@ -480,12 +519,22 @@ export default function AQFCourseBuilder({
             👥 Add People (0 🪙)
           </button>
 
-          <button className="nav-btn secondary" onClick={handleSave}>
-            Save
+          <button
+            className="nav-btn secondary"
+            onClick={handleSave}
+            style={{ borderColor: 'rgba(245, 158, 11, 0.7)', color: '#fef08a', display: 'flex', alignItems: 'center', gap: '6px' }}
+            title="Save course as Draft (Tag: Draft • Private to you)"
+          >
+            <span>📝</span> Save Draft
           </button>
 
-          <button className="nav-btn primary" onClick={handlePublish}>
-            🚀 Publish
+          <button
+            className="nav-btn primary"
+            onClick={handlePublish}
+            style={{ background: 'linear-gradient(135deg, #059669, #10b981)', border: 'none', display: 'flex', alignItems: 'center', gap: '6px' }}
+            title="Publish course (removes Draft tag and makes public to students & teachers)"
+          >
+            <span>🚀</span> Publish
           </button>
         </div>
       </header>

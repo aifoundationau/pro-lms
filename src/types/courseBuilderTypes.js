@@ -256,13 +256,16 @@ export function createBlankCourse(authorId = 'anonymous', authorName = 'Educator
     startDate: new Date().toISOString().split('T')[0],
     description: '',
     token_cost: 10,
+    isDraft: true,
     isPublished: false,
+    status: 'draft',
+    visibility: 'site',
     learningOutcomes: [
       'Analyse fundamental principles and solve discipline-specific problems.',
       'Demonstrate technical proficiency adhering to safety and quality protocols.'
     ],
     tag: 'lms',
-    tags: ['lms', 'OzEdu', 'AQF'],
+    tags: ['lms', 'Draft', 'OzEdu', 'AQF'],
     units: [createBlankUnit('UNIT-101', 'Unit 1: Foundation Knowledge')],
     createdAt: Date.now(),
     updatedAt: Date.now()

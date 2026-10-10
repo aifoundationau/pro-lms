@@ -355,6 +355,11 @@ function App() {
   };
 
   const handleSaveCourse = async () => {
+    const isPub = Boolean(editingCourse.isPublished || editingCourse.status === 'published');
+    const cleanTags = isPub
+      ? Array.from(new Set([...(Array.isArray(editingCourse.tags) ? editingCourse.tags.filter(t => t.toLowerCase() !== 'draft') : []), 'lms']))
+      : Array.from(new Set([...(Array.isArray(editingCourse.tags) ? editingCourse.tags : []), 'lms', 'Draft']));
+
     const courseData = {
       modules: courseModules,
       assessments: courseAssessments,
@@ -365,14 +370,20 @@ function App() {
       year: editingYear,
       outcomes: editingOutcomes,
       knowledge: editingKnowledge,
-      token_cost: Math.max(0, Number(editingTokenCost) || 0)
+      token_cost: Math.max(0, Number(editingTokenCost) || 0),
+      isDraft: !isPub,
+      isPublished: isPub,
+      status: isPub ? 'published' : 'draft',
+      visibility: isPub ? 'network' : 'site',
+      tag: 'lms',
+      tags: cleanTags
     };
     setMyCourses(prev => prev.map(c => c.id === editingCourse.id ? { ...c, ...courseData } : c));
 
     // Persist complete course document to lms_courses (same ID as local state)
     try {
       await saveCourse(editingCourse.id, { ...editingCourse, ...courseData });
-      alert('Course saved successfully!');
+      alert(isPub ? 'Course updated successfully!' : 'Course saved as Draft with tag "Draft"!');
     } catch (err) {
       console.warn("Firestore save note:", err);
       alert('Course updated locally, but saving to the cloud failed. Please try again.\n\n' + (err?.message || ''));
@@ -386,7 +397,13 @@ function App() {
       ...base,
       id: newCourseId(),
       startDate: todayIso,
-      students: 0
+      students: 0,
+      isDraft: true,
+      isPublished: false,
+      status: 'draft',
+      visibility: 'site',
+      tag: 'lms',
+      tags: ['lms', 'Draft', 'OzEdu', 'AQF']
     };
   };
 
@@ -1192,8 +1209,41 @@ function App() {
                   If not ready, it can be saved as a Draft for up to 28 days. If after 28 days it is not uploaded to the Global Search, it will be automatically deleted.
                 </p>
                 <div style={{display: 'flex', gap: '16px', flexWrap: 'wrap'}}>
-                  <button className="nav-btn primary" onClick={() => { handleSaveCourse(); setEditingCourse(null); alert('Course Published to Global Search!'); }} style={{flex: 1, minWidth: '200px', fontSize: '1.1rem', padding: '12px 24px'}}>Publish to Global Search</button>
-                  <button className="nav-btn secondary" onClick={() => { handleSaveCourse(); setEditingCourse(null); alert('Course Saved as Draft (28 Days)'); }} style={{flex: 1, minWidth: '200px', fontSize: '1.1rem', padding: '12px 24px'}}>Save as Draft (28 Days)</button>
+                  <button className="nav-btn primary" onClick={async () => {
+                    const cleanTags = (Array.isArray(editingCourse?.tags) ? editingCourse.tags : [])
+                      .filter(t => t.toLowerCase() !== 'draft');
+                    if (!cleanTags.includes('lms')) cleanTags.push('lms');
+                    const pub = {
+                      ...editingCourse,
+                      isDraft: false,
+                      isPublished: true,
+                      status: 'published',
+                      visibility: 'network',
+                      tag: 'lms',
+                      tags: cleanTags,
+                      publishedAt: Date.now()
+                    };
+                    setMyCourses(prev => prev.map(c => c.id === pub.id ? pub : c));
+                    await saveCourse(pub.id, pub).catch(() => {});
+                    setEditingCourse(null);
+                    alert('🚀 Course Published to Global Search! Draft tag and messaging removed.');
+                  }} style={{flex: 1, minWidth: '200px', fontSize: '1.1rem', padding: '12px 24px'}}>Publish to Global Search</button>
+                  <button className="nav-btn secondary" onClick={async () => {
+                    const draftTags = Array.from(new Set([...(Array.isArray(editingCourse?.tags) ? editingCourse.tags : []), 'lms', 'Draft']));
+                    const draft = {
+                      ...editingCourse,
+                      isDraft: true,
+                      isPublished: false,
+                      status: 'draft',
+                      visibility: 'site',
+                      tag: 'lms',
+                      tags: draftTags
+                    };
+                    setMyCourses(prev => prev.map(c => c.id === draft.id ? draft : c));
+                    await saveCourse(draft.id, draft).catch(() => {});
+                    setEditingCourse(null);
+                    alert('📝 Course Saved as Draft! Tag "Draft" added.');
+                  }} style={{flex: 1, minWidth: '200px', fontSize: '1.1rem', padding: '12px 24px'}}>Save as Draft (Tag: Draft)</button>
                 </div>
               </div>
             </div>
@@ -1339,53 +1389,103 @@ function App() {
                   </div>
                 </div>
 
-                {myCourses.map(course => (
-                  <div key={course.id} className="glass card">
-                    <div className="card-icon">📚</div>
-                    <h3>{course.title}</h3>
-                    {course.startDate && (
-                      <p style={{fontSize: '0.85rem', color: 'var(--accent-hover)', margin: '0 0 6px 0', fontWeight: '500'}}>
-                        📅 Starts: {formatLocalizedDate(course.startDate)}
-                      </p>
-                    )}
-                    <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '4px 0 8px 0'}}>
-                      <p style={{margin: 0}}>Active Students: {course.students}</p>
-                      <span style={{
-                        background: 'rgba(245, 158, 11, 0.2)',
-                        border: '1px solid rgba(245, 158, 11, 0.45)',
-                        color: '#fef08a',
-                        fontSize: '0.82rem',
-                        fontWeight: 700,
-                        padding: '3px 9px',
-                        borderRadius: '8px'
-                      }}>
-                        🪙 {course.token_cost !== undefined ? `${course.token_cost} Tokens` : '10 Tokens'}
-                      </span>
+                {myCourses.map(course => {
+                  const isDraft = Boolean(course.isDraft || course.status === 'draft' || (Array.isArray(course.tags) && course.tags.includes('Draft')));
+
+                  return (
+                    <div key={course.id} className={`glass card ${isDraft ? 'course-card-draft' : 'course-card-published'}`}>
+                      {/* Top Status Header */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                        {isDraft ? (
+                          <span className="course-status-badge draft">
+                            📝 Draft
+                          </span>
+                        ) : (
+                          <span className="course-status-badge published">
+                            🌐 Published
+                          </span>
+                        )}
+                        {course.category && (
+                          <span style={{
+                            fontSize: '0.72rem',
+                            color: isDraft ? '#fde68a' : 'var(--text-secondary)',
+                            background: isDraft ? 'rgba(245, 158, 11, 0.2)' : 'rgba(255,255,255,0.08)',
+                            padding: '2px 8px',
+                            borderRadius: '6px'
+                          }}>
+                            {course.category}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="card-icon">{isDraft ? '📝' : '📚'}</div>
+                      <h3 style={{ color: isDraft ? '#fef08a' : '#e2e8f0', margin: '0 0 8px 0' }}>{course.title}</h3>
+
+                      {isDraft && (
+                        <div style={{ marginBottom: '12px' }}>
+                          <span className="draft-pill-indicator">
+                            🔒 Private Draft • Hidden from students & other teachers
+                          </span>
+                        </div>
+                      )}
+
+                      {course.startDate && (
+                        <p style={{fontSize: '0.85rem', color: isDraft ? '#fbbf24' : 'var(--accent-hover)', margin: '0 0 6px 0', fontWeight: '500'}}>
+                          📅 Starts: {formatLocalizedDate(course.startDate)}
+                        </p>
+                      )}
+                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '4px 0 8px 0'}}>
+                        <p style={{margin: 0, fontSize: '0.88rem'}}>{isDraft ? 'Draft Status (Private)' : `Active Students: ${course.students}`}</p>
+                        <span style={{
+                          background: isDraft ? 'rgba(245, 158, 11, 0.25)' : 'rgba(245, 158, 11, 0.2)',
+                          border: isDraft ? '1px solid rgba(245, 158, 11, 0.6)' : '1px solid rgba(245, 158, 11, 0.45)',
+                          color: '#fef08a',
+                          fontSize: '0.82rem',
+                          fontWeight: 700,
+                          padding: '3px 9px',
+                          borderRadius: '8px'
+                        }}>
+                          🪙 {course.token_cost !== undefined ? `${course.token_cost} Tokens` : '10 Tokens'}
+                        </span>
+                      </div>
+                      <div style={{display: 'flex', gap: '8px', marginTop: '16px', flexWrap: 'wrap'}}>
+                        {!isDraft && (
+                          <button 
+                            className="nav-btn primary" 
+                            style={{
+                              flex: '1 1 100%', 
+                              background: 'linear-gradient(135deg, #059669, #10b981)', 
+                              color: '#fff',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: '6px',
+                              fontSize: '0.85rem',
+                              padding: '9px 12px'
+                            }} 
+                            onClick={() => setManagingPeopleCourse(course)}
+                            title="Free Teacher Privilege: Add any students, teachers, or colleagues at 0 tokens"
+                          >
+                            👥 Add People (0 Tokens)
+                          </button>
+                        )}
+                        <button 
+                          className="nav-btn secondary" 
+                          style={{
+                            flex: 1, 
+                            fontSize: '0.85rem',
+                            borderColor: isDraft ? 'rgba(245, 158, 11, 0.5)' : undefined,
+                            color: isDraft ? '#fef08a' : undefined
+                          }} 
+                          onClick={() => setEditingCourse(course)}
+                        >
+                          {isDraft ? '✏️ Edit Draft' : 'Manage'}
+                        </button>
+                        <button className="nav-btn primary" style={{background: '#e11d48', border: 'none', color: 'white', padding: '8px 14px', fontSize: '0.85rem'}} onClick={() => handleDeleteCourse(course)}>Delete</button>
+                      </div>
                     </div>
-                    <div style={{display: 'flex', gap: '8px', marginTop: '16px', flexWrap: 'wrap'}}>
-                      <button 
-                        className="nav-btn primary" 
-                        style={{
-                          flex: '1 1 100%', 
-                          background: 'linear-gradient(135deg, #059669, #10b981)', 
-                          color: '#fff',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: '6px',
-                          fontSize: '0.85rem',
-                          padding: '9px 12px'
-                        }} 
-                        onClick={() => setManagingPeopleCourse(course)}
-                        title="Free Teacher Privilege: Add any students, teachers, or colleagues at 0 tokens"
-                      >
-                        👥 Add People (0 Tokens)
-                      </button>
-                      <button className="nav-btn secondary" style={{flex: 1, fontSize: '0.85rem'}} onClick={() => setEditingCourse(course)}>Manage</button>
-                      <button className="nav-btn primary" style={{background: '#e11d48', border: 'none', color: 'white', padding: '8px 14px', fontSize: '0.85rem'}} onClick={() => handleDeleteCourse(course)}>Delete</button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div style={{marginTop: '32px', width: '100%', borderTop: '1px solid rgba(255,255,255,0.2)', paddingTop: '24px', textAlign: 'center'}}>
