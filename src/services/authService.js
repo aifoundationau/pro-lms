@@ -34,7 +34,7 @@ import {
   query,
   increment
 } from 'firebase/firestore';
-import { auth, db } from '../firebase';
+import { auth, db, getOrInitAuth } from '../firebase';
 
 export const OAUTH_CLIENT_ID =
   import.meta.env.VITE_GOOGLE_OAUTH_CLIENT_ID ||
@@ -134,12 +134,13 @@ export async function syncUserToFirestore(user) {
  * Executes Google sign-in using signInWithPopup with automatic fallback to signInWithRedirect upon error
  */
 export async function signInWithGoogle() {
-  if (!auth) {
+  const activeAuth = auth || getOrInitAuth();
+  if (!activeAuth) {
     throw new Error('Firebase Auth is not initialized. Please verify configuration.');
   }
 
   try {
-    const result = await signInWithPopup(auth, googleProvider);
+    const result = await signInWithPopup(activeAuth, googleProvider);
     if (result?.user) {
       const profile = await syncUserToFirestore(result.user);
       return { user: result.user, profile };
@@ -154,7 +155,7 @@ export async function signInWithGoogle() {
       error.code === 'auth/cancelled-popup-request' ||
       error.code === 'auth/operation-not-supported-in-this-environment'
     ) {
-      await signInWithRedirect(auth, googleProvider);
+      await signInWithRedirect(activeAuth, googleProvider);
       return { pendingRedirect: true };
     }
     throw error;
@@ -165,9 +166,10 @@ export async function signInWithGoogle() {
  * Checks for a redirect sign-in result on page mount
  */
 export async function handleAuthRedirect() {
-  if (!auth) return null;
+  const activeAuth = auth || getOrInitAuth();
+  if (!activeAuth) return null;
   try {
-    const result = await getRedirectResult(auth);
+    const result = await getRedirectResult(activeAuth);
     if (result?.user) {
       const profile = await syncUserToFirestore(result.user);
       return { user: result.user, profile };
@@ -277,9 +279,10 @@ export async function listAllUsers(currentUid) {
  * - Purges disk-based token caches from localStorage/sessionStorage
  */
 export async function logoutUser() {
-  if (auth) {
+  const activeAuth = auth || getOrInitAuth();
+  if (activeAuth) {
     try {
-      await signOut(auth);
+      await signOut(activeAuth);
     } catch (err) {
       console.warn('SignOut warning:', err);
     }
@@ -317,12 +320,13 @@ export async function logoutUser() {
  * Subscribes to auth state changes and syncs Firestore profile
  */
 export function subscribeToAuth(onAuthChanged) {
-  if (!auth) {
+  const activeAuth = auth || getOrInitAuth();
+  if (!activeAuth) {
     onAuthChanged(null, null);
     return () => {};
   }
 
-  return onAuthStateChanged(auth, async (firebaseUser) => {
+  return onAuthStateChanged(activeAuth, async (firebaseUser) => {
     if (firebaseUser) {
       try {
         let profile = await fetchUserProfile(firebaseUser.uid);

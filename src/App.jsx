@@ -6,6 +6,8 @@ import {
 import { parseCourseSheetWithAI, SAMPLE_SHEET_CSV, DEFAULT_GEMINI_KEY, formatLocalizedDate } from './services/geminiCourseService';
 import StudentRegistration from './components/StudentRegistration';
 import UserRoleManagementModal from './components/UserRoleManagementModal';
+import DonationModal from './components/DonationModal';
+import { createCheckoutSession } from './services/stripeService';
 import { ALL_GLOBAL_COURSES } from './services/globalCoursesData';
 import {
   signInWithGoogle,
@@ -109,6 +111,43 @@ function App() {
       console.error('Logout failed:', err);
     }
   };
+
+  // Stripe Donation & Student Sponsorship state
+  const [sponsorStudentEmail, setSponsorStudentEmail] = useState('');
+  const [isDonationModalOpen, setIsDonationModalOpen] = useState(false);
+  const [isFundingLoading, setIsFundingLoading] = useState(false);
+  const [paymentNotice, setPaymentNotice] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('payment') === 'success') {
+        return { type: 'success', message: '🎉 Thank you for your contribution! Your sponsorship payment has been processed successfully.' };
+      }
+      if (params.get('payment') === 'cancelled') {
+        return { type: 'info', message: 'Stripe checkout was cancelled.' };
+      }
+    }
+    return null;
+  });
+
+  const handleSponsorStudent = async (e) => {
+    if (e) e.preventDefault();
+    if (!sponsorStudentEmail.trim()) {
+      alert("Please enter the student's email address to fund their account.");
+      return;
+    }
+    setIsFundingLoading(true);
+    try {
+      await createCheckoutSession({
+        type: 'student_sponsorship',
+        amount: 52,
+        studentEmail: sponsorStudentEmail.trim()
+      });
+    } catch (err) {
+      alert(err.message || 'Failed to initialize Stripe checkout.');
+      setIsFundingLoading(false);
+    }
+  };
+
   const [activeTab, setActiveTab] = useState('my-courses');
   const [searchQuery, setSearchQuery] = useState('');
   
@@ -1384,6 +1423,18 @@ function App() {
           <button onClick={() => setAuthError('')} style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: '1.2rem' }}>×</button>
         </div>
       )}
+      {paymentNotice && (
+        <div style={{
+          background: paymentNotice.type === 'success' ? 'rgba(34, 197, 94, 0.2)' : 'rgba(148, 163, 184, 0.2)',
+          border: paymentNotice.type === 'success' ? '1px solid rgba(34, 197, 94, 0.5)' : '1px solid rgba(148, 163, 184, 0.4)',
+          color: paymentNotice.type === 'success' ? '#86efac' : '#cbd5e1',
+          padding: '12px 18px', borderRadius: '10px', margin: '12px auto', maxWidth: '800px', width: '90%',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between'
+        }} className="animate-fade-in">
+          <span>{paymentNotice.message}</span>
+          <button onClick={() => setPaymentNotice(null)} style={{ background: 'none', border: 'none', color: '#ffffff', cursor: 'pointer', fontSize: '1.2rem' }}>×</button>
+        </div>
+      )}
 
       <main className="main-content">
         <div className="hero-text animate-fade-in-up">
@@ -1409,16 +1460,25 @@ function App() {
         <div className="twin-panels animate-fade-in-up delay-5">
           <div className="glass twin-panel">
             <h3>Sponsor a Student</h3>
-            <p>Donate $12 to fully fund a specific student's access for a year.</p>
-            <div className="input-group">
-              <input type="email" placeholder="Student's Email Address" className="email-input" />
-              <button className="nav-btn primary">Fund Account ($12)</button>
-            </div>
+            <p>Donate $52 to fully fund a specific student's access for a year.</p>
+            <form onSubmit={handleSponsorStudent} className="input-group">
+              <input 
+                type="email" 
+                placeholder="Student's Email Address" 
+                className="email-input" 
+                value={sponsorStudentEmail}
+                onChange={e => setSponsorStudentEmail(e.target.value)}
+                required
+              />
+              <button type="submit" className="nav-btn primary" disabled={isFundingLoading}>
+                {isFundingLoading ? 'Connecting...' : 'Fund Account ($52)'}
+              </button>
+            </form>
           </div>
           <div className="glass twin-panel">
             <h3>Emergency Token Fund</h3>
-            <p>Contribute to the general pool. Your funds will automatically go to the next student in need.</p>
-            <button className="nav-btn primary">Donate to Token Fund</button>
+            <p>Contribute to our token pool for disadvantaged students around the world.</p>
+            <button className="nav-btn primary" onClick={() => setIsDonationModalOpen(true)}>Donate to Token Fund</button>
           </div>
         </div>
       </main>
@@ -1510,6 +1570,12 @@ function App() {
         </div>
       )}
       {isAiImportOpen && renderAiModal()}
+      {isDonationModalOpen && (
+        <DonationModal
+          isOpen={isDonationModalOpen}
+          onClose={() => setIsDonationModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
