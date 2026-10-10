@@ -147,19 +147,52 @@ export async function signInWithGoogle() {
     }
     return { user: null, profile: null };
   } catch (error) {
-    // If popup was blocked or failed, automatically fall back to signInWithRedirect
-    console.warn('signInWithPopup failed or was blocked; attempting automatic fallback to signInWithRedirect:', error);
+    // If the user closed or cancelled the popup, do not throw or force a page redirect
+    if (
+      error.code === 'auth/popup-closed-by-user' ||
+      error.code === 'auth/cancelled-popup-request'
+    ) {
+      return { user: null, profile: null, cancelled: true };
+    }
+
+    // If popup was blocked by browser, attempt automatic fallback to signInWithRedirect
     if (
       error.code === 'auth/popup-blocked' ||
-      error.code === 'auth/popup-closed-by-user' ||
-      error.code === 'auth/cancelled-popup-request' ||
       error.code === 'auth/operation-not-supported-in-this-environment'
     ) {
+      console.warn('Popup blocked or unsupported; falling back to signInWithRedirect:', error);
       await signInWithRedirect(activeAuth, googleProvider);
       return { pendingRedirect: true };
     }
+
+    // Clear actionable error when domain is not authorized in Firebase Console
+    if (error.code === 'auth/unauthorized-domain') {
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+      throw new Error(
+        `Domain "${currentHost}" is not authorized for Firebase Authentication. Please add "${currentHost}" (or "vercel.app") in Firebase Console -> Authentication -> Settings -> Authorized domains.`
+      );
+    }
+
+    if (error.code === 'auth/configuration-not-found') {
+      throw new Error(
+        'Google Sign-in provider is not enabled in Firebase Console. Please enable Google under Authentication -> Sign-in method.'
+      );
+    }
+
     throw error;
   }
+}
+
+/**
+ * Explicit redirect-based sign-in for mobile or restricted browser environments
+ */
+export async function signInWithGoogleRedirect() {
+  const activeAuth = auth || getOrInitAuth();
+  if (!activeAuth) {
+    throw new Error('Firebase Auth is not initialized. Please verify configuration.');
+  }
+  await signInWithRedirect(activeAuth, googleProvider);
+  return { pendingRedirect: true };
 }
 
 /**
