@@ -296,6 +296,28 @@ export async function updateMemberRole(currentUid, targetUid, newRole) {
 }
 
 /**
+ * Toggles Charity Teacher status for a user (granting 0-token copying). Only permitted for Superadmins.
+ */
+export async function updateUserCharityStatus(currentUid, targetUid, isCharityTeacher) {
+  if (!db) throw new Error('Firestore is unavailable.');
+  const currentSnap = await getDoc(doc(db, 'users', currentUid));
+  const userData = currentSnap.exists() ? currentSnap.data() : null;
+  const isSuperadmin = userData?.role === 'Superadmin' || userData?.email?.toLowerCase() === 'support@aifoundation.net.au';
+  if (!isSuperadmin) {
+    throw new Error('Access Denied: Only Superadmins can modify charity status.');
+  }
+
+  const targetRef = doc(db, 'users', targetUid);
+  await updateDoc(targetRef, {
+    isCharityTeacher: Boolean(isCharityTeacher),
+    charity_updated_at: new Date().toISOString(),
+    charity_updated_by: currentUid
+  });
+
+  return true;
+}
+
+/**
  * Lists all registered users. Only accessible by Superadmins.
  */
 export async function listAllUsers(currentUid) {

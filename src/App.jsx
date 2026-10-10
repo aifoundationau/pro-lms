@@ -9,6 +9,8 @@ import UserRoleManagementModal from './components/UserRoleManagementModal';
 import DonationModal from './components/DonationModal';
 import TeacherApplicationPostcard from './components/TeacherApplicationPostcard';
 import SuperAdminTokenPanel from './components/SuperAdminTokenPanel';
+import AQFCourseBuilder from './components/courseBuilder/AQFCourseBuilder';
+import { createBlankCourse, generateEntityId, createBlankUnit, createBlankLesson } from './types/courseBuilderTypes';
 import { createCheckoutSession } from './services/stripeService';
 import { getUserTokenBalance, creditUserTokens, donateToTokenFund } from './services/tokenService';
 import { ALL_GLOBAL_COURSES } from './services/globalCoursesData';
@@ -376,19 +378,12 @@ function App() {
 
   const buildBlankCourse = () => {
     const todayIso = new Date().toISOString().split('T')[0];
+    const base = createBlankCourse(authUser?.uid || 'anonymous', authUser?.displayName || 'Educator');
     return {
+      ...base,
       id: newCourseId(),
-      title: 'New Course',
       startDate: todayIso,
-      students: 0,
-      token_cost: 10,
-      year: new Date().getFullYear() + ' Semester 1',
-      description: '',
-      outcomes: '',
-      knowledge: '',
-      modules: [],
-      assessments: [],
-      createdAt: Date.now()
+      students: 0
     };
   };
 
@@ -801,6 +796,57 @@ function App() {
 
   if (isLoggedIn && !showFrontPage) {
     if (editingCourse) {
+      const normalizedCourse = {
+        ...editingCourse,
+        aqfLevel: editingCourse.aqfLevel !== undefined ? editingCourse.aqfLevel : 4,
+        units: editingCourse.units?.length ? editingCourse.units : (
+          editingCourse.modules?.length ? editingCourse.modules.map((m, mIdx) => ({
+            id: m.id || generateEntityId('unit'),
+            unitCode: m.code || `UNIT-${mIdx + 1}01`,
+            unitTitle: m.unitName || m.title || `Unit ${mIdx + 1}`,
+            nominalHours: 40,
+            description: m.description || '',
+            lessons: [createBlankLesson(0, 'Lesson 1: Core Concepts')],
+            assessments: editingCourse.assessments || []
+          })) : [createBlankUnit('UNIT-101', 'Unit 1: Foundation Knowledge')]
+        )
+      };
+
+      return (
+        <div className="app-container">
+          <div className="background-shapes">
+            <div className="shape shape-1"></div>
+            <div className="shape shape-2"></div>
+            <div className="shape shape-3"></div>
+          </div>
+          <main className="main-content animate-fade-in-up" style={{ padding: '16px 20px', maxWidth: '1400px', margin: '0 auto', width: '100%' }}>
+            <AQFCourseBuilder
+              course={normalizedCourse}
+              onSaveCourse={async (updated) => {
+                setMyCourses(prev => prev.map(c => c.id === updated.id ? updated : c));
+                setEditingCourse(updated);
+                try {
+                  await saveCourse(updated.id, updated);
+                } catch (err) {
+                  console.warn('Cloud save notice:', err);
+                }
+              }}
+              onBack={() => setEditingCourse(null)}
+              currentUser={authUser}
+              userProfile={userProfile}
+              userTokenBalance={userTokenBalance}
+              onRefreshBalance={() => {
+                if (authUser?.uid) {
+                  getUserTokenBalance(authUser.uid).then(bal => setUserTokenBalance(bal || 0));
+                }
+              }}
+            />
+          </main>
+        </div>
+      );
+    }
+
+    if (false && editingCourse) {
       return (
         <div className="app-container">
           <div className="background-shapes">

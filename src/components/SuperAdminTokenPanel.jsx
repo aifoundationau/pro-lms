@@ -10,7 +10,7 @@ import {
   approveTeacherApplication,
   rejectTeacherApplication
 } from '../services/teacherApplicationService';
-import { ALLOWED_ROLES, listAllUsers, updateMemberRole } from '../services/authService';
+import { ALLOWED_ROLES, listAllUsers, updateMemberRole, updateUserCharityStatus } from '../services/authService';
 
 export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
   const [activeTab, setActiveTab] = useState('tokens'); // 'tokens' | 'redistribute' | 'teachers' | 'roles'
@@ -135,6 +135,22 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
       setNotice({ type: 'error', message: err?.message || 'Failed to update role.' });
     } finally {
       setUpdatingUid(null);
+    }
+  };
+
+  // Handler: Toggle Charity Teacher Privileges (0-token copying)
+  const handleCharityToggle = async (targetUid, currentStatus) => {
+    setNotice({ type: '', message: '' });
+    try {
+      const nextStatus = !currentStatus;
+      await updateUserCharityStatus(currentUser.uid, targetUid, nextStatus);
+      setAllUsers(prev => prev.map(u => u.uid === targetUid ? { ...u, isCharityTeacher: nextStatus } : u));
+      setNotice({
+        type: 'success',
+        message: `${nextStatus ? '🎉 Granted Charity Pass (0 Tokens)' : 'Revoked Charity Pass'} for member.`
+      });
+    } catch (err) {
+      setNotice({ type: 'error', message: err?.message || 'Failed to update charity status.' });
     }
   };
 
@@ -499,6 +515,7 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
                         <tr>
                           <th style={{ padding: '10px 14px' }}>Member</th>
                           <th style={{ padding: '10px 14px' }}>Current Role</th>
+                          <th style={{ padding: '10px 14px' }}>Charity Pass (0 Tokens)</th>
                           <th style={{ padding: '10px 14px' }}>Token Balance</th>
                           <th style={{ padding: '10px 14px' }}>Action</th>
                         </tr>
@@ -518,6 +535,21 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
                               }}>
                                 {u.role || 'Supporter'}
                               </span>
+                            </td>
+                            <td style={{ padding: '10px 14px' }}>
+                              <button
+                                type="button"
+                                onClick={() => handleCharityToggle(u.uid, Boolean(u.isCharityTeacher))}
+                                style={{
+                                  padding: '4px 10px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer',
+                                  background: u.isCharityTeacher ? '#dcfce7' : '#f1f5f9',
+                                  color: u.isCharityTeacher ? '#166534' : '#64748b',
+                                  border: u.isCharityTeacher ? '1px solid #86efac' : '1px solid #cbd5e1'
+                                }}
+                                title="Toggle 0-token copying privileges for charity/NFP teachers"
+                              >
+                                {u.isCharityTeacher ? '🎉 Active (0 Tokens)' : 'Standard (1 Token)'}
+                              </button>
                             </td>
                             <td style={{ padding: '10px 14px', fontWeight: 600 }}>
                               {u.token_balance || 0} 🪙

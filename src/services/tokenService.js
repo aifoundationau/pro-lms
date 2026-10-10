@@ -22,7 +22,7 @@ import {
   increment,
   runTransaction
 } from 'firebase/firestore';
-import { db } from '../firebase';
+import { db } from '../firebase.js';
 
 export const DEFAULT_TOKEN_CONFIG = {
   token_price_aud: 1.00,

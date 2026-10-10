@@ -7,13 +7,13 @@ import { getAuth, browserLocalPersistence, setPersistence } from "firebase/auth"
 const configFromWindow = typeof window !== "undefined" && window.__FIREBASE_CONFIG__ ? window.__FIREBASE_CONFIG__ : null;
 
 export const firebaseConfig = {
-  apiKey: configFromWindow?.apiKey || import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyCPeAOWQj8456TeIWDIPsyxyWT7QLrC8J8",
-  authDomain: configFromWindow?.authDomain || import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "ai-foundation-firebase.firebaseapp.com",
-  projectId: configFromWindow?.projectId || import.meta.env.VITE_FIREBASE_PROJECT_ID || "ai-foundation-firebase",
-  storageBucket: configFromWindow?.storageBucket || import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "ai-foundation-firebase.firebasestorage.app",
-  messagingSenderId: configFromWindow?.messagingSenderId || import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "614773274800",
-  appId: configFromWindow?.appId || import.meta.env.VITE_FIREBASE_APP_ID || "1:614773274800:web:bcfa9d363de884cf9ea375",
-  measurementId: configFromWindow?.measurementId || import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || "G-9V4X460YRL"
+  apiKey: configFromWindow?.apiKey || import.meta?.env?.VITE_FIREBASE_API_KEY || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_API_KEY : '') || "AIzaSyCPeAOWQj8456TeIWDIPsyxyWT7QLrC8J8",
+  authDomain: configFromWindow?.authDomain || import.meta?.env?.VITE_FIREBASE_AUTH_DOMAIN || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_AUTH_DOMAIN : '') || "ai-foundation-firebase.firebaseapp.com",
+  projectId: configFromWindow?.projectId || import.meta?.env?.VITE_FIREBASE_PROJECT_ID || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_PROJECT_ID : '') || "ai-foundation-firebase",
+  storageBucket: configFromWindow?.storageBucket || import.meta?.env?.VITE_FIREBASE_STORAGE_BUCKET || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_STORAGE_BUCKET : '') || "ai-foundation-firebase.firebasestorage.app",
+  messagingSenderId: configFromWindow?.messagingSenderId || import.meta?.env?.VITE_FIREBASE_MESSAGING_SENDER_ID || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_MESSAGING_SENDER_ID : '') || "614773274800",
+  appId: configFromWindow?.appId || import.meta?.env?.VITE_FIREBASE_APP_ID || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_APP_ID : '') || "1:614773274800:web:bcfa9d363de884cf9ea375",
+  measurementId: configFromWindow?.measurementId || import.meta?.env?.VITE_FIREBASE_MEASUREMENT_ID || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_MEASUREMENT_ID : '') || "G-9V4X460YRL"
 };
 
 let app = null;
