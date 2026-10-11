@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   AQF_LEVELS,
   CONTENT_BLOCK_TYPES,
@@ -26,8 +26,82 @@ import {
 } from '../../services/aqfAiIngestService';
 import { getUserTokenBalance } from '../../services/tokenService';
 import CourseAddPeopleModal from '../course/CourseAddPeopleModal.jsx';
+import {
+  DEFAULT_AI_ASSIST_COST_TOKENS,
+  getAiAssistCostTokens
+} from '../../services/aiAssistTokenService';
+import {
+  CURRICULUM_STANDARDS,
+  sanitizeStandardIds,
+  resolveActiveStandards
+} from '../../services/curriculumStandards';
+import { SKILL_TEXTS } from '../../services/curriculumSkillTexts';
 
-export default function AQFCourseBuilder({
+const DEFAULT_RUBRIC_TIER_LABELS = ['Novice (0-49%)', 'Competent (50-74%)', 'Proficient (75-89%)', 'Advanced (90-100%)'];
+
+/** Sum of rubric criterion weights (used for the Σ 100% indicator). */
+function rubricWeightTotal(rubric) {
+  return (Array.isArray(rubric) ? rubric : []).reduce((sum, r) => sum + (Number(r?.weightPercentage) || 0), 0);
+}
+
+/** Column headers follow the tier labels of the first criterion (e.g. UK classification bands). */
+function getRubricTierLabels(rubric) {
+  const levels = Array.isArray(rubric) && Array.isArray(rubric[0]?.levels) ? rubric[0].levels : [];
+  return DEFAULT_RUBRIC_TIER_LABELS.map((fallback, idx) => {
+    const label = levels[idx]?.label;
+    return typeof label === 'string' && label.trim() ? label : fallback;
+  });
+}
+
+/**
+ * Error boundary: if the builder crashes, show a recoverable fallback instead of
+ * blanking the whole app.
+ */
+class CourseBuilderErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error('AQFCourseBuilder crashed:', error, info?.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="glass" style={{ padding: '24px', borderRadius: '16px', maxWidth: '640px', margin: '40px auto', color: 'var(--text-primary)' }}>
+          <h3 style={{ marginTop: 0, color: '#fca5a5' }}>⚠️ The Course Builder hit an unexpected error</h3>
+          <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+            Your last saved draft is safe. Unsaved edits in this session may be lost.
+          </p>
+          <pre style={{ fontSize: '0.75rem', whiteSpace: 'pre-wrap', color: '#fca5a5' }}>{String(this.state.error?.message || this.state.error)}</pre>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="nav-btn primary" onClick={() => this.setState({ error: null })}>Try Again</button>
+            {this.props.onBack && (
+              <button className="nav-btn secondary" onClick={this.props.onBack}>← Back</button>
+            )}
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function AQFCourseBuilder(props) {
+  return (
+    <CourseBuilderErrorBoundary onBack={props.onBack}>
+      <AQFCourseBuilderInner {...props} />
+    </CourseBuilderErrorBoundary>
+  );
+}
+
+function AQFCourseBuilderInner({
   course,
   onSaveCourse,
   onBack,
@@ -73,8 +147,37 @@ export default function AQFCourseBuilder({
   // Save feedback
   const [saveNotice, setSaveNotice] = useState(null);
 
+  // AI Assist fee (Super Admin configured, default 10 tokens)
+  const [aiAssistCost, setAiAssistCost] = useState(DEFAULT_AI_ASSIST_COST_TOKENS);
+
   const isCharity = isUserCharityTeacher(userProfile);
   const selectedAqf = getAqfLevelMeta(currentCourse.aqfLevel);
+  const selectedStandardIds = sanitizeStandardIds(currentCourse.curriculumStandards);
+  const standardsRouting = resolveActiveStandards(selectedStandardIds, selectedAqf.level);
+  const aiAssistRouting = resolveActiveStandards(selectedStandardIds, aiTargetLevel);
+  const displayBalance = Number(userTokenBalance) || 0;
+  const isAiAssistFree = isCharity || aiAssistCost === 0;
+
+  // Load the Super Admin configured AI Assist fee (falls back to 10 on any failure)
+  useEffect(() => {
+    let cancelled = false;
+    getAiAssistCostTokens().then(cost => {
+      if (!cancelled) setAiAssistCost(cost);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleToggleStandard = (standardId) => {
+    setCurrentCourse(prev => {
+      const current = sanitizeStandardIds(prev.curriculumStandards);
+      const next = current.includes(standardId)
+        ? current.filter(id => id !== standardId)
+        : [...current, standardId];
+      return { ...prev, curriculumStandards: sanitizeStandardIds(next), updatedAt: Date.now() };
+    });
+  };
 
   // Update top-level course fields
   const handleCourseFieldChange = (field, value) => {
@@ -269,7 +372,7 @@ export default function AQFCourseBuilder({
     }));
   };
 
-  // 10-Token AI Ingestion Execution
+  // AI Assist: full-course generation guided by the selected Curriculum Standards
   const handleRunAiIngestion = async () => {
     if (!aiSyllabusText.trim()) {
       setAiNotice({ type: 'error', message: 'Please paste syllabus text or upload a document.' });
@@ -284,10 +387,21 @@ export default function AQFCourseBuilder({
         currentUser,
         userProfile,
         syllabusText: aiSyllabusText,
-        targetAqfLevel: aiTargetLevel
+        targetAqfLevel: aiTargetLevel,
+        curriculumStandards: selectedStandardIds,
+        skillTexts: SKILL_TEXTS,
+        costTokens: aiAssistCost
       });
 
-      setCurrentCourse(res.course);
+      // Keep the existing course identity/ownership and standards selection so saves
+      // still target the course being edited.
+      setCurrentCourse(prev => ({
+        ...res.course,
+        id: prev.id ?? res.course.id,
+        authorId: prev.authorId ?? res.course.authorId,
+        authorName: prev.authorName ?? res.course.authorName,
+        curriculumStandards: sanitizeStandardIds(prev.curriculumStandards)
+      }));
       setActiveUnitId(res.course.units?.[0]?.id || null);
       setAiNotice({ type: 'success', message: res.message });
       if (onRefreshBalance) onRefreshBalance();
@@ -299,7 +413,7 @@ export default function AQFCourseBuilder({
           message: `⚠️ Insufficient tokens (${err.currentBalance}/${err.requiredTokens} tokens). Please buy tokens or request a Charity Pass.`
         });
       } else {
-        setAiNotice({ type: 'error', message: err.message || 'AI Ingestion encountered an error.' });
+        setAiNotice({ type: 'error', message: err.message || 'AI Assist encountered an error.' });
       }
     } finally {
       setIsAiLoading(false);
@@ -469,7 +583,7 @@ export default function AQFCourseBuilder({
         <div className="builder-header-right">
           {/* Token Indicator */}
           <div className="token-balance-pill" title="Your Token Balance">
-            <span>🪙 {userTokenBalance} Tokens</span>
+            <span>🪙 {displayBalance} Tokens</span>
             {isCharity && (
               <span style={{ background: '#10b981', color: '#fff', padding: '2px 6px', borderRadius: '4px', fontSize: '0.72rem', fontWeight: 800 }}>
                 Charity Pass
@@ -501,13 +615,14 @@ export default function AQFCourseBuilder({
           <button
             className="nav-btn primary"
             onClick={() => {
+              setAiTargetLevel(currentCourse.aqfLevel !== undefined ? currentCourse.aqfLevel : 4);
               setIsAiIngestOpen(true);
               setAiNotice(null);
             }}
             style={{ background: 'linear-gradient(135deg, #a855f7, #6366f1)', border: 'none', fontWeight: 700 }}
-            title="Auto-Fill with Gemini AI (Costs 10 Tokens • Free for Charity Teachers)"
+            title="AI Assist: build your complete course with AI, guided by your Curriculum Standards"
           >
-            <span>✨</span> AI Ingest (10 Tokens)
+            <span>✨</span> AI Assist
           </button>
 
           <button
@@ -601,6 +716,32 @@ export default function AQFCourseBuilder({
             <small style={{ color: 'var(--text-secondary)', display: 'block', marginTop: '4px', fontSize: '0.78rem' }}>
               {selectedAqf.competencySummary}
             </small>
+
+            {/* Curriculum Standards: the AI Assist agent follows the matching /skills/*.md rules */}
+            <label className="field-label" style={{ marginTop: '10px' }}>Curriculum Standards (AI Alignment)</label>
+            <div className="standards-chip-grid" role="group" aria-label="Curriculum standards">
+              {CURRICULUM_STANDARDS.map(std => {
+                const isSelected = selectedStandardIds.includes(std.id);
+                const isSkipped = standardsRouting.skipped.some(s => s.id === std.id);
+                return (
+                  <label
+                    key={std.id}
+                    className={`standard-chip ${isSelected ? 'selected' : ''} ${isSkipped ? 'skipped' : ''}`}
+                    title={`${std.region} — ${std.description}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => handleToggleStandard(std.id)}
+                    />
+                    <span>{std.flag} {std.label}</span>
+                  </label>
+                );
+              })}
+            </div>
+            {standardsRouting.advisories.map(msg => (
+              <small key={msg} className="standards-advisory">⚠️ {msg}</small>
+            ))}
 
             <label className="field-label" style={{ marginTop: '10px' }}>Course Description</label>
             <textarea
@@ -1010,7 +1151,12 @@ export default function AQFCourseBuilder({
                         {/* Interactive Rubric Matrix */}
                         <div className="rubric-matrix-box">
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                            <strong style={{ fontSize: '0.9rem', color: '#fef08a' }}>📊 Assessment Rubric Matrix</strong>
+                            <strong style={{ fontSize: '0.9rem', color: '#fef08a' }}>
+                              📊 Assessment Rubric Matrix
+                              <span style={{ marginLeft: '8px', fontSize: '0.75rem', fontWeight: 600, color: rubricWeightTotal(asmt.rubric) === 100 ? '#86efac' : '#fca5a5' }}>
+                                (Σ {rubricWeightTotal(asmt.rubric)}%)
+                              </span>
+                            </strong>
                             <button
                               className="nav-btn secondary"
                               style={{ fontSize: '0.78rem', padding: '4px 8px' }}
@@ -1025,10 +1171,9 @@ export default function AQFCourseBuilder({
                               <thead>
                                 <tr>
                                   <th style={{ width: '25%' }}>Criterion & Weight</th>
-                                  <th>Novice (0–49%)</th>
-                                  <th>Competent (50–74%)</th>
-                                  <th>Proficient (75–89%)</th>
-                                  <th>Advanced (90–100%)</th>
+                                  {getRubricTierLabels(asmt.rubric).map((label, tIdx) => (
+                                    <th key={tIdx}>{label}</th>
+                                  ))}
                                 </tr>
                               </thead>
                               <tbody>
@@ -1050,7 +1195,7 @@ export default function AQFCourseBuilder({
                                           type="number"
                                           className="form-input"
                                           style={{ width: '65px', padding: '4px' }}
-                                          value={crit.weightPercentage || 25}
+                                          value={crit.weightPercentage ?? 25}
                                           onChange={e => {
                                             const nextRubric = asmt.rubric.map(r => r.id === crit.id ? { ...r, weightPercentage: Number(e.target.value) || 0 } : r);
                                             handleUpdateAssessment(currentUnit.id, asmt.id, { rubric: nextRubric });
@@ -1098,22 +1243,34 @@ export default function AQFCourseBuilder({
         <div className="builder-modal-overlay" onClick={() => setIsAiIngestOpen(false)}>
           <div className="builder-modal-dialog glass" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h3 style={{ margin: 0, color: '#fef08a' }}>✨ Auto-Fill Course with Gemini AI</h3>
+              <h3 style={{ margin: 0, color: '#fef08a' }}>✨ AI Assist: Build Your Complete Course</h3>
               <button className="close-btn" onClick={() => setIsAiIngestOpen(false)}>✕</button>
             </div>
 
             <div className="ai-token-cost-badge">
-              <span>🪙 Cost: <strong>10 Tokens</strong></span>
+              <span>🪙 Cost: <strong>{isAiAssistFree ? '0 Tokens' : `${aiAssistCost} Tokens`}</strong></span>
               {isCharity ? (
                 <span className="charity-badge">🎉 Free for Charity Teachers</span>
               ) : (
-                <span>(Your balance: {userTokenBalance} tokens)</span>
+                <span>(Your balance: {displayBalance} tokens)</span>
               )}
             </div>
 
             <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', margin: '8px 0 14px 0' }}>
               Paste your raw course outline, syllabus file, or lesson notes below. Gemini will automatically structure units, lessons, modular content blocks, assessment tasks, and rubrics mapped to your target AQF level.
             </p>
+
+            <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: '10px' }}>
+              Curriculum Standards:{' '}
+              <strong style={{ color: '#86efac' }}>
+                {selectedStandardIds.length === 0
+                  ? 'None selected (choose them in the sidebar)'
+                  : CURRICULUM_STANDARDS.filter(s => selectedStandardIds.includes(s.id)).map(s => s.label).join(', ')}
+              </strong>
+              {aiAssistRouting.advisories.map(msg => (
+                <small key={msg} className="standards-advisory">⚠️ {msg}</small>
+              ))}
+            </div>
 
             <label className="field-label">Target AQF Level</label>
             <select
@@ -1153,7 +1310,9 @@ export default function AQFCourseBuilder({
                 disabled={isAiLoading || !aiSyllabusText.trim()}
                 style={{ background: 'linear-gradient(135deg, #a855f7, #6366f1)', border: 'none', fontWeight: 700 }}
               >
-                {isAiLoading ? '⚡ Gemini AI Generating...' : 'Ingest & Generate Course (10 Tokens)'}
+                {isAiLoading
+                  ? '⚡ AI Assist Generating...'
+                  : `Generate Course (${isAiAssistFree ? '0' : aiAssistCost} Tokens)`}
               </button>
             </div>
           </div>
@@ -1320,7 +1479,7 @@ export default function AQFCourseBuilder({
             </div>
 
             <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)' }}>
-              Your current token balance is <strong>{userTokenBalance} tokens</strong>. You need 1 token to import <strong>"{requestModalData.unit?.unitTitle}"</strong>.
+              Your current token balance is <strong>{displayBalance} tokens</strong>. You need 1 token to import <strong>"{requestModalData.unit?.unitTitle}"</strong>.
             </p>
 
             <div style={{ background: 'rgba(255,255,255,0.06)', padding: '12px', borderRadius: '8px', margin: '10px 0' }}>
@@ -1814,6 +1973,49 @@ export default function AQFCourseBuilder({
           padding: 6px 0;
           font-size: 0.82rem;
           border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        /* ---- Curriculum Standards (AI Alignment) ---- */
+        .standards-chip-grid {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+        .standard-chip {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          padding: 4px 9px;
+          border-radius: 999px;
+          font-size: 0.76rem;
+          font-weight: 700;
+          cursor: pointer;
+          color: var(--text-secondary);
+          background: rgba(255, 255, 255, 0.05);
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          backdrop-filter: blur(6px);
+          transition: all 0.15s ease;
+          user-select: none;
+        }
+        .standard-chip input {
+          accent-color: #10b981;
+          margin: 0;
+          width: 13px;
+          height: 13px;
+        }
+        .standard-chip.selected {
+          color: #fef08a;
+          background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(245, 158, 11, 0.18));
+          border-color: rgba(250, 204, 21, 0.55);
+        }
+        .standard-chip.skipped {
+          border-style: dashed;
+          opacity: 0.7;
+        }
+        .standards-advisory {
+          display: block;
+          margin-top: 3px;
+          font-size: 0.72rem;
+          color: #fcd34d;
         }
       `}</style>
     </div>

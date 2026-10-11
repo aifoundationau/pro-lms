@@ -112,6 +112,14 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // ---- System Settings (/system_settings): token value & AI Course Assistance fee ----
+    // Any signed-in user may read prices; only verified Superadmins may change them.
+    match /system_settings/{settingId} {
+      allow read: if signedIn();
+      allow create, update: if isSuperadmin();
+      allow delete: if false;
+    }
+
     // ---- Legacy collections (read-only for staff, zero delete) ----
     match /courses/{id} { allow read: if isStaff(); allow write, delete: if false; }
     match /students/{id} { allow read: if isStaff(); allow write, delete: if false; }

@@ -1,0 +1,157 @@
+FIRESTORE RULES DEPLOY LOG — OzEdu LMS (pro-lms)
+Firebase project: ai-foundation-firebase
+Log started: 2026-10-11
+
+======================================================================
+1. WHAT THE COMMAND DOES
+======================================================================
+
+    firebase deploy --only firestore:rules
+
+- "firebase deploy" uploads things from this folder to your live Firebase project.
+- "--only firestore:rules" limits it to ONE thing: the security rules file
+  (firestore.rules). Nothing else is touched — no website files, no database
+  data, no functions, no indexes.
+- Security rules decide who may read or write each part of the database.
+  They are enforced by Google's servers, so they cannot be bypassed from the
+  browser.
+
+IMPORTANT: Deploying REPLACES the live rules completely with the contents of
+firestore.rules. If anyone has edited rules directly in the Firebase Console
+since this file was last updated, those console edits will be overwritten.
+
+======================================================================
+2. WHY IT IS NEEDED NOW
+======================================================================
+
+The ✨ AI Assist work added this rule to firestore.rules:
+
+    match /system_settings/{settingId} {
+      allow read: if signedIn();
+      allow create, update: if isSuperadmin();
+      allow delete: if false;
+    }
+
+/system_settings/token_config stores the token price (AUD) and the
+✨ AI Assist fee set in "🛡️ Super Admin: Field AI Rate".
+
+Until this rule is live:
+- Saving the AI Assist fee in the Super Admin panel fails (permission denied).
+- Teachers' builders cannot read the fee, so AI Assist charges the default
+  10 tokens. Nothing breaks — it just ignores the Super Admin setting.
+
+======================================================================
+3. STATUS CHECK — 2026-10-11
+======================================================================
+
+Problem 1: Missing Firebase config files                     [FIXED]
+  - The project had no firebase.json or .firebaserc, so the Firebase CLI
+    did not know this folder was a Firebase project or which rules file to
+    upload. The command would have failed with "Not in a Firebase app
+    directory".
+  - Added:
+      firebase.json  -> { "firestore": { "rules": "firestore.rules" } }
+      .firebaserc    -> default project "ai-foundation-firebase"
+  - Verified: a dry run now gets past the config stage.
+
+Problem 2: Firebase CLI login expired                    [ACTION NEEDED]
+  - Firebase CLI version 15.30.2 is installed.
+  - Every command currently fails with:
+      "Authentication Error: Your credentials are no longer valid.
+       Please run firebase login --reauth"
+  - This requires signing in through a browser, so it must be done by you.
+
+======================================================================
+4. HOW TO REPAIR AND DEPLOY (step by step)
+======================================================================
+
+Run these in a terminal opened in D:\Agy\pro-lms
+
+Step 1 — Sign in again
+    firebase login --reauth
+  A browser window opens. Sign in with the Google account that owns the
+  ai-foundation-firebase project (support@aifoundation.net.au).
+
+Step 2 — Confirm the right project is selected
+    firebase projects:list
+  "ai-foundation-firebase" should be listed and marked (current).
+  If it is not marked current:
+    firebase use ai-foundation-firebase
+
+Step 3 — Back up the live rules (recommended)
+  Firebase Console -> Firestore Database -> Rules tab.
+  Copy everything shown there into a text file, e.g.
+  firestore.rules.backup-2026-10-11.txt, before deploying.
+  Compare it with firestore.rules — if the console has rules that the file
+  does not, add them to firestore.rules first (see the warning in section 1).
+
+Step 4 — Test without changing anything (dry run)
+    firebase deploy --only firestore:rules --dry-run
+  This checks the rules compile. It does NOT upload them.
+  Fix any errors it reports before continuing.
+
+Step 5 — Deploy
+    firebase deploy --only firestore:rules
+  Expected ending:
+    ✔  cloud.firestore: rules file firestore.rules compiled successfully
+    ✔  firestore: released rules firestore.rules to cloud.firestore
+    ✔  Deploy complete!
+
+======================================================================
+5. HOW TO VERIFY IT WORKED
+======================================================================
+
+1. Sign in to OzEdu as the Super Admin.
+2. Open "🛡️ Super Admin Control" -> Set Token Value tab.
+3. In "🛡️ Super Admin: Field AI Rate", enter a number (e.g. 5) and save.
+   Expected: green "✨ AI Assist fee updated to 5 tokens." message.
+4. Open any course in the Course Builder, click "✨ AI Assist".
+   Expected: the popup shows "🪙 Cost: 5 Tokens".
+5. Set the fee back to 10 if 5 was only a test.
+
+Note: the rules decide who is Super Admin by the role stored on the user's
+account (users/{uid}.role == 'Superadmin'). The app also treats the
+support@aifoundation.net.au email as Super Admin, but the database rules do
+NOT. If saving still says "permission denied", check in the Firebase Console
+that your users/{your uid} document has role: "Superadmin".
+
+======================================================================
+6. TROUBLESHOOTING
+======================================================================
+
+"Your credentials are no longer valid"
+    -> firebase login --reauth
+
+"Not in a Firebase app directory"
+    -> You are in the wrong folder. cd D:\Agy\pro-lms (firebase.json lives here).
+
+"No currently active project"
+    -> firebase use ai-foundation-firebase
+
+"HTTP Error: 403, The caller does not have permission"
+    -> The signed-in Google account is not an Owner/Editor of the project.
+       Sign in with the owner account: firebase logout, then firebase login.
+
+Rules compile error (line/column shown)
+    -> A typo in firestore.rules. Fix it, then repeat the dry run.
+
+======================================================================
+7. ROLLBACK (if something goes wrong after deploying)
+======================================================================
+
+Option A (fastest): Firebase Console -> Firestore Database -> Rules ->
+  open the rules history, pick the previous version, and publish it.
+Option B: paste your backup from Step 3 into firestore.rules and run
+  firebase deploy --only firestore:rules
+
+======================================================================
+8. CHANGE LOG
+======================================================================
+
+2026-10-11
+- firestore.rules: added /system_settings rule (signed-in read,
+  Super Admin write, no delete). NOT YET DEPLOYED.
+- firebase.json and .firebaserc: added so the Firebase CLI can deploy.
+- Pending: firebase login --reauth, then deploy (section 4).
+
+(Add a line here each time rules are deployed: date, who, result.)

@@ -8,6 +8,7 @@ import {
 } from 'firebase/firestore';
 
 import { ALL_GLOBAL_COURSES, LMS_CATEGORIES } from './globalCoursesData.js';
+import { sanitizeStandardIds } from './curriculumStandards.js';
 
 export const LMS_SITE_ID = (import.meta?.env?.VITE_LMS_SITE_ID || (typeof process !== 'undefined' ? process.env?.VITE_LMS_SITE_ID : '') || 'lms').trim();
 
@@ -136,6 +137,7 @@ export function normalizeCourse(input = {}) {
     outcomes: str(input.outcomes, 20000),
     knowledge: str(input.knowledge, 20000),
     learningOutcomes: Array.isArray(input.learningOutcomes) ? input.learningOutcomes : [],
+    curriculumStandards: sanitizeStandardIds(input.curriculumStandards),
     units: sanitizeArrayOfObjects(input.units),
     modules: sanitizeArrayOfObjects(input.modules),
     assessments: sanitizeArrayOfObjects(input.assessments),

@@ -11,6 +11,12 @@ import {
   rejectTeacherApplication
 } from '../services/teacherApplicationService';
 import { ALLOWED_ROLES, listAllUsers, updateMemberRole, updateUserCharityStatus } from '../services/authService';
+import {
+  DEFAULT_AI_ASSIST_COST_TOKENS,
+  MAX_AI_ASSIST_COST_TOKENS,
+  normalizeAiAssistCost,
+  updateAiAssistCostTokens
+} from '../services/aiAssistTokenService';
 
 export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
   const [activeTab, setActiveTab] = useState('tokens'); // 'tokens' | 'redistribute' | 'teachers' | 'roles'
@@ -21,6 +27,11 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
   const [tokenConfig, setTokenConfig] = useState({ token_price_aud: 1.00, pool_balance: 1560 });
   const [newTokenPrice, setNewTokenPrice] = useState('1.00');
   const [isUpdatingPrice, setIsUpdatingPrice] = useState(false);
+
+  // ✨ AI Assist Fee State (flat fee per full-course generation)
+  const [aiAssistCost, setAiAssistCost] = useState(DEFAULT_AI_ASSIST_COST_TOKENS);
+  const [newAiAssistCost, setNewAiAssistCost] = useState(String(DEFAULT_AI_ASSIST_COST_TOKENS));
+  const [isUpdatingAiAssistCost, setIsUpdatingAiAssistCost] = useState(false);
 
   // Redistribution State
   const [eligibleAccounts, setEligibleAccounts] = useState([]);
@@ -49,6 +60,9 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
       if (cfg) {
         setTokenConfig(cfg);
         setNewTokenPrice(String(cfg.token_price_aud || 1.00));
+        const assistCost = normalizeAiAssistCost(cfg.ai_course_assist_cost_tokens);
+        setAiAssistCost(assistCost);
+        setNewAiAssistCost(String(assistCost));
       }
       setEligibleAccounts(eligible || []);
       setTeacherApps(apps || []);
@@ -80,6 +94,23 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
       setNotice({ type: 'error', message: err?.message || 'Failed to update token price.' });
     } finally {
       setIsUpdatingPrice(false);
+    }
+  };
+
+  // Handler: Set ✨ AI Assist Fee (whole tokens 0–10)
+  const handleSaveAiAssistCost = async (e) => {
+    e.preventDefault();
+    setIsUpdatingAiAssistCost(true);
+    setNotice({ type: '', message: '' });
+    try {
+      const updated = await updateAiAssistCostTokens(currentUser.uid, newAiAssistCost);
+      setAiAssistCost(updated);
+      setNewAiAssistCost(String(updated));
+      setNotice({ type: 'success', message: `✨ AI Assist fee updated to ${updated} tokens.` });
+    } catch (err) {
+      setNotice({ type: 'error', message: err?.message || 'Failed to update the ✨ AI Assist fee.' });
+    } finally {
+      setIsUpdatingAiAssistCost(false);
     }
   };
 
@@ -319,6 +350,44 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
                         }}
                       >
                         {isUpdatingPrice ? 'Saving...' : 'Update Token Value'}
+                      </button>
+                    </form>
+                  </div>
+
+                  {/* ✨ AI Assist Fee Card */}
+                  <div style={{ background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '14px', padding: '1.5rem', marginBottom: '1.5rem' }}>
+                    <h4 style={{ margin: '0 0 8px 0', fontSize: '1.1rem', color: '#0f172a' }}>
+                      🛡️ Super Admin: Field AI Rate
+                    </h4>
+                    <p style={{ margin: '0 0 16px 0', fontSize: '0.85rem', color: '#64748b' }}>
+                      Tokens charged each time a teacher uses ✨ AI Assist to build a complete course (whole numbers 0–{MAX_AI_ASSIST_COST_TOKENS}, no decimals). Charity Teachers always pay 0.
+                    </p>
+
+                    <form onSubmit={handleSaveAiAssistCost} style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <input
+                        type="number"
+                        step="1"
+                        min="0"
+                        max={MAX_AI_ASSIST_COST_TOKENS}
+                        required
+                        value={newAiAssistCost}
+                        onChange={(e) => setNewAiAssistCost(e.target.value)}
+                        aria-label="AI Assist fee in tokens"
+                        style={{
+                          width: '120px', padding: '10px 14px', borderRadius: '8px', border: '1px solid #cbd5e1',
+                          fontSize: '1rem', fontWeight: 700, boxSizing: 'border-box'
+                        }}
+                      />
+                      <span style={{ color: '#475569', fontWeight: 600, fontSize: '0.9rem' }}>tokens per ✨ AI Assist (current: {aiAssistCost})</span>
+                      <button
+                        type="submit"
+                        disabled={isUpdatingAiAssistCost}
+                        style={{
+                          padding: '10px 20px', borderRadius: '8px', border: 'none',
+                          background: '#4f46e5', color: '#ffffff', fontWeight: 700, cursor: 'pointer'
+                        }}
+                      >
+                        {isUpdatingAiAssistCost ? 'Saving...' : 'Update Field AI Rate'}
                       </button>
                     </form>
                   </div>

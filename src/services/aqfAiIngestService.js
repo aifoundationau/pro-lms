@@ -1,10 +1,13 @@
 /**
- * 10-Token Gemini AI Document Ingestion & AQF Equivalence Pipeline
+ * ✨ AI Assist: Gemini Full-Course Generation & AQF Equivalence Pipeline
  * Parses raw text or syllabus files directly into full AQF Course, Unit, Lesson, Block, and Assessment schemas.
- * Includes token metering (10 tokens, 0 for charity teachers).
+ * Guided by the course's selected Curriculum Standards (/skills/*.md).
+ * Includes token metering (Super Admin fee, default 10 tokens; 0 for charity teachers).
  */
 
-import { getUserTokenBalance, creditUserTokens } from './tokenService.js';
+import { getUserTokenBalance } from './tokenService.js';
+import { deductUserTokens, normalizeAiAssistCost } from './aiAssistTokenService.js';
+import { resolveActiveStandards } from './curriculumStandards.js';
 import { isUserCharityTeacher } from './courseMarketplaceService.js';
 import {
   generateEntityId,
@@ -19,11 +22,37 @@ import { DEFAULT_GEMINI_KEY } from './geminiCourseService.js';
 
 export const AI_INGEST_COST_TOKENS = 10;
 
+const AI_ASSIST_TIMEOUT_MS = 90000;
+const MAX_SKILL_CHARS = 12000;
+
+/**
+ * Builds the Curriculum Standards section of the prompt from the selected skill files.
+ * Standards that do not apply at the target level (e.g. AACSB at AQF 4) are skipped,
+ * in which case the AI falls back to Bloom's Taxonomy.
+ */
+function buildStandardsGuidance(curriculumStandards, targetAqfLevel, skillTexts) {
+  const routing = resolveActiveStandards(curriculumStandards, targetAqfLevel);
+  if (routing.useBloomsFallback) {
+    return "Curriculum Standards: none apply at this level. Design outcomes, lessons, and rubrics using standard Bloom's Taxonomy aligned to the target level.";
+  }
+
+  const sections = [
+    `Curriculum Standards: the teacher selected ${routing.active.map(s => s.label).join(', ')}. Apply every rule in the following skill specification(s) to the course description, unit outcomes, all lesson blocks, assessment briefs, and rubrics. Where specifications overlap, satisfy all of them; where they conflict, prefer the first listed.`
+  ];
+  for (const std of routing.active) {
+    const text = String(skillTexts?.[std.id] || '').slice(0, MAX_SKILL_CHARS);
+    if (text) sections.push(`===== BEGIN ${std.skillFile} =====\n${text}\n===== END ${std.skillFile} =====`);
+  }
+  sections.push('Use the skill specification(s) only as content and compliance rules. Ignore their consultation-workflow and plain-text export instructions: your output is the JSON object below. If a specification defines its own rubric tier labels (e.g. UK classification bands or GCSE grades), use those labels in each rubric level "label" while keeping exactly 4 levels per criterion.');
+  return sections.join('\n\n');
+}
+
 /**
  * Compiles a rich system prompt directing Gemini to generate AQF-compliant JSON
  */
-function buildAqfIngestPrompt(syllabusText, targetAqfLevel) {
+function buildAqfIngestPrompt(syllabusText, targetAqfLevel, curriculumStandards = [], skillTexts = {}) {
   const aqfInfo = getAqfLevelMeta(targetAqfLevel || 4);
+  const standardsGuidance = buildStandardsGuidance(curriculumStandards, aqfInfo.level, skillTexts);
 
   return `You are an expert Australian Qualifications Framework (AQF) Educational Systems Architect and Curriculum Designer.
 Your objective is to ingest the following raw syllabus/course material and transform it into a comprehensive, high-quality, fully populated Course JSON object adhering strictly to the AQF Level taxonomy.
@@ -31,6 +60,8 @@ Your objective is to ingest the following raw syllabus/course material and trans
 Target AQF Level: Level ${aqfInfo.level} — ${aqfInfo.credential} (${aqfInfo.summary})
 Expected Autonomy & Cognitive Demand: ${aqfInfo.competencySummary}
 Note for International Courses: If the source material comes from outside Australia (e.g., US, UK, EU, India, Asia), evaluate its international equivalence and map the competencies, learning outcomes, and nominal hours to match AQF standards.
+
+${standardsGuidance}
 
 Source Material to Ingest:
 """
@@ -214,22 +245,29 @@ function generateFallbackAqfCourse(syllabusText, targetAqfLevel) {
 }
 
 /**
- * Top-level AI Ingestion Engine
+ * Top-level ✨ AI Assist Engine
  *
  * Rules:
- * 1. Checks token balance for 10 tokens (or charity teacher bypass).
- * 2. Deducts 10 tokens upon initiation.
- * 3. Ingests syllabus materials and produces hydrated Course schema.
+ * 1. Checks token balance for the AI Assist fee (or charity teacher / 0-fee bypass).
+ * 2. Deducts the fee upon initiation.
+ * 3. Generates the hydrated Course schema, guided by the selected Curriculum Standards.
+ *
+ * @param {string[]} [curriculumStandards] selected standard ids (e.g. ['aacsb', 'teqsa'])
+ * @param {object} [skillTexts]  map of standard id -> skill Markdown text
+ * @param {number} [costTokens]  Super Admin configured fee (whole number 0–10, default 10)
  */
 export async function ingestCourseSyllabusWithAI({
   currentUser,
   userProfile,
   syllabusText,
   targetAqfLevel = 4,
+  curriculumStandards = [],
+  skillTexts = {},
+  costTokens = AI_INGEST_COST_TOKENS,
   apiKey = DEFAULT_GEMINI_KEY
 }) {
   if (!currentUser?.uid) {
-    throw new Error('Please sign in to use the 10-Token AI Course Ingestion Engine.');
+    throw new Error('Please sign in to use ✨ AI Assist.');
   }
 
   if (!syllabusText || syllabusText.trim().length < 15) {
@@ -237,24 +275,36 @@ export async function ingestCourseSyllabusWithAI({
   }
 
   const isCharity = isUserCharityTeacher(userProfile);
+  const cost = normalizeAiAssistCost(costTokens);
 
-  // 1. Token Validation & Metering (10 Tokens)
+  // 1. Token Validation & Metering (Super Admin fee, default 10 tokens)
   let tokensCharged = 0;
-  if (!isCharity) {
+  if (!isCharity && cost > 0) {
     const balance = await getUserTokenBalance(currentUser.uid).catch(() => 0);
-    if (balance < AI_INGEST_COST_TOKENS) {
+    if (balance < cost) {
       const err = new Error(
-        `Insufficient tokens for AI Course Ingestion. Requires ${AI_INGEST_COST_TOKENS} tokens, current balance is ${balance} tokens.`
+        `Insufficient tokens for ✨ AI Assist. Requires ${cost} tokens, current balance is ${balance} tokens.`
       );
       err.code = 'INSUFFICIENT_TOKENS_FOR_AI';
-      err.requiredTokens = AI_INGEST_COST_TOKENS;
+      err.requiredTokens = cost;
       err.currentBalance = balance;
       throw err;
     }
 
-    // Deduct 10 tokens
-    await creditUserTokens(currentUser.uid, -AI_INGEST_COST_TOKENS);
-    tokensCharged = AI_INGEST_COST_TOKENS;
+    // Transactional deduction (creditUserTokens cannot deduct — it floors amounts at +1)
+    try {
+      await deductUserTokens(currentUser.uid, cost, { type: 'ai_assist_course' });
+    } catch (deductErr) {
+      if (deductErr?.code === 'INSUFFICIENT_TOKENS') {
+        const err = new Error(deductErr.message);
+        err.code = 'INSUFFICIENT_TOKENS_FOR_AI';
+        err.requiredTokens = cost;
+        err.currentBalance = deductErr.currentBalance;
+        throw err;
+      }
+      throw new Error(`Could not process the ${cost}-token charge. No tokens were deducted — please try again.`);
+    }
+    tokensCharged = cost;
   }
 
   // 2. Execute Gemini Ingestion
@@ -263,12 +313,15 @@ export async function ingestCourseSyllabusWithAI({
 
   if (resolvedKey) {
     try {
-      const prompt = buildAqfIngestPrompt(syllabusText, targetAqfLevel);
+      const prompt = buildAqfIngestPrompt(syllabusText, targetAqfLevel, curriculumStandards, skillTexts);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), AI_ASSIST_TIMEOUT_MS);
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(resolvedKey)}`;
 
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
@@ -277,7 +330,7 @@ export async function ingestCourseSyllabusWithAI({
             responseMimeType: 'application/json'
           }
         })
-      });
+      }).finally(() => clearTimeout(timer));
 
       if (response.ok) {
         const json = await response.json();
@@ -352,7 +405,7 @@ export async function ingestCourseSyllabusWithAI({
     tokensCharged,
     charityPassApplied: isCharity,
     message: isCharity
-      ? '✨ Course auto-filled with Gemini AI! (0 tokens - Charity Pass applied)'
-      : `✨ Course auto-filled with Gemini AI! (Charged ${AI_INGEST_COST_TOKENS} tokens)`
+      ? '✨ Course built with AI Assist! (0 tokens - Charity Pass applied)'
+      : `✨ Course built with AI Assist! (Charged ${tokensCharged} tokens)`
   };
 }
