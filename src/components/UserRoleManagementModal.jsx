@@ -139,13 +139,13 @@ export default function UserRoleManagementModal({ currentUser, isOpen, onClose }
                       <td style={{ padding: '12px', color: '#64748b' }}>{u.login_count || 1}</td>
                       <td style={{ padding: '12px' }}>
                         <select
-                          value={u.role || 'Supporter'}
+                          value={String(u.role || 'supporter').toLowerCase()}
                           disabled={updatingUid === u.uid}
                           onChange={(e) => handleRoleChange(u.uid, e.target.value)}
                           style={{
                             padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1',
                             fontSize: '0.85rem', background: '#f8fafc', fontWeight: 500,
-                            color: u.role === 'Superadmin' ? '#b45309' : '#0f172a',
+                            color: String(u.role || '').toLowerCase() === 'superadmin' ? '#b45309' : '#0f172a',
                             cursor: updatingUid === u.uid ? 'wait' : 'pointer'
                           }}
                         >

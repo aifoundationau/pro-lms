@@ -115,15 +115,67 @@ export const CONTENT_BLOCK_TYPES = [
     type: 'file_upload',
     label: 'Direct File Attachment',
     icon: '📎',
-    description: 'Downloadable PDF handouts, workbooks, code archives, and supplementary files.'
+    description: 'Downloadable PDF handouts, workbooks, code archives, and supplementary files.',
+    // Not offered in the Add Block toolbar yet; existing attachment blocks still display.
+    disabled: true,
+    disabledReason: 'Direct file attachments are coming soon. Use a Google Drive Resource link for now.'
+  },
+  {
+    type: 'notebook_link',
+    label: 'Gemini Notebook',
+    icon: '📓',
+    description: 'Gemini Notebook (or NotebookLM) share link for guided study and AI-assisted notes.'
   }
 ];
+
+/** Block types whose content is a link (stored in `content` and in block.metadata). */
+export const LINK_BLOCK_METADATA_KEYS = Object.freeze({
+  youtube_video: 'youtubeUrl',
+  google_drive_link: 'driveUrl',
+  file_upload: 'fileUrl',
+  notebook_link: 'notebookUrl'
+});
+
+/**
+ * True for an https Gemini Notebook / NotebookLM link: a Google host (google.com or the .google
+ * domain) with "notebook" in the host name or path, e.g. https://notebooklm.google.com/notebook/…,
+ * https://notebook.google.com/…, https://notebooklm.google/…, https://gemini.google.com/notebook/…
+ */
+export function isGoogleNotebookUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    const host = url.hostname.toLowerCase();
+    const googleHost = host === 'google.com' || host.endsWith('.google.com') || host.endsWith('.google');
+    return url.protocol === 'https:' && googleHost && (host.includes('notebook') || /\/notebooks?(\/|$)/i.test(url.pathname));
+  } catch {
+    return false;
+  }
+}
+
+let entityIdCounter = 0;
 
 /**
  * Creates a unique ID with an optional prefix
  */
 export function generateEntityId(prefix = 'ent') {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
+  // The counter keeps ids made in the same millisecond unique (e.g. a spreadsheet import creating many blocks).
+  entityIdCounter = (entityIdCounter + 1) % 1679616; // 36^4
+  return `${prefix}_${Date.now().toString(36)}_${entityIdCounter.toString(36)}${Math.random().toString(36).substring(2, 7)}`;
+}
+
+/**
+ * Default rubric performance levels (lowest first). A rubric may use 2–10 levels with
+ * its own labels, e.g. HD/D/C/P/F bands imported from a spreadsheet.
+ */
+export const DEFAULT_RUBRIC_LEVEL_LABELS = ['Novice (0-49%)', 'Competent (50-74%)', 'Proficient (75-89%)', 'Advanced (90-100%)'];
+export const MIN_RUBRIC_LEVELS = 2;
+export const MAX_RUBRIC_LEVELS = 10;
+
+/** Points per level, lowest first: 40/70/85/100 for the default 4 tiers, otherwise evenly spaced. */
+export function defaultLevelPoints(count) {
+  const n = Math.max(1, Math.floor(Number(count) || 0));
+  if (n === 4) return [40, 70, 85, 100];
+  return Array.from({ length: n }, (_, i) => Math.round(((i + 1) / n) * 100));
 }
 
 /**
@@ -184,7 +236,8 @@ export function createBlankContentBlock(type = 'text_description', order = 0) {
       fileUrl: '',
       fileName: '',
       fileSize: 0,
-      mimeType: ''
+      mimeType: '',
+      notebookUrl: ''
     },
     tag: 'lms'
   };
@@ -250,7 +303,7 @@ export function createBlankCourse(authorId = 'anonymous', authorName = 'Educator
     authorName,
     title: 'New Course',
     code: 'CRS-100',
-    aqfLevel: 4, // Default Level 4 (Certificate IV) as recommended vocational baseline
+    aqfLevel: 0, // Default: International / Unassigned (teachers pick an AQF level when relevant)
     category: 'Information Technology',
     year: `${new Date().getFullYear()} Semester 1`,
     startDate: new Date().toISOString().split('T')[0],

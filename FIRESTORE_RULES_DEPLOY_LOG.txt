@@ -154,4 +154,69 @@ Option B: paste your backup from Step 3 into firestore.rules and run
 - firebase.json and .firebaserc: added so the Firebase CLI can deploy.
 - Pending: firebase login --reauth, then deploy (section 4).
 
+2026-10-13
+- firestore.rules: rules for the message board, rosters, submissions and
+  the token economy (see section 9). NOT YET DEPLOYED.
+- Tested locally on the Firestore emulator: npm run test:rules (91 checks)
+  and npm run test:e2e (11 end-to-end scenarios) both pass.
+
 (Add a line here each time rules are deployed: date, who, result.)
+
+======================================================================
+9. 2026-10-13 RULES UPDATE — WHAT CHANGED AND WHY
+======================================================================
+
+New features need these rules before they work for real users:
+
+  /chat_interactions      Message board. Anyone -> Super Admin; teachers ->
+                          anyone (the app limits them to their students);
+                          students -> teachers of courses they are enrolled
+                          in. Messages can be marked read, never edited or
+                          deleted. Only the Super Admin sends "Token Grant".
+  /course_members         Course rosters (id = <courseId>__<email>). Only the
+                          course owner (or Super Admin) enrols; students can
+                          read only their own enrolments.
+  /lms_coursework         Assessment submissions. Enrolled students submit
+                          and resubmit until graded; they can only read
+                          their own. Teachers/staff read and grade.
+  /course_copies          Global Search copies: who copied which course and
+                          when. Immutable.
+  /teacher_applications   Applicants write only their own (status pending);
+                          only the Super Admin reads all and approves.
+  /token_transactions,    Token ledgers. Only the Super Admin can record
+  /stripe_credits,        grants, credited Stripe payments and fund changes.
+  /token_donations,
+  /token_redistributions
+  /lms_courses            Teachers can edit only their own courses. Courses
+                          created before ownership was recorded can be
+                          claimed by the first teacher who saves them.
+  /users                  New: nobody can raise their own token balance or
+                          give themselves a Charity Pass (both were possible
+                          before). Spending tokens still works. The verified
+                          project-owner account is treated as Super Admin.
+
+!! BEFORE DEPLOYING — chat_interactions is shared !!
+  The Firebase project already had a chat_interactions collection. If another
+  app writes to it, its rules exist only in the Firebase Console (they are not
+  in this file) and deploying would replace them. Do section 4, Step 3
+  (back up the live rules) and copy any chat_interactions rules for the other
+  app into firestore.rules first. The OzEdu rules only allow documents with
+  kind == 'lms_message', so they will not expose the other app's data.
+
+Test the rules before deploying (needs Java 11+ for the emulator):
+    npm run test:rules
+    npm run test:e2e
+  Java: install "Temurin 21 JRE" from adoptium.net if "java -version" fails.
+  Both commands use local emulators only (project ids demo-...), no login.
+
+After deploying, check (signed in with the matching accounts):
+  1. Teacher: course card -> 👥 Students & People -> Bulk / Spreadsheet ->
+     enrol a student's email.
+  2. Student (that email): 🎓 My Learning shows the course; submit an
+     assessment; 💬 Messages -> New message -> the teacher.
+  3. Teacher: 📥 Submissions shows the work; save a grade.
+  4. Student: 💬 Messages -> 🪙 Request tokens.
+  5. Super Admin: 🛡️ Super Admin Control -> 🎁 Give Tokens -> the student's
+     email, 50 tokens. The student sees a green "Token Grant" message.
+  6. Join as Teacher (a Supporter account): the application appears in the
+     Super Admin's messages with a purple "Application" tag.

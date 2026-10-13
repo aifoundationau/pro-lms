@@ -110,6 +110,95 @@ export async function creditUserTokens(uid, tokens) {
   }
 }
 
+// ---------- Super Admin token grants ----------
+
+export const MAX_GRANT_TOKENS = 999;
+const GRANT_EMAIL = /^[^\s@<>()[\],;:"']+@[^\s@<>()[\],;:"']+\.[a-z]{2,}$/i;
+
+function grantError(message, code = 'GRANT_FAILED') {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
+/** A Super Admin grant must be a whole number from 1 to 999 tokens. */
+export function validateGrantAmount(amount) {
+  const n = Number(amount);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_GRANT_TOKENS) {
+    throw grantError(`Give between 1 and ${MAX_GRANT_TOKENS} tokens at a time (whole numbers).`, 'INVALID_AMOUNT');
+  }
+  return n;
+}
+
+/** Registered accounts (/users) with this sign-in email. */
+export async function findUsersByEmail(email) {
+  const target = String(email || '').trim();
+  if (!db || !target) return [];
+  const variants = Array.from(new Set([target.toLowerCase(), target]));
+  const found = new Map();
+  for (const value of variants) {
+    const snap = await getDocs(query(collection(db, 'users'), where('email', '==', value)));
+    snap.forEach(d => found.set(d.id, { uid: d.id, ...d.data() }));
+  }
+  return Array.from(found.values());
+}
+
+/**
+ * Super Admin gives tokens to a registered account by email (1–999 per grant).
+ * With `stripeSessionId`, the grant also marks that verified Stripe purchase as credited, in the
+ * same transaction, so one payment can never be credited twice.
+ */
+export async function grantTokensByEmail({ adminUid, email, amount, note = '', stripeSessionId = '' }) {
+  const tokens = validateGrantAmount(amount);
+  const target = String(email || '').trim().toLowerCase();
+  if (!GRANT_EMAIL.test(target)) throw grantError('Enter the registered email address of the account.', 'INVALID_EMAIL');
+  if (!db) throw grantError('Firestore is unavailable.', 'DB_UNAVAILABLE');
+
+  const users = await findUsersByEmail(target);
+  if (!users.length) {
+    throw grantError(`No registered account uses ${target}. They need to sign in with Google once before tokens can be given.`, 'USER_NOT_FOUND');
+  }
+  const user = users[0];
+  const userRef = doc(db, 'users', user.uid);
+  const creditRef = stripeSessionId ? doc(db, 'stripe_credits', String(stripeSessionId)) : null;
+  const nowIso = new Date().toISOString();
+
+  const newBalance = await runTransaction(db, async (tx) => {
+    const snap = await tx.get(userRef);
+    if (!snap.exists()) throw grantError('That account no longer exists.', 'USER_NOT_FOUND');
+    if (creditRef) {
+      const credited = await tx.get(creditRef);
+      if (credited.exists()) throw grantError('This Stripe payment has already been credited.', 'ALREADY_CREDITED');
+      tx.set(creditRef, { recipient_uid: user.uid, recipient_email: target, tokens, credited_by: adminUid || '', credited_at: nowIso, tag: 'lms' });
+    }
+    const next = (Number(snap.data()?.token_balance) || 0) + tokens;
+    tx.update(userRef, { token_balance: next, last_token_grant_at: nowIso, last_token_grant_by: adminUid || 'superadmin' });
+    return next;
+  });
+
+  setDoc(doc(collection(db, 'token_transactions')), {
+    type: 'superadmin_grant',
+    recipient_uid: user.uid,
+    recipient_email: target,
+    tokens_granted: tokens,
+    granted_by_uid: adminUid || '',
+    note: String(note).slice(0, 300),
+    stripe_session_id: stripeSessionId || '',
+    created_at: nowIso,
+    tag: 'lms'
+  }).catch(err => console.warn('Token grant ledger write skipped:', err?.message || err));
+
+  return {
+    uid: user.uid,
+    email: target,
+    displayName: user.displayName || target.split('@')[0],
+    role: String(user.role || 'supporter').toLowerCase(),
+    amount: tokens,
+    newBalance,
+    otherMatches: users.length - 1
+  };
+}
+
 /**
  * Adds donated tokens to the global accumulated token fund
  */
@@ -164,10 +253,10 @@ export async function getEligibleAccountsForRedistribution() {
       const data = docSnap.data();
       const balance = Number(data.token_balance) || 0;
       const lastLogin = data.last_login_at || data.created_at || '';
-      const role = data.role || 'Supporter';
+      const role = String(data.role || 'supporter').toLowerCase();
 
       // Must be student or teacher or supporter needing education access
-      const isEligibleRole = role === 'student' || role === 'teacher' || role === 'Supporter';
+      const isEligibleRole = role === 'student' || role === 'teacher' || role === 'supporter';
 
       // Balance check: under 26 tokens
       const isUnderThreshold = balance < 26;

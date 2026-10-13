@@ -2,14 +2,20 @@ import React, { useState, useEffect } from 'react';
 import {
   AQF_LEVELS,
   CONTENT_BLOCK_TYPES,
+  DEFAULT_RUBRIC_LEVEL_LABELS,
   getAqfLevelMeta,
   generateEntityId,
   createBlankUnit,
   createBlankLesson,
   createBlankContentBlock,
   createBlankAssessment,
-  createDefaultRubric
+  defaultLevelPoints,
+  isGoogleNotebookUrl
 } from '../../types/courseBuilderTypes';
+import CourseSpreadsheetPanel from './CourseSpreadsheetPanel.jsx';
+import RubricSpreadsheetImport from './RubricSpreadsheetImport.jsx';
+import { formatTokenBalance, hasUnlimitedTokens } from '../../services/rolePrivileges';
+import { youtubeVideoId } from '../../services/mediaLinks';
 import {
   isUserCharityTeacher,
   executeContentClone,
@@ -37,20 +43,35 @@ import {
 } from '../../services/curriculumStandards';
 import { SKILL_TEXTS } from '../../services/curriculumSkillTexts';
 
-const DEFAULT_RUBRIC_TIER_LABELS = ['Novice (0-49%)', 'Competent (50-74%)', 'Proficient (75-89%)', 'Advanced (90-100%)'];
-
 /** Sum of rubric criterion weights (used for the Σ 100% indicator). */
 function rubricWeightTotal(rubric) {
-  return (Array.isArray(rubric) ? rubric : []).reduce((sum, r) => sum + (Number(r?.weightPercentage) || 0), 0);
+  const total = (Array.isArray(rubric) ? rubric : []).reduce((sum, r) => sum + (Number(r?.weightPercentage) || 0), 0);
+  return Math.round(total * 100) / 100;
 }
 
-/** Column headers follow the tier labels of the first criterion (e.g. UK classification bands). */
+/**
+ * Column headers: the level labels of the criterion with the most levels (rubrics may have
+ * 2–10 levels, e.g. HD/D/C/P/F bands uploaded from a spreadsheet).
+ */
 function getRubricTierLabels(rubric) {
-  const levels = Array.isArray(rubric) && Array.isArray(rubric[0]?.levels) ? rubric[0].levels : [];
-  return DEFAULT_RUBRIC_TIER_LABELS.map((fallback, idx) => {
-    const label = levels[idx]?.label;
-    return typeof label === 'string' && label.trim() ? label : fallback;
+  let levels = [];
+  for (const criterion of Array.isArray(rubric) ? rubric : []) {
+    if (Array.isArray(criterion?.levels) && criterion.levels.length > levels.length) levels = criterion.levels;
+  }
+  if (!levels.length) return DEFAULT_RUBRIC_LEVEL_LABELS;
+  return levels.map((level, idx) => {
+    const label = level?.label;
+    return typeof label === 'string' && label.trim() ? label : (DEFAULT_RUBRIC_LEVEL_LABELS[idx] || `Level ${idx + 1}`);
   });
+}
+
+/** Text area value <-> list of outcomes (one per line; blank lines are kept while typing). */
+function linesToList(value) {
+  return String(value ?? '').split('\n');
+}
+
+function listToLines(list) {
+  return Array.isArray(list) ? list.join('\n') : '';
 }
 
 /**
@@ -103,6 +124,7 @@ export default function AQFCourseBuilder(props) {
 
 function AQFCourseBuilderInner({
   course,
+  initialPanel = null,
   onSaveCourse,
   onBack,
   currentUser,
@@ -121,9 +143,15 @@ function AQFCourseBuilderInner({
   // AI Ingest Modal / Banner State
   const [isAiIngestOpen, setIsAiIngestOpen] = useState(false);
   const [aiSyllabusText, setAiSyllabusText] = useState('');
-  const [aiTargetLevel, setAiTargetLevel] = useState(course.aqfLevel || 4);
+  const [aiTargetLevel, setAiTargetLevel] = useState(Number.isInteger(Number(course.aqfLevel)) && course.aqfLevel !== '' && course.aqfLevel !== null ? Number(course.aqfLevel) : 0);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [aiNotice, setAiNotice] = useState(null);
+
+  // 📊 Course Spreadsheet window & ✨ AI Assist source ('text' syllabus or 'spreadsheet')
+  const [isSpreadsheetOpen, setIsSpreadsheetOpen] = useState(initialPanel === 'spreadsheet');
+  const [aiSourceMode, setAiSourceMode] = useState('text');
+  const [isSpreadsheetBusy, setIsSpreadsheetBusy] = useState(false);
+  const [importWarnings, setImportWarnings] = useState([]);
 
   // AQF Equivalence Assistant Modal State
   const [isAqfAssistantOpen, setIsAqfAssistantOpen] = useState(false);
@@ -151,12 +179,14 @@ function AQFCourseBuilderInner({
   const [aiAssistCost, setAiAssistCost] = useState(DEFAULT_AI_ASSIST_COST_TOKENS);
 
   const isCharity = isUserCharityTeacher(userProfile);
+  // The Super Admin never needs tokens ("UNL" = unlimited).
+  const isUnlimited = hasUnlimitedTokens(userProfile || { email: currentUser?.email });
   const selectedAqf = getAqfLevelMeta(currentCourse.aqfLevel);
   const selectedStandardIds = sanitizeStandardIds(currentCourse.curriculumStandards);
   const standardsRouting = resolveActiveStandards(selectedStandardIds, selectedAqf.level);
   const aiAssistRouting = resolveActiveStandards(selectedStandardIds, aiTargetLevel);
-  const displayBalance = Number(userTokenBalance) || 0;
-  const isAiAssistFree = isCharity || aiAssistCost === 0;
+  const displayBalance = formatTokenBalance(userTokenBalance, userProfile || { email: currentUser?.email });
+  const isAiAssistFree = isCharity || isUnlimited || aiAssistCost === 0;
 
   // Load the Super Admin configured AI Assist fee (falls back to 10 on any failure)
   useEffect(() => {
@@ -344,32 +374,64 @@ function AQFCourseBuilderInner({
   };
 
   // Rubric Matrix Operations
-  const handleAddRubricCriterion = (unitId, asmtId) => {
-    const newCrit = {
-      id: generateEntityId('rubric'),
-      criterionTitle: 'New Evaluation Criterion',
-      weightPercentage: 25,
-      levels: [
-        { label: 'Novice (0-49%)', points: 40, descriptor: 'Demonstrates preliminary understanding.' },
-        { label: 'Competent (50-74%)', points: 70, descriptor: 'Satisfies primary standards reliably.' },
-        { label: 'Proficient (75-89%)', points: 85, descriptor: 'Shows comprehensive mastery.' },
-        { label: 'Advanced (90-100%)', points: 100, descriptor: 'Exceeds benchmark standards.' }
-      ]
-    };
+  const DEFAULT_NEW_DESCRIPTORS = [
+    'Demonstrates preliminary understanding.',
+    'Satisfies primary standards reliably.',
+    'Shows comprehensive mastery.',
+    'Exceeds benchmark standards.'
+  ];
 
+  const updateRubric = (unitId, asmtId, updater) => {
     setCurrentCourse(prev => ({
       ...prev,
       units: prev.units.map(u => {
         if (u.id !== unitId) return u;
         return {
           ...u,
-          assessments: (u.assessments || []).map(a => {
-            if (a.id !== asmtId) return a;
-            return { ...a, rubric: [...(a.rubric || []), newCrit] };
-          })
+          assessments: (u.assessments || []).map(a => (a.id === asmtId ? { ...a, rubric: updater(Array.isArray(a.rubric) ? a.rubric : []) } : a))
         };
       })
     }));
+  };
+
+  // New rows copy the rubric's own level structure (e.g. a 5-band HD/D/C/P/F rubric stays 5-band).
+  const handleAddRubricCriterion = (unitId, asmtId) => {
+    updateRubric(unitId, asmtId, rubric => {
+      const labels = getRubricTierLabels(rubric);
+      const isDefault = labels.length === DEFAULT_RUBRIC_LEVEL_LABELS.length && labels.every((l, i) => l === DEFAULT_RUBRIC_LEVEL_LABELS[i]);
+      const points = defaultLevelPoints(labels.length);
+      const newCrit = {
+        id: generateEntityId('rubric'),
+        criterionTitle: 'New Evaluation Criterion',
+        weightPercentage: 25,
+        levels: labels.map((label, i) => ({ label, points: points[i], descriptor: isDefault ? DEFAULT_NEW_DESCRIPTORS[i] : '' }))
+      };
+      return [...rubric, newCrit];
+    });
+  };
+
+  const handleDeleteRubricCriterion = (unitId, asmtId, criterionId) => {
+    updateRubric(unitId, asmtId, rubric => rubric.filter(c => c.id !== criterionId));
+  };
+
+  // 📊 Spreadsheet import / ✨ AI build result -> builder (keeps this course's identity)
+  const handleApplyImportedCourse = (importedCourse, { message, warnings = [] } = {}) => {
+    setCurrentCourse(prev => ({
+      ...importedCourse,
+      id: prev.id ?? importedCourse.id,
+      authorId: prev.authorId || importedCourse.authorId,
+      authorName: prev.authorName || importedCourse.authorName,
+      authorEmail: prev.authorEmail || importedCourse.authorEmail,
+      createdAt: prev.createdAt ?? importedCourse.createdAt,
+      updatedAt: Date.now()
+    }));
+    setActiveUnitId(importedCourse.units?.[0]?.id || null);
+    setActiveTab('curriculum');
+    setImportWarnings(Array.isArray(warnings) ? warnings.slice(0, 50) : []);
+    setSaveNotice({ type: 'success', message: message || 'Course updated from your spreadsheet.' });
+    setIsSpreadsheetOpen(false);
+    setIsAiIngestOpen(false);
+    setTimeout(() => setSaveNotice(null), 9000);
   };
 
   // AI Assist: full-course generation guided by the selected Curriculum Standards
@@ -503,7 +565,7 @@ function AQFCourseBuilderInner({
   };
 
   // Save Course as Draft
-  const handleSave = () => {
+  const handleSave = async () => {
     const draftTags = Array.from(new Set([...(Array.isArray(currentCourse.tags) ? currentCourse.tags : []), 'lms', 'Draft']));
     const draftCourse = {
       ...currentCourse,
@@ -516,9 +578,14 @@ function AQFCourseBuilderInner({
       updatedAt: Date.now()
     };
     setCurrentCourse(draftCourse);
-    onSaveCourse(draftCourse);
-    setSaveNotice({ type: 'success', message: '📝 Course saved as Draft (Tag "Draft" added. Hidden from other teachers & students).' });
-    setTimeout(() => setSaveNotice(null), 3500);
+    try {
+      await onSaveCourse(draftCourse);
+      setSaveNotice({ type: 'success', message: '📝 Course saved as Draft (Tag "Draft" added. Hidden from other teachers & students).' });
+      setTimeout(() => setSaveNotice(null), 3500);
+    } catch (err) {
+      console.error('Course save failed:', err);
+      setSaveNotice({ type: 'error', message: `⚠️ The course was NOT saved to the cloud (${err?.code || err?.message || 'unknown error'}). Your edits are still here — check your connection and press Save Draft again.` });
+    }
   };
 
   // Publish Course (Removes Draft tag & makes public)
@@ -540,10 +607,15 @@ function AQFCourseBuilderInner({
       updatedAt: Date.now()
     };
     setCurrentCourse(publishedCourse);
-    await publishCourseToMarketplace(publishedCourse);
-    onSaveCourse(publishedCourse);
-    setSaveNotice({ type: 'success', message: '🚀 Published to the OzEdu Marketplace! Course is now public with no Draft messaging.' });
-    setTimeout(() => setSaveNotice(null), 4000);
+    try {
+      await publishCourseToMarketplace(publishedCourse);
+      await onSaveCourse(publishedCourse);
+      setSaveNotice({ type: 'success', message: '🚀 Published! The course now appears in Global Search for every OzEdu teacher.' });
+      setTimeout(() => setSaveNotice(null), 4000);
+    } catch (err) {
+      console.error('Course publish failed:', err);
+      setSaveNotice({ type: 'error', message: `⚠️ The course was NOT published (${err?.code || err?.message || 'unknown error'}). Check your connection and press Publish again.` });
+    }
   };
 
   const currentUnit = currentCourse.units?.find(u => u.id === activeUnitId) || currentCourse.units?.[0];
@@ -582,7 +654,7 @@ function AQFCourseBuilderInner({
 
         <div className="builder-header-right">
           {/* Token Indicator */}
-          <div className="token-balance-pill" title="Your Token Balance">
+          <div className="token-balance-pill" title={isUnlimited ? 'Super Admin: unlimited tokens' : 'Your Token Balance'}>
             <span>🪙 {displayBalance} Tokens</span>
             {isCharity && (
               <span style={{ background: '#10b981', color: '#fff', padding: '2px 6px', borderRadius: '4px', fontSize: '0.72rem', fontWeight: 800 }}>
@@ -613,9 +685,18 @@ function AQFCourseBuilderInner({
           </button>
 
           <button
+            className="nav-btn secondary"
+            onClick={() => setIsSpreadsheetOpen(true)}
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', borderColor: 'rgba(250, 204, 21, 0.55)', color: '#fef08a' }}
+            title="Fill in every part of the course from a spreadsheet (template, worked example, import or ✨ AI build)"
+          >
+            <span>📊</span> Spreadsheet
+          </button>
+
+          <button
             className="nav-btn primary"
             onClick={() => {
-              setAiTargetLevel(currentCourse.aqfLevel !== undefined ? currentCourse.aqfLevel : 4);
+              setAiTargetLevel(currentCourse.aqfLevel !== undefined ? currentCourse.aqfLevel : 0);
               setIsAiIngestOpen(true);
               setAiNotice(null);
             }}
@@ -660,6 +741,13 @@ function AQFCourseBuilderInner({
           {saveNotice.message}
         </div>
       )}
+      {importWarnings.length > 0 && (
+        <details className="builder-import-notes">
+          <summary>⚠️ {importWarnings.length} note{importWarnings.length === 1 ? '' : 's'} from the last import — review before saving</summary>
+          <ul>{importWarnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
+          <button type="button" className="nav-btn secondary" style={{ padding: '4px 10px', fontSize: '0.78rem' }} onClick={() => setImportWarnings([])}>Dismiss</button>
+        </details>
+      )}
 
       {/* Main Grid: Left Sidebar (Units/Meta) + Right Editor */}
       <div className="builder-workspace-grid">
@@ -701,10 +789,10 @@ function AQFCourseBuilderInner({
               </div>
             </div>
 
-            <label className="field-label">AQF Level Taxonomy</label>
+            <label className="field-label">Level Taxonomy</label>
             <select
               className="form-input"
-              value={currentCourse.aqfLevel !== undefined ? currentCourse.aqfLevel : 4}
+              value={currentCourse.aqfLevel !== undefined ? currentCourse.aqfLevel : 0}
               onChange={e => handleCourseFieldChange('aqfLevel', Number(e.target.value))}
             >
               {AQF_LEVELS.map(lvl => (
@@ -751,6 +839,71 @@ function AQFCourseBuilderInner({
               onChange={e => handleCourseFieldChange('description', e.target.value)}
               placeholder="Comprehensive industry overview and target learning cohort..."
             />
+
+            <details className="course-details-more">
+              <summary>More course details</summary>
+              <label className="field-label" style={{ marginTop: '8px' }}>Category</label>
+              <input
+                type="text"
+                className="form-input"
+                value={currentCourse.category || ''}
+                onChange={e => handleCourseFieldChange('category', e.target.value)}
+                placeholder="e.g. Information Technology"
+              />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                <div>
+                  <label className="field-label" style={{ marginTop: '8px' }}>Year / Semester</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={currentCourse.year || ''}
+                    onChange={e => handleCourseFieldChange('year', e.target.value)}
+                    placeholder="2026 Semester 1"
+                  />
+                </div>
+                <div>
+                  <label className="field-label" style={{ marginTop: '8px' }}>Start Date</label>
+                  <input
+                    type="date"
+                    className="form-input"
+                    value={currentCourse.startDate || ''}
+                    onChange={e => handleCourseFieldChange('startDate', e.target.value)}
+                  />
+                </div>
+              </div>
+              <label className="field-label" style={{ marginTop: '8px' }}>Course Learning Outcomes (one per line)</label>
+              <textarea
+                rows="4"
+                className="form-input"
+                value={listToLines(currentCourse.learningOutcomes)}
+                onChange={e => handleCourseFieldChange('learningOutcomes', linesToList(e.target.value))}
+                placeholder="Analyse…&#10;Apply…&#10;Evaluate…"
+              />
+              <label className="field-label" style={{ marginTop: '8px' }}>Assumed Knowledge / Prerequisites</label>
+              <textarea
+                rows="2"
+                className="form-input"
+                value={currentCourse.knowledge || ''}
+                onChange={e => handleCourseFieldChange('knowledge', e.target.value)}
+                placeholder="What learners should already know"
+              />
+              <label className="field-label" style={{ marginTop: '8px' }}>Level Equivalence Notes</label>
+              <textarea
+                rows="2"
+                className="form-input"
+                value={currentCourse.aqfEquivalenceNotes || ''}
+                onChange={e => handleCourseFieldChange('aqfEquivalenceNotes', e.target.value)}
+                placeholder="How this maps to AQF or international frameworks"
+              />
+              <label className="field-label" style={{ marginTop: '8px' }}>Cover Image URL</label>
+              <input
+                type="url"
+                className="form-input"
+                value={currentCourse.thumbnail || ''}
+                onChange={e => handleCourseFieldChange('thumbnail', e.target.value)}
+                placeholder="https://…"
+              />
+            </details>
           </div>
 
           <div className="sidebar-section">
@@ -853,6 +1006,14 @@ function AQFCourseBuilderInner({
                   value={currentUnit.description || ''}
                   onChange={e => handleUpdateUnit(currentUnit.id, 'description', e.target.value)}
                   placeholder="Unit performance criteria and learning outcomes..."
+                />
+                <label className="field-label" style={{ marginTop: '8px' }}>Unit Learning Outcomes (one per line)</label>
+                <textarea
+                  rows="2"
+                  className="form-input"
+                  value={listToLines(currentUnit.learningOutcomes)}
+                  onChange={e => handleUpdateUnit(currentUnit.id, 'learningOutcomes', linesToList(e.target.value))}
+                  placeholder="Explain…&#10;Apply…"
                 />
               </div>
 
@@ -999,7 +1160,7 @@ function AQFCourseBuilderInner({
                                     }}
                                     placeholder="Paste YouTube Video URL (e.g. https://www.youtube.com/watch?v=...)"
                                   />
-                                  {(block.metadata?.youtubeUrl || block.content)?.includes('youtube.com') && (
+                                  {youtubeVideoId(block.metadata?.youtubeUrl || block.content) && (
                                     <div className="video-preview-badge">
                                       <span>▶️ YouTube Streaming Embed Active</span>
                                     </div>
@@ -1052,6 +1213,31 @@ function AQFCourseBuilderInner({
                                   />
                                 </div>
                               )}
+
+                              {/* BLOCK TYPE: Gemini Notebook (Gemini Notebook / NotebookLM share link) */}
+                              {block.type === 'notebook_link' && (
+                                <div>
+                                  <input
+                                    type="url"
+                                    className="form-input"
+                                    value={block.metadata?.notebookUrl || block.content || ''}
+                                    onChange={e => {
+                                      const url = e.target.value.trim();
+                                      handleUpdateBlock(currentUnit.id, lesson.id, block.id, {
+                                        content: url,
+                                        metadata: { notebookUrl: url }
+                                      });
+                                    }}
+                                    placeholder="Paste the Gemini Notebook share link (e.g. https://notebooklm.google.com/notebook/...)"
+                                  />
+                                  {(block.metadata?.notebookUrl || block.content) && !isGoogleNotebookUrl(block.metadata?.notebookUrl || block.content) && (
+                                    <div className="notebook-hint">⚠️ This does not look like a Gemini Notebook link. Paste the notebook&apos;s https:// share link (e.g. https://notebooklm.google.com/notebook/…) and share the notebook so students can open it.</div>
+                                  )}
+                                  {isGoogleNotebookUrl(block.metadata?.notebookUrl || block.content) && (
+                                    <div className="video-preview-badge">📓 Gemini Notebook link ready</div>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -1063,12 +1249,15 @@ function AQFCourseBuilderInner({
                             <button
                               key={bt.type}
                               type="button"
-                              className="add-block-btn"
-                              onClick={() => handleAddBlock(currentUnit.id, lesson.id, bt.type)}
-                              title={bt.description}
+                              className={`add-block-btn ${bt.disabled ? 'disabled' : ''}`}
+                              onClick={() => !bt.disabled && handleAddBlock(currentUnit.id, lesson.id, bt.type)}
+                              disabled={Boolean(bt.disabled)}
+                              aria-disabled={Boolean(bt.disabled)}
+                              title={bt.disabled ? bt.disabledReason : bt.description}
                             >
                               <span>{bt.icon}</span>
                               <span>{bt.label}</span>
+                              {bt.disabled && <span className="soon-badge">Soon</span>}
                             </button>
                           ))}
                         </div>
@@ -1105,9 +1294,15 @@ function AQFCourseBuilderInner({
                       <div key={asmt.id} className="assessment-card glass">
                         <div className="assessment-header-row">
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
-                            <span className={`asmt-type-pill ${asmt.type}`}>
-                              {asmt.type?.toUpperCase()}
-                            </span>
+                            <select
+                              className={`asmt-type-pill asmt-type-select ${asmt.type}`}
+                              value={asmt.type === 'summative' ? 'summative' : 'formative'}
+                              onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { type: e.target.value })}
+                              aria-label="Assessment type"
+                            >
+                              <option value="formative">FORMATIVE</option>
+                              <option value="summative">SUMMATIVE</option>
+                            </select>
                             <input
                               type="text"
                               className="form-input"
@@ -1136,16 +1331,38 @@ function AQFCourseBuilderInner({
                           placeholder="Task brief, submission requirements, and evidence portfolio..."
                         />
 
-                        {/* External Submission Link */}
-                        <div style={{ marginTop: '8px' }}>
-                          <label className="field-label">External Submission Link (Google Forms / Canvas / Teams)</label>
-                          <input
-                            type="text"
-                            className="form-input"
-                            value={asmt.externalSubmissionLinks?.[0] || ''}
-                            onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { externalSubmissionLinks: [e.target.value] })}
-                            placeholder="https://forms.google.com/... or https://teams.microsoft.com/..."
-                          />
+                        {/* Due date, weighting & external submission link */}
+                        <div className="asmt-meta-grid">
+                          <div>
+                            <label className="field-label">Due Date</label>
+                            <input
+                              type="date"
+                              className="form-input"
+                              value={asmt.dueDate || ''}
+                              onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { dueDate: e.target.value })}
+                            />
+                          </div>
+                          <div>
+                            <label className="field-label">Weighting (% of unit)</label>
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              className="form-input"
+                              value={asmt.nominalWeight ?? ''}
+                              onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { nominalWeight: e.target.value === '' ? null : Math.min(100, Math.max(0, Number(e.target.value) || 0)) })}
+                            />
+                          </div>
+                          <div className="asmt-meta-wide">
+                            <label className="field-label">External Submission Link (Google Forms / Canvas / Teams)</label>
+                            <input
+                              type="text"
+                              className="form-input"
+                              value={asmt.externalSubmissionLinks?.[0] || ''}
+                              onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { externalSubmissionLinks: [e.target.value] })}
+                              placeholder="https://forms.google.com/... or https://teams.microsoft.com/..."
+                            />
+                          </div>
                         </div>
 
                         {/* Interactive Rubric Matrix */}
@@ -1157,13 +1374,19 @@ function AQFCourseBuilderInner({
                                 (Σ {rubricWeightTotal(asmt.rubric)}%)
                               </span>
                             </strong>
-                            <button
-                              className="nav-btn secondary"
-                              style={{ fontSize: '0.78rem', padding: '4px 8px' }}
-                              onClick={() => handleAddRubricCriterion(currentUnit.id, asmt.id)}
-                            >
-                              + Add Criterion Row
-                            </button>
+                            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                              <RubricSpreadsheetImport
+                                assessment={asmt}
+                                onApply={nextRubric => handleUpdateAssessment(currentUnit.id, asmt.id, { rubric: nextRubric })}
+                              />
+                              <button
+                                className="nav-btn secondary"
+                                style={{ fontSize: '0.78rem', padding: '4px 8px' }}
+                                onClick={() => handleAddRubricCriterion(currentUnit.id, asmt.id)}
+                              >
+                                + Add Criterion Row
+                              </button>
+                            </div>
                           </div>
 
                           <div className="rubric-table-responsive">
@@ -1177,19 +1400,37 @@ function AQFCourseBuilderInner({
                                 </tr>
                               </thead>
                               <tbody>
+                                {(asmt.rubric || []).length === 0 && (
+                                  <tr>
+                                    <td colSpan={getRubricTierLabels(asmt.rubric).length + 1} style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '12px' }}>
+                                      No criteria yet — use + Add Criterion Row or ⬆ Upload Rubric.
+                                    </td>
+                                  </tr>
+                                )}
                                 {(asmt.rubric || []).map((crit) => (
                                   <tr key={crit.id}>
                                     <td>
-                                      <input
-                                        type="text"
-                                        className="form-input matrix-crit-input"
-                                        value={crit.criterionTitle || ''}
-                                        onChange={e => {
-                                          const nextRubric = asmt.rubric.map(r => r.id === crit.id ? { ...r, criterionTitle: e.target.value } : r);
-                                          handleUpdateAssessment(currentUnit.id, asmt.id, { rubric: nextRubric });
-                                        }}
-                                        placeholder="Criterion Title"
-                                      />
+                                      <div style={{ display: 'flex', gap: '4px', alignItems: 'flex-start' }}>
+                                        <input
+                                          type="text"
+                                          className="form-input matrix-crit-input"
+                                          value={crit.criterionTitle || ''}
+                                          onChange={e => {
+                                            const nextRubric = asmt.rubric.map(r => r.id === crit.id ? { ...r, criterionTitle: e.target.value } : r);
+                                            handleUpdateAssessment(currentUnit.id, asmt.id, { rubric: nextRubric });
+                                          }}
+                                          placeholder="Criterion Title"
+                                        />
+                                        <button
+                                          type="button"
+                                          className="delete-icon-btn"
+                                          onClick={() => handleDeleteRubricCriterion(currentUnit.id, asmt.id, crit.id)}
+                                          title="Remove this criterion row"
+                                          aria-label={`Remove criterion ${crit.criterionTitle || ''}`}
+                                        >
+                                          ×
+                                        </button>
+                                      </div>
                                       <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
                                         <input
                                           type="number"
@@ -1204,20 +1445,24 @@ function AQFCourseBuilderInner({
                                         <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>% weight</span>
                                       </div>
                                     </td>
-                                    {(crit.levels || []).map((lvl, lIdx) => (
-                                      <td key={lIdx}>
-                                        <textarea
-                                          rows="2"
-                                          className="form-input matrix-desc-input"
-                                          value={lvl.descriptor || ''}
-                                          onChange={e => {
-                                            const updatedLevels = crit.levels.map((oldL, i) => i === lIdx ? { ...oldL, descriptor: e.target.value } : oldL);
-                                            const nextRubric = asmt.rubric.map(r => r.id === crit.id ? { ...r, levels: updatedLevels } : r);
-                                            handleUpdateAssessment(currentUnit.id, asmt.id, { rubric: nextRubric });
-                                          }}
-                                        />
-                                      </td>
-                                    ))}
+                                    {getRubricTierLabels(asmt.rubric).map((_, lIdx) => {
+                                      const lvl = crit.levels?.[lIdx];
+                                      if (!lvl) return <td key={lIdx} className="matrix-empty-cell">—</td>;
+                                      return (
+                                        <td key={lIdx}>
+                                          <textarea
+                                            rows="2"
+                                            className="form-input matrix-desc-input"
+                                            value={lvl.descriptor || ''}
+                                            onChange={e => {
+                                              const updatedLevels = crit.levels.map((oldL, i) => i === lIdx ? { ...oldL, descriptor: e.target.value } : oldL);
+                                              const nextRubric = asmt.rubric.map(r => r.id === crit.id ? { ...r, levels: updatedLevels } : r);
+                                              handleUpdateAssessment(currentUnit.id, asmt.id, { rubric: nextRubric });
+                                            }}
+                                          />
+                                        </td>
+                                      );
+                                    })}
                                   </tr>
                                 ))}
                               </tbody>
@@ -1238,26 +1483,60 @@ function AQFCourseBuilderInner({
         </main>
       </div>
 
-      {/* MODAL 1: 10-TOKEN GEMINI AI INGESTION */}
+      {/* MODAL 1: ✨ AI ASSIST (Gemini) — from syllabus text or from course spreadsheets */}
       {isAiIngestOpen && (
-        <div className="builder-modal-overlay" onClick={() => setIsAiIngestOpen(false)}>
-          <div className="builder-modal-dialog glass" onClick={e => e.stopPropagation()}>
+        <div className="builder-modal-overlay" onClick={() => !isAiLoading && !isSpreadsheetBusy && setIsAiIngestOpen(false)}>
+          <div
+            className="builder-modal-dialog glass"
+            style={aiSourceMode === 'spreadsheet' ? { maxWidth: '780px' } : undefined}
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ai-assist-title"
+          >
             <div className="modal-header">
-              <h3 style={{ margin: 0, color: '#fef08a' }}>✨ AI Assist: Build Your Complete Course</h3>
-              <button className="close-btn" onClick={() => setIsAiIngestOpen(false)}>✕</button>
+              <h3 id="ai-assist-title" style={{ margin: 0, color: '#fef08a' }}>✨ AI Assist: Build Your Complete Course</h3>
+              <button className="close-btn" onClick={() => setIsAiIngestOpen(false)} disabled={isAiLoading || isSpreadsheetBusy} aria-label="Close">✕</button>
             </div>
 
             <div className="ai-token-cost-badge">
               <span>🪙 Cost: <strong>{isAiAssistFree ? '0 Tokens' : `${aiAssistCost} Tokens`}</strong></span>
-              {isCharity ? (
+              {isUnlimited ? (
+                <span className="charity-badge">🛡️ Super Admin — UNL tokens</span>
+              ) : isCharity ? (
                 <span className="charity-badge">🎉 Free for Charity Teachers</span>
               ) : (
                 <span>(Your balance: {displayBalance} tokens)</span>
               )}
             </div>
 
+            <div className="ai-source-toggle" role="tablist" aria-label="Build from">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={aiSourceMode === 'text'}
+                className={aiSourceMode === 'text' ? 'active' : ''}
+                onClick={() => !isSpreadsheetBusy && setAiSourceMode('text')}
+                disabled={isAiLoading || isSpreadsheetBusy}
+              >
+                📝 Syllabus text
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={aiSourceMode === 'spreadsheet'}
+                className={aiSourceMode === 'spreadsheet' ? 'active' : ''}
+                onClick={() => !isAiLoading && setAiSourceMode('spreadsheet')}
+                disabled={isAiLoading || isSpreadsheetBusy}
+              >
+                📊 Spreadsheets
+              </button>
+            </div>
+
             <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', margin: '8px 0 14px 0' }}>
-              Paste your raw course outline, syllabus file, or lesson notes below. Gemini will automatically structure units, lessons, modular content blocks, assessment tasks, and rubrics mapped to your target AQF level.
+              {aiSourceMode === 'text'
+                ? 'Paste your raw course outline, syllabus file, or lesson notes below. Gemini will automatically structure units, lessons, modular content blocks, assessment tasks, and rubrics mapped to your target level.'
+                : 'Upload your completed course spreadsheet(s). Gemini keeps everything you entered exactly as written, builds out every blank lesson, block, assessment and rubric, and never invents links.'}
             </p>
 
             <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: '10px' }}>
@@ -1272,11 +1551,13 @@ function AQFCourseBuilderInner({
               ))}
             </div>
 
-            <label className="field-label">Target AQF Level</label>
+            <label className="field-label" htmlFor="ai-target-level">Target Level{aiSourceMode === 'spreadsheet' ? ' (used when the spreadsheet does not set one)' : ''}</label>
             <select
+              id="ai-target-level"
               className="form-input"
               value={aiTargetLevel}
               onChange={e => setAiTargetLevel(Number(e.target.value))}
+              disabled={isAiLoading || isSpreadsheetBusy}
             >
               {AQF_LEVELS.map(lvl => (
                 <option key={lvl.level} value={lvl.level}>
@@ -1285,36 +1566,92 @@ function AQFCourseBuilderInner({
               ))}
             </select>
 
-            <label className="field-label" style={{ marginTop: '10px' }}>Syllabus / Course Outline</label>
-            <textarea
-              rows="7"
-              className="form-input"
-              value={aiSyllabusText}
-              onChange={e => setAiSyllabusText(e.target.value)}
-              placeholder="Paste course syllabus, lecture schedule, topic list, or learning objectives..."
-            />
+            {aiSourceMode === 'text' ? (
+              <>
+                <label className="field-label" style={{ marginTop: '10px' }}>Syllabus / Course Outline</label>
+                <textarea
+                  rows="7"
+                  className="form-input"
+                  value={aiSyllabusText}
+                  onChange={e => setAiSyllabusText(e.target.value)}
+                  placeholder="Paste course syllabus, lecture schedule, topic list, or learning objectives..."
+                />
 
-            {aiNotice && (
-              <div className={`builder-notice-bar ${aiNotice.type}`} style={{ marginTop: '12px' }}>
-                {aiNotice.message}
+                {aiNotice && (
+                  <div className={`builder-notice-bar ${aiNotice.type}`} style={{ marginTop: '12px' }}>
+                    {aiNotice.message}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '16px' }}>
+                  <button className="nav-btn secondary" onClick={() => setIsAiIngestOpen(false)} disabled={isAiLoading}>
+                    Cancel
+                  </button>
+                  <button
+                    className="nav-btn primary"
+                    onClick={handleRunAiIngestion}
+                    disabled={isAiLoading || !aiSyllabusText.trim()}
+                    style={{ background: 'linear-gradient(135deg, #a855f7, #6366f1)', border: 'none', fontWeight: 700 }}
+                  >
+                    {isAiLoading
+                      ? '⚡ AI Assist Generating...'
+                      : `Generate Course (${isAiAssistFree ? '0' : aiAssistCost} Tokens)`}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div style={{ marginTop: '12px' }}>
+                <CourseSpreadsheetPanel
+                  course={currentCourse}
+                  currentUser={currentUser}
+                  userProfile={userProfile}
+                  aiAssistCost={aiAssistCost}
+                  isAiAssistFree={isAiAssistFree}
+                  displayBalance={displayBalance}
+                  targetAqfLevel={aiTargetLevel}
+                  curriculumStandards={selectedStandardIds}
+                  skillTexts={SKILL_TEXTS}
+                  primaryAction="ai"
+                  onApplyCourse={handleApplyImportedCourse}
+                  onBusyChange={setIsSpreadsheetBusy}
+                  onRefreshBalance={onRefreshBalance}
+                />
               </div>
             )}
+          </div>
+        </div>
+      )}
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '16px' }}>
-              <button className="nav-btn secondary" onClick={() => setIsAiIngestOpen(false)} disabled={isAiLoading}>
-                Cancel
-              </button>
-              <button
-                className="nav-btn primary"
-                onClick={handleRunAiIngestion}
-                disabled={isAiLoading || !aiSyllabusText.trim()}
-                style={{ background: 'linear-gradient(135deg, #a855f7, #6366f1)', border: 'none', fontWeight: 700 }}
-              >
-                {isAiLoading
-                  ? '⚡ AI Assist Generating...'
-                  : `Generate Course (${isAiAssistFree ? '0' : aiAssistCost} Tokens)`}
-              </button>
+      {/* MODAL 1b: 📊 COURSE SPREADSHEET (template, import, ✨ AI build) */}
+      {isSpreadsheetOpen && (
+        <div className="builder-modal-overlay" onClick={() => !isSpreadsheetBusy && setIsSpreadsheetOpen(false)}>
+          <div
+            className="builder-modal-dialog glass"
+            style={{ maxWidth: '780px' }}
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="course-spreadsheet-title"
+          >
+            <div className="modal-header">
+              <h3 id="course-spreadsheet-title" style={{ margin: 0, color: '#fef08a' }}>📊 Course Spreadsheet — every part of your course, A to Z</h3>
+              <button className="close-btn" onClick={() => setIsSpreadsheetOpen(false)} disabled={isSpreadsheetBusy} aria-label="Close">✕</button>
             </div>
+            <CourseSpreadsheetPanel
+              course={currentCourse}
+              currentUser={currentUser}
+              userProfile={userProfile}
+              aiAssistCost={aiAssistCost}
+              isAiAssistFree={isAiAssistFree}
+              displayBalance={displayBalance}
+              targetAqfLevel={currentCourse.aqfLevel}
+              curriculumStandards={selectedStandardIds}
+              skillTexts={SKILL_TEXTS}
+              primaryAction="import"
+              onApplyCourse={handleApplyImportedCourse}
+              onBusyChange={setIsSpreadsheetBusy}
+              onRefreshBalance={onRefreshBalance}
+            />
           </div>
         </div>
       )}
@@ -1376,7 +1713,7 @@ function AQFCourseBuilderInner({
               <div>
                 <h3 style={{ margin: 0, color: '#fef08a' }}>🔍 Content Exchange Marketplace</h3>
                 <small style={{ color: 'var(--text-secondary)' }}>
-                  Cloning costs <strong>1 Token</strong> transferred to the author • <strong>0 Tokens</strong> for Charity Teachers
+                  Cloning costs <strong>1 Token</strong> (author royalty) • <strong>0 Tokens</strong> for Charity Teachers and the Super Admin
                 </small>
               </div>
               <button className="close-btn" onClick={() => setIsImportDrawerOpen(false)}>✕</button>
@@ -1456,7 +1793,7 @@ function AQFCourseBuilderInner({
                             style={{ padding: '4px 10px', fontSize: '0.78rem' }}
                             onClick={() => handleImportUnit(u, courseItem.authorId, courseItem.title)}
                           >
-                            {isCharity ? 'Import (0 Tokens)' : 'Import (1 Token)'}
+                            {isCharity || isUnlimited ? 'Import (0 Tokens)' : 'Import (1 Token)'}
                           </button>
                         </div>
                       ))}
@@ -2016,6 +2353,69 @@ function AQFCourseBuilderInner({
           margin-top: 3px;
           font-size: 0.72rem;
           color: #fcd34d;
+        }
+        /* ---- Spreadsheet import, notebook blocks, assessments ---- */
+        .builder-import-notes {
+          background: rgba(245, 158, 11, 0.1);
+          border: 1px solid rgba(245, 158, 11, 0.35);
+          border-radius: 10px;
+          padding: 8px 14px;
+          font-size: 0.82rem;
+          color: #fde68a;
+        }
+        .builder-import-notes summary { cursor: pointer; font-weight: 700; }
+        .builder-import-notes ul { margin: 6px 0; padding-left: 18px; max-height: 200px; overflow-y: auto; }
+        .course-details-more { margin-top: 10px; }
+        .course-details-more > summary { cursor: pointer; font-size: 0.82rem; font-weight: 700; color: #fef08a; }
+        .notebook-hint { margin-top: 6px; font-size: 0.78rem; color: #fcd34d; }
+        .add-block-btn.disabled, .add-block-btn:disabled {
+          opacity: 0.45;
+          cursor: not-allowed;
+        }
+        .add-block-btn:disabled:hover { background: rgba(255, 255, 255, 0.08); }
+        .soon-badge {
+          font-size: 0.62rem;
+          font-weight: 800;
+          text-transform: uppercase;
+          background: rgba(148, 163, 184, 0.3);
+          border-radius: 4px;
+          padding: 0 4px;
+        }
+        .asmt-type-select {
+          border: none;
+          cursor: pointer;
+          font-family: inherit;
+        }
+        .asmt-type-select option { color: #0f172a; background: #ffffff; }
+        .asmt-meta-grid {
+          display: grid;
+          grid-template-columns: 160px 160px 1fr;
+          gap: 8px;
+          margin-top: 8px;
+        }
+        @media (max-width: 760px) {
+          .asmt-meta-grid { grid-template-columns: 1fr 1fr; }
+          .asmt-meta-wide { grid-column: 1 / -1; }
+        }
+        .matrix-empty-cell { color: #64748b; text-align: center; }
+        .ai-source-toggle {
+          display: inline-flex;
+          gap: 4px;
+          padding: 4px;
+          border-radius: 999px;
+          background: rgba(0, 0, 0, 0.3);
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          margin-top: 4px;
+        }
+        .ai-source-toggle button {
+          padding: 6px 14px;
+          font-size: 0.82rem;
+          background: transparent;
+          color: var(--text-secondary);
+        }
+        .ai-source-toggle button.active {
+          background: linear-gradient(135deg, #a855f7, #6366f1);
+          color: #ffffff;
         }
       `}</style>
     </div>

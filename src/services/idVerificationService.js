@@ -1,139 +1,150 @@
+import { readEnv } from './env.js';
+import { generateGeminiJson, GEMINI_ERROR } from './geminiClient.js';
 /**
- * AI Identification Document Reader & Verification Service
- * Uses Gemini Multimodal Vision API to parse, extract, and verify uploaded ID cards/passports
- * Includes graceful offline fallback for high availability.
+ * AI Identification Document Check (Gemini Vision) for teacher applications.
+ *
+ * The applicant's photo is sent to Gemini only to read it — it is never stored. Results are honest:
+ * a 0-100 confidence score from Gemini, masked document numbers, and when Gemini is unavailable the
+ * document is marked "Not verified" for manual review (never a made-up score). Applications are
+ * never blocked by this check.
  */
 
 const GEMINI_API_KEY =
-  import.meta.env.VITE_GEMINI_API_KEY ||
-  import.meta.env.VITE_GEMINI_API_KEY_ALTERNATE ||
+  readEnv(() => import.meta.env.VITE_GEMINI_API_KEY, 'VITE_GEMINI_API_KEY') ||
+  readEnv(() => import.meta.env.VITE_GEMINI_API_KEY_ALTERNATE, 'VITE_GEMINI_API_KEY_ALTERNATE') ||
   '';
 
-/**
- * Parses a Data URL into mimeType and raw base64 data
- */
-function extractMimeAndBase64(dataUrl) {
-  if (!dataUrl) return null;
-  const match = dataUrl.match(/^data:([a-zA-Z0-9]+\/[a-zA-Z0-9-.+]+);base64,(.+)$/);
-  if (match) {
-    return {
-      mimeType: match[1],
-      data: match[2]
-    };
-  }
+export const ID_DOCUMENT_TYPES = Object.freeze(['Passport', 'Driver Licence', 'National ID', 'Teacher Registration Card', 'Student Card', 'Other ID', 'Not an identification document']);
+export const ID_ASSESSMENTS = Object.freeze(['Likely Authentic', 'Manual Review Recommended', 'Suspicious', 'Not an ID document']);
+export const NOT_VERIFIED = 'Not verified — manual review needed';
+
+const RESULT_SCHEMA = {
+  type: 'object',
+  properties: {
+    document_type: { type: 'string', enum: ID_DOCUMENT_TYPES },
+    full_name: { type: 'string' },
+    name_match: { type: 'boolean' },
+    id_number_masked: { type: 'string' },
+    issuing_authority: { type: 'string' },
+    expiry_status: { type: 'string', enum: ['Valid', 'Expired', 'No expiry', 'Unreadable'] },
+    authenticity_assessment: { type: 'string', enum: ID_ASSESSMENTS },
+    confidence_score: { type: 'integer', minimum: 0, maximum: 100 },
+    verification_notes: { type: 'string' }
+  },
+  required: ['document_type', 'full_name', 'name_match', 'id_number_masked', 'authenticity_assessment', 'confidence_score', 'verification_notes']
+};
+
+/** "data:image/jpeg;base64,…" -> { mimeType, data } (null when it is not an inline image). */
+function parseImageDataUrl(dataUrl) {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(String(dataUrl || ''));
+  return match ? { mimeType: match[1].toLowerCase(), data: match[2] } : null;
+}
+
+/** Never more than the last 3 characters of a document number are kept. */
+export function maskIdNumber(value) {
+  const visible = String(value || '').replace(/[^A-Za-z0-9]/g, '').slice(-3);
+  return visible ? `****${visible}` : '';
+}
+
+function notVerified(reason) {
   return {
-    mimeType: 'image/jpeg',
-    data: dataUrl
+    verified: false,
+    document_type: 'Not checked',
+    full_name: '',
+    name_match: null,
+    id_number_masked: '',
+    issuing_authority: '',
+    expiry_status: '',
+    authenticity_assessment: NOT_VERIFIED,
+    confidence_score: null,
+    verification_notes: reason,
+    scanned_at: new Date().toISOString(),
+    ai_engine: 'none'
   };
 }
 
-/**
- * Analyzes an uploaded ID document using Gemini Vision API
- * @param {string} imageDataUrl - Base64 Data URL of the uploaded image
- * @param {object} applicantInfo - { name, email, specialty }
- * @returns {Promise<object>} Extracted ID details and verification assessment
- */
-export async function analyzeIdentificationDocument(imageDataUrl, applicantInfo = {}) {
-  const applicantName = applicantInfo.name || 'Applicant';
-  const applicantEmail = applicantInfo.email || '';
+/** Older versions stored a simulated result (no AI) with a made-up score; it is never shown as verified. */
+function isSimulatedResult(check) {
+  return /heuristic fallback/i.test(String(check?.ai_engine || ''));
+}
 
-  // 1. Attempt Gemini Multimodal Vision Analysis
-  if (GEMINI_API_KEY && imageDataUrl) {
-    const parsedImage = extractMimeAndBase64(imageDataUrl);
-    if (parsedImage) {
-      const prompt = `You are an automated identity verification AI for the OzEdu academic credentialing system.
-Analyze this uploaded identification document image (e.g. Driver's License, Passport, National ID card, Teaching Certificate).
+/** True only for a real AI check that produced a confidence score. */
+export function hasVerifiedScore(check) {
+  return Boolean(check) && typeof check === 'object' && check.verified !== false &&
+    Number.isFinite(check.confidence_score) && !isSimulatedResult(check);
+}
 
-The applicant's stated name is: "${applicantName}"
-The applicant's email is: "${applicantEmail}"
-
-Extract the following information and output strictly valid JSON:
-{
-  "document_type": "Driver License | Passport | National ID | Teacher Certification Card | Student Card",
-  "full_name": "Full legal name printed on the document",
-  "name_match": true or false (does the detected name closely match "${applicantName}"?),
-  "id_number_masked": "Partially masked ID number (e.g. AB****89)",
-  "issuing_authority": "Country, State, or Issuing Organization detected on document",
-  "expiry_status": "Valid | Expired | Indefinite",
-  "authenticity_assessment": "Verified Authentic | Likely Authentic - Clear Card Features | Manual Review Recommended",
-  "confidence_score": integer from 70 to 99,
-  "verification_notes": "A brief summary of detected security features (e.g., photo present, clear microprint, readable barcode/mrz, legible text) and verification recommendation."
-}`;
-
-      const models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-flash-latest'];
-
-      for (const model of models) {
-        try {
-          const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [
-                  {
-                    parts: [
-                      {
-                        inlineData: {
-                          mimeType: parsedImage.mimeType,
-                          data: parsedImage.data
-                        }
-                      },
-                      { text: prompt }
-                    ]
-                  }
-                ],
-                generationConfig: {
-                  temperature: 0.1,
-                  responseMimeType: 'application/json'
-                }
-              })
-            }
-          );
-
-          if (!response.ok) {
-            console.warn(`Gemini Vision model ${model} HTTP ${response.status}`);
-            continue;
-          }
-
-          const resData = await response.json();
-          const text = resData?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text) {
-            const clean = text
-              .replace(/^```json\s*/i, '')
-              .replace(/^```\s*/, '')
-              .replace(/```\s*$/, '')
-              .trim();
-            const result = JSON.parse(clean);
-            return {
-              ...result,
-              scanned_at: new Date().toISOString(),
-              ai_engine: `Gemini Vision (${model})`,
-              raw_match_verified: true
-            };
-          }
-        } catch (apiErr) {
-          console.warn(`Gemini Vision attempt failed for ${model}:`, apiErr);
-        }
-      }
-    }
-  }
-
-  // 2. High-Reliability Graceful Fallback Analyzer
-  // Ensures user registration is NEVER blocked if AI API quota or network fluctuates
-  const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+/** Keeps only known fields, bounded and typed (also used before an application is saved). */
+export function sanitizeIdVerification(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const str = (value, max) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
+  const score = raw.confidence_score === null || raw.confidence_score === '' ? NaN : Number(raw.confidence_score);
+  const verified = raw.verified !== false && Number.isFinite(score) && !isSimulatedResult(raw);
   return {
-    document_type: "Government Photo Identification",
-    full_name: applicantName,
-    name_match: true,
-    id_number_masked: `ID-****${randomSuffix}`,
-    issuing_authority: "National / State Issuing Authority",
-    expiry_status: "Valid",
-    authenticity_assessment: "Likely Authentic - Valid Digital Copy",
-    confidence_score: 88,
-    verification_notes: `Document accepted for ${applicantName}. Visual inspection shows valid photograph, legible identifying text, and standard security formatting. Ready for Super Admin review.`,
-    scanned_at: new Date().toISOString(),
-    ai_engine: "OzEdu Neural Document Processor (Heuristic Fallback)",
-    raw_match_verified: true
+    verified,
+    document_type: str(raw.document_type, 80) || (verified ? 'Other ID' : 'Not checked'),
+    full_name: str(raw.full_name, 160),
+    name_match: typeof raw.name_match === 'boolean' ? raw.name_match : null,
+    id_number_masked: maskIdNumber(raw.id_number_masked),
+    issuing_authority: str(raw.issuing_authority, 120),
+    expiry_status: str(raw.expiry_status, 40),
+    authenticity_assessment: verified ? (str(raw.authenticity_assessment, 80) || 'Manual Review Recommended') : NOT_VERIFIED,
+    confidence_score: verified ? Math.max(0, Math.min(100, Math.round(score))) : null,
+    verification_notes: str(raw.verification_notes, 600),
+    scanned_at: str(raw.scanned_at, 40),
+    ai_engine: str(raw.ai_engine, 80)
   };
+}
+
+function buildIdPrompt(applicantName, applicantEmail) {
+  return `You check identification documents for OzEdu teacher applications.
+Look at the attached image and report only what you can actually see. Be strict and honest: if the image is not an identification document, is unreadable, or shows signs of editing, say so and give a low confidence score.
+
+Applicant's name: ${JSON.stringify(applicantName)}
+Applicant's email: ${JSON.stringify(applicantEmail)}
+
+Return a JSON object:
+- document_type: one of ${ID_DOCUMENT_TYPES.map(t => `"${t}"`).join(', ')}
+- full_name: the name printed on the document ("" if none is readable)
+- name_match: true only if the printed name clearly matches the applicant's name
+- id_number_masked: the document number with every character except the last 3 replaced by * ("" if none). Never return the full number.
+- issuing_authority: the country, state or organisation that issued it ("" if unknown)
+- expiry_status: "Valid", "Expired", "No expiry" or "Unreadable"
+- authenticity_assessment: one of ${ID_ASSESSMENTS.map(t => `"${t}"`).join(', ')}
+- confidence_score: integer 0-100 — how confident you are that this is a genuine, unaltered identification document belonging to the applicant (0 = not an ID or clearly altered, 100 = certain)
+- verification_notes: one or two sentences on what you checked (photo, printed text, security features) and anything the reviewer should look at`;
+}
+
+/**
+ * Asks Gemini to check an uploaded ID image. Never throws except when `signal` aborts: if the check
+ * cannot run, the result says "Not verified" so a person reviews the document link instead.
+ * @param {string} imageDataUrl inline image data URL (already downscaled by the form)
+ * @param {{ name?: string, email?: string }} applicantInfo
+ */
+export async function analyzeIdentificationDocument(imageDataUrl, applicantInfo = {}, { apiKey = GEMINI_API_KEY, models, fetchImpl, signal } = {}) {
+  const image = parseImageDataUrl(imageDataUrl);
+  if (!image) return notVerified('The file could not be read as an image, so it was not checked.');
+  if (!apiKey) return notVerified('The AI document check is not set up on this site. The Super Admin will review the document link manually.');
+  try {
+    const { data, model } = await generateGeminiJson({
+      prompt: buildIdPrompt(String(applicantInfo.name || 'Applicant'), String(applicantInfo.email || '')),
+      images: [image],
+      apiKey,
+      models,
+      fetchImpl,
+      signal,
+      responseJsonSchema: RESULT_SCHEMA,
+      maxOutputTokens: 4096,
+      attemptTimeoutMs: 30000,
+      deadlineMs: 60000,
+      label: 'ID document check'
+    });
+    return sanitizeIdVerification({ ...data, verified: true, scanned_at: new Date().toISOString(), ai_engine: `Gemini (${model})` });
+  } catch (err) {
+    if (err?.code === GEMINI_ERROR.ABORTED) throw err;
+    console.warn('ID document check unavailable:', err?.message || err);
+    return notVerified(err?.code === GEMINI_ERROR.BLOCKED
+      ? 'Gemini declined to read this image. The Super Admin will review the document link manually.'
+      : 'The AI document check is unavailable right now. The Super Admin will review the document link manually.');
+  }
 }

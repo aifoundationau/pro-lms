@@ -4,7 +4,9 @@
  * free content request workflows, and cross-course discovery.
  */
 
-import { getUserTokenBalance, creditUserTokens } from './tokenService.js';
+import { getUserTokenBalance } from './tokenService.js';
+import { deductUserTokens } from './aiAssistTokenService.js';
+import { hasUnlimitedTokens } from './rolePrivileges.js';
 import { generateEntityId } from '../types/courseBuilderTypes.js';
 
 // Local storage key for fallback / offline simulation
@@ -77,6 +79,16 @@ export async function executeContentClone({
     };
   }
 
+  // Super Admin: unlimited tokens (UNL)
+  if (hasUnlimitedTokens(userProfile)) {
+    return {
+      success: true,
+      cost: 0,
+      superadminPass: true,
+      message: `🛡️ Super Admin (UNL): cloned "${entityTitle}" at 0 tokens.`
+    };
+  }
+
   // Self-cloning: 0 tokens
   if (currentUser.uid === targetAuthorId) {
     return {
@@ -100,21 +112,32 @@ export async function executeContentClone({
     throw error;
   }
 
-  // Deduct 1 token from buyer
-  await creditUserTokens(currentUser.uid, -1);
-
-  // Credit 1 token to original author if author exists
-  if (targetAuthorId && targetAuthorId !== 'anonymous' && targetAuthorId !== 'system') {
-    await creditUserTokens(targetAuthorId, 1).catch(err => {
-      console.warn('Author credit notice:', err);
-    });
+  // Deduct 1 token from the buyer (transactional; the balance can never go negative).
+  // The author's 1-token royalty is recorded in the token ledger for the Super Admin to pay out.
+  const royaltyNote = targetAuthorId && targetAuthorId !== 'anonymous' && targetAuthorId !== 'system'
+    ? `royalty_author_uid=${targetAuthorId}`
+    : '';
+  try {
+    await deductUserTokens(currentUser.uid, 1, { type: 'content_clone', note: `${entityType}:${entityId} ${royaltyNote}`.trim() });
+  } catch (err) {
+    if (err?.code === 'INSUFFICIENT_TOKENS') {
+      const error = new Error(`Insufficient tokens (Current balance: ${err.currentBalance ?? balance} tokens. 1 token required).`);
+      error.code = 'INSUFFICIENT_TOKENS';
+      error.requiredTokens = 1;
+      error.canRequestFree = true;
+      error.entityId = entityId;
+      error.entityType = entityType;
+      error.authorId = targetAuthorId;
+      throw error;
+    }
+    throw new Error('The 1-token charge could not be processed. No tokens were deducted — please try again.');
   }
 
   return {
     success: true,
     cost: 1,
     charityPassApplied: false,
-    message: `Transferred 1 token to author. "${entityTitle}" successfully imported into your course builder!`
+    message: `1 token paid (author royalty recorded). "${entityTitle}" successfully imported into your course builder!`
   };
 }
 

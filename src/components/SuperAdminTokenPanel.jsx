@@ -3,13 +3,20 @@ import {
   getTokenConfig,
   updateTokenPrice,
   getEligibleAccountsForRedistribution,
-  redistributeTokensFromPool
+  redistributeTokensFromPool,
+  grantTokensByEmail,
+  validateGrantAmount,
+  MAX_GRANT_TOKENS
 } from '../services/tokenService';
+import { fetchInboxOnce, notifyTokenGrant } from '../services/messageService';
+import { resolvePrivileges, UNLIMITED_TOKENS_LABEL } from '../services/rolePrivileges';
 import {
   listAllTeacherApplications,
   approveTeacherApplication,
-  rejectTeacherApplication
+  rejectTeacherApplication,
+  isValidDocumentUrl
 } from '../services/teacherApplicationService';
+import { hasVerifiedScore } from '../services/idVerificationService';
 import { ALLOWED_ROLES, listAllUsers, updateMemberRole, updateUserCharityStatus } from '../services/authService';
 import {
   DEFAULT_AI_ASSIST_COST_TOKENS,
@@ -18,8 +25,16 @@ import {
   updateAiAssistCostTokens
 } from '../services/aiAssistTokenService';
 
-export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
-  const [activeTab, setActiveTab] = useState('tokens'); // 'tokens' | 'redistribute' | 'teachers' | 'roles'
+export default function SuperAdminTokenPanel({ currentUser, userProfile, isOpen, onClose }) {
+  const [activeTab, setActiveTab] = useState('grant'); // 'grant' | 'tokens' | 'redistribute' | 'teachers' | 'roles'
+
+  // 🎁 Give Tokens State (Super Admin grants: 1–999 tokens at a time, by registered email)
+  const [grantEmail, setGrantEmail] = useState('');
+  const [grantAmount, setGrantAmount] = useState('50');
+  const [grantNote, setGrantNote] = useState('');
+  const [isGranting, setIsGranting] = useState(false);
+  const [tokenRequests, setTokenRequests] = useState([]);
+  const [recentGrants, setRecentGrants] = useState([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState({ type: '', message: '' });
 
@@ -67,6 +82,9 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
       setEligibleAccounts(eligible || []);
       setTeacherApps(apps || []);
       setAllUsers(users || []);
+      fetchInboxOnce({ email: currentUser.email, isSuperadmin: true })
+        .then(list => setTokenRequests(list.filter(m => m.category === 'token_request' && m.senderEmail !== String(currentUser.email || '').toLowerCase()).slice(0, 30)))
+        .catch(err => console.warn('Token requests could not be loaded:', err?.code || err));
     } catch (err) {
       console.warn('Error loading admin panel data:', err);
       setNotice({ type: 'error', message: err?.message || 'Could not load complete admin data.' });
@@ -80,6 +98,51 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
       loadData();
     }
   }, [isOpen, loadData]);
+
+  // Handler: 🎁 Give tokens by registered email (1–999 at a time)
+  const handleGrantTokens = async (e) => {
+    e.preventDefault();
+    setNotice({ type: '', message: '' });
+    let amount;
+    try {
+      amount = validateGrantAmount(Number(grantAmount));
+    } catch (err) {
+      setNotice({ type: 'error', message: err.message });
+      return;
+    }
+    const email = grantEmail.trim().toLowerCase();
+    if (!window.confirm(`Give ${amount} tokens to ${email}?`)) return;
+    setIsGranting(true);
+    try {
+      const result = await grantTokensByEmail({ adminUid: currentUser.uid, email, amount, note: grantNote });
+      await notifyTokenGrant({
+        sender: currentUser,
+        senderProfile: userProfile || { email: currentUser.email, role: 'superadmin' },
+        recipientEmail: result.email,
+        recipientName: result.displayName,
+        amount: result.amount,
+        newBalance: result.newBalance,
+        note: grantNote.trim()
+      }).catch(err => console.warn('Grant message not sent:', err));
+      setRecentGrants(prev => [{ ...result, at: new Date().toISOString() }, ...prev].slice(0, 10));
+      setAllUsers(prev => prev.map(u => (u.uid === result.uid ? { ...u, token_balance: result.newBalance } : u)));
+      setNotice({
+        type: 'success',
+        message: `🎁 Gave ${result.amount} tokens to ${result.displayName} (${result.email}). New balance: ${result.newBalance} tokens.${result.otherMatches ? ' (Note: more than one account uses this email.)' : ''}`
+      });
+      setGrantNote('');
+    } catch (err) {
+      setNotice({ type: 'error', message: err?.message || 'The grant failed.' });
+    } finally {
+      setIsGranting(false);
+    }
+  };
+
+  const prefillGrant = (email, amount) => {
+    setGrantEmail(email || '');
+    if (amount) setGrantAmount(String(Math.min(MAX_GRANT_TOKENS, Math.max(1, Math.floor(amount)))));
+    setActiveTab('grant');
+  };
 
   // Handler: Set Token Price
   const handleSaveTokenPrice = async (e) => {
@@ -211,6 +274,12 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
               Firebase Admin & System Governance • Token Economy, Fund Redistribution & Faculty Certification
             </p>
           </div>
+          <span
+            title="Super Admin has unlimited tokens"
+            style={{ marginLeft: 'auto', marginRight: '12px', background: 'rgba(245, 158, 11, 0.2)', border: '1px solid #f59e0b', color: '#fbbf24', padding: '4px 12px', borderRadius: '999px', fontWeight: 800, fontSize: '0.85rem', whiteSpace: 'nowrap' }}
+          >
+            🪙 {UNLIMITED_TOKENS_LABEL} Tokens
+          </span>
           <button onClick={onClose} style={{
             background: 'rgba(255,255,255,0.1)', border: 'none', color: '#ffffff',
             borderRadius: '8px', width: '32px', height: '32px', cursor: 'pointer',
@@ -220,8 +289,18 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
 
         {/* Navigation Tabs */}
         <div style={{
-          display: 'flex', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', padding: '0 1rem'
+          display: 'flex', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', padding: '0 1rem', overflowX: 'auto'
         }}>
+          <button
+            onClick={() => setActiveTab('grant')}
+            style={{
+              padding: '12px 18px', border: 'none', background: 'none', fontWeight: 600, fontSize: '0.9rem',
+              cursor: 'pointer', borderBottom: activeTab === 'grant' ? '3px solid #6366f1' : '3px solid transparent',
+              color: activeTab === 'grant' ? '#4f46e5' : '#64748b'
+            }}
+          >
+            🎁 Give Tokens{tokenRequests.length ? ` (${tokenRequests.length} requests)` : ''}
+          </button>
           <button
             onClick={() => setActiveTab('tokens')}
             style={{
@@ -284,6 +363,96 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
             </div>
           ) : (
             <>
+              {/* TAB 0: 🎁 GIVE TOKENS */}
+              {activeTab === 'grant' && (
+                <div>
+                  <div style={{ background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '14px', padding: '1.5rem', marginBottom: '1.5rem' }}>
+                    <h4 style={{ margin: '0 0 6px 0', fontSize: '1.1rem', color: '#0f172a' }}>🎁 Give tokens to any registered account</h4>
+                    <p style={{ margin: '0 0 14px 0', fontSize: '0.85rem', color: '#64748b' }}>
+                      Enter the person's registered (Google sign-in) email. Up to {MAX_GRANT_TOKENS} tokens at a time, any time. They get a green “Token Grant” message.
+                    </p>
+                    <form onSubmit={handleGrantTokens} style={{ display: 'grid', gridTemplateColumns: 'minmax(200px, 2fr) minmax(100px, 1fr)', gap: '10px' }}>
+                      <input
+                        type="email"
+                        required
+                        placeholder="student@school.edu.au"
+                        value={grantEmail}
+                        onChange={e => setGrantEmail(e.target.value)}
+                        aria-label="Registered email"
+                        style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '0.95rem', boxSizing: 'border-box', minWidth: 0 }}
+                      />
+                      <input
+                        type="number"
+                        min="1"
+                        max={MAX_GRANT_TOKENS}
+                        step="1"
+                        required
+                        value={grantAmount}
+                        onChange={e => setGrantAmount(e.target.value)}
+                        aria-label="Tokens to give"
+                        style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '0.95rem', fontWeight: 700, boxSizing: 'border-box', minWidth: 0 }}
+                      />
+                      <input
+                        type="text"
+                        maxLength={300}
+                        placeholder="Note to the recipient (optional)"
+                        value={grantNote}
+                        onChange={e => setGrantNote(e.target.value)}
+                        aria-label="Note"
+                        style={{ gridColumn: '1 / -1', padding: '10px 14px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '0.9rem', boxSizing: 'border-box' }}
+                      />
+                      <button
+                        type="submit"
+                        disabled={isGranting}
+                        style={{ gridColumn: '1 / -1', padding: '11px 20px', borderRadius: '8px', border: 'none', background: 'linear-gradient(135deg, #16a34a 0%, #15803d 100%)', color: '#ffffff', fontWeight: 700, cursor: isGranting ? 'wait' : 'pointer' }}
+                      >
+                        {isGranting ? 'Giving tokens…' : `🎁 Give ${grantAmount || 0} tokens`}
+                      </button>
+                    </form>
+                    {recentGrants.length > 0 && (
+                      <div style={{ marginTop: '12px', fontSize: '0.82rem', color: '#334155' }}>
+                        <strong>Given this session:</strong>
+                        <ul style={{ margin: '4px 0 0', paddingLeft: '18px' }}>
+                          {recentGrants.map((g, i) => <li key={i}>{g.amount} → {g.email} (balance {g.newBalance})</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+
+                  <h4 style={{ margin: '0 0 10px 0', color: '#0f172a' }}>🪙 Token requests from the message board</h4>
+                  {tokenRequests.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '1.5rem', background: '#f8fafc', borderRadius: '10px', color: '#64748b', fontSize: '0.88rem' }}>
+                      No token requests yet. Teachers and students ask from 💬 Messages → 🪙 Request tokens.
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {tokenRequests.map(m => {
+                        const amount = Number(m.meta?.tokensRequested || m.meta?.tokensPurchased) || 0;
+                        const email = m.meta?.requesterEmail || m.senderEmail;
+                        return (
+                          <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', border: '1px solid #fde68a', background: '#fffbeb', borderRadius: '10px', padding: '10px 14px' }}>
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontWeight: 700, color: '#0f172a' }}>{m.senderName} <span style={{ fontWeight: 400, color: '#64748b' }}>({email})</span></div>
+                              <div style={{ fontSize: '0.82rem', color: '#92400e' }}>
+                                {amount} tokens{m.meta?.stripeSessionId ? ' • paid via Stripe (verify in 💬 Messages)' : ''} • {m.createdAtMs ? new Date(m.createdAtMs).toLocaleString() : ''}
+                              </div>
+                              <div style={{ fontSize: '0.8rem', color: '#475569', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.body}</div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => prefillGrant(email, amount)}
+                              style={{ padding: '6px 12px', borderRadius: '8px', border: 'none', background: '#4f46e5', color: '#fff', fontWeight: 700, fontSize: '0.8rem', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                            >
+                              Fill form
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* TAB 1: TOKEN ECONOMY & PRICE SETTING */}
               {activeTab === 'tokens' && (
                 <div>
@@ -552,18 +721,36 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
                               </div>
                             </div>
 
-                            {/* AI Verification Box */}
-                            {app.ai_id_verification && (
-                              <div style={{ background: '#f8fafc', padding: '10px', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '0.8rem' }}>
-                                <div style={{ fontWeight: 700, color: '#334155', marginBottom: '4px' }}>
-                                  🤖 AI ID Document Analysis:
-                                </div>
-                                <div><strong>Document:</strong> {app.ai_id_verification.document_type}</div>
-                                <div><strong>ID Number:</strong> {app.ai_id_verification.id_number_masked}</div>
-                                <div><strong>Confidence:</strong> {app.ai_id_verification.confidence_score}%</div>
-                                <div><strong>Assessment:</strong> {app.ai_id_verification.authenticity_assessment}</div>
+                            {/* ID check: AI result (or "Not verified") and the link to the original document */}
+                            <div style={{ background: '#f8fafc', padding: '10px', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '0.8rem', wordBreak: 'break-word' }}>
+                              <div style={{ fontWeight: 700, color: '#334155', marginBottom: '4px' }}>
+                                🤖 ID Document Check:
                               </div>
-                            )}
+                              {!app.ai_id_verification ? (
+                                <div style={{ color: '#64748b' }}>No document was uploaded for the AI check.</div>
+                              ) : !hasVerifiedScore(app.ai_id_verification) ? (
+                                <div style={{ color: '#b45309' }}><strong>Not verified</strong> — manual review needed.</div>
+                              ) : (
+                                <>
+                                  <div><strong>Confidence:</strong> {app.ai_id_verification.confidence_score}%</div>
+                                  <div><strong>Document:</strong> {app.ai_id_verification.document_type}</div>
+                                  {app.ai_id_verification.full_name && (
+                                    <div>
+                                      <strong>Name on document:</strong> {app.ai_id_verification.full_name}
+                                      {app.ai_id_verification.name_match === false && <span style={{ color: '#b45309' }}> (does not match)</span>}
+                                    </div>
+                                  )}
+                                  {app.ai_id_verification.id_number_masked && <div><strong>Number:</strong> {app.ai_id_verification.id_number_masked}</div>}
+                                  <div><strong>Assessment:</strong> {app.ai_id_verification.authenticity_assessment}</div>
+                                </>
+                              )}
+                              <div style={{ marginTop: '6px', wordBreak: 'break-all' }}>
+                                <strong>Original document:</strong>{' '}
+                                {isValidDocumentUrl(app.id_document_url)
+                                  ? <a href={app.id_document_url} target="_blank" rel="noopener noreferrer" style={{ color: '#4338ca' }}>Open link ↗</a>
+                                  : <span style={{ color: '#64748b' }}>no link provided</span>}
+                              </div>
+                            </div>
                           </div>
                         </div>
                       ))}
@@ -599,10 +786,10 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
                             <td style={{ padding: '10px 14px' }}>
                               <span style={{
                                 padding: '2px 8px', borderRadius: '8px', fontSize: '0.75rem', fontWeight: 700,
-                                background: u.role === 'Superadmin' ? '#fef3c7' : u.role === 'teacher' ? '#e0e7ff' : '#f1f5f9',
-                                color: u.role === 'Superadmin' ? '#b45309' : u.role === 'teacher' ? '#3730a3' : '#475569'
+                                background: String(u.role).toLowerCase() === 'superadmin' ? '#fef3c7' : String(u.role).toLowerCase() === 'teacher' ? '#e0e7ff' : '#f1f5f9',
+                                color: String(u.role).toLowerCase() === 'superadmin' ? '#b45309' : String(u.role).toLowerCase() === 'teacher' ? '#3730a3' : '#475569'
                               }}>
-                                {u.role || 'Supporter'}
+                                {String(u.role || 'supporter').toLowerCase()}
                               </span>
                             </td>
                             <td style={{ padding: '10px 14px' }}>
@@ -620,12 +807,22 @@ export default function SuperAdminTokenPanel({ currentUser, isOpen, onClose }) {
                                 {u.isCharityTeacher ? '🎉 Active (0 Tokens)' : 'Standard (1 Token)'}
                               </button>
                             </td>
-                            <td style={{ padding: '10px 14px', fontWeight: 600 }}>
-                              {u.token_balance || 0} 🪙
+                            <td style={{ padding: '10px 14px', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                              {resolvePrivileges(u).hasUnlimitedTokens ? UNLIMITED_TOKENS_LABEL : (u.token_balance || 0)} 🪙
+                              {!resolvePrivileges(u).hasUnlimitedTokens && u.email && (
+                                <button
+                                  type="button"
+                                  onClick={() => prefillGrant(u.email, 50)}
+                                  title="Give tokens to this member"
+                                  style={{ marginLeft: '6px', padding: '2px 8px', borderRadius: '8px', border: '1px solid #86efac', background: '#f0fdf4', color: '#166534', fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer' }}
+                                >
+                                  🎁 Give
+                                </button>
+                              )}
                             </td>
                             <td style={{ padding: '10px 14px' }}>
                               <select
-                                value={u.role || 'Supporter'}
+                                value={String(u.role || 'supporter').toLowerCase()}
                                 onChange={(e) => handleRoleChange(u.uid, e.target.value)}
                                 disabled={updatingUid === u.uid}
                                 style={{

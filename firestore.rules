@@ -1,10 +1,18 @@
 rules_version = '2';
 
-// Production-Hardened Firestore Security Rules
-// - Prevents self-elevation of permissions
-// - Enforces default 'Supporter' role for newly registered users
-// - Dynamically verifies Superadmin privileges from Firestore /users/{uid}
-// - Enforces strict NO-DELETE policy across all courses, rosters, topics, and coursework
+// Production-Hardened Firestore Security Rules (OzEdu LMS)
+// - New accounts are "Supporter"; nobody can raise their own role, Charity Pass or token balance
+// - Super Admin (users/{uid}.role == 'Superadmin', or the verified project-owner account) can do
+//   everything below and never needs tokens; only the Super Admin can give tokens
+// - Teachers own their courses (authorId) and manage their own rosters and submissions
+// - Students see only their own enrolments and submissions
+// - Message board (chat_interactions): anyone -> Super Admin, teachers -> students,
+//   students -> the teachers of courses they are enrolled in
+// - Strict NO-DELETE policy across courses, rosters, coursework, messages and ledgers
+//
+// IMPORTANT: deploying replaces ALL live rules in the project. If other apps in the
+// ai-foundation-firebase project use chat_interactions (or other collections) with rules that
+// were added in the Firebase Console, merge them into this file before deploying.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -17,22 +25,59 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == uid;
     }
 
-    // Dynamically resolve Superadmin role from Firestore without hardcoding identities
+    // Lower-case sign-in email ('' when the token has none)
+    function myEmail() {
+      return request.auth.token.get('email', '').lower();
+    }
+
+    function emailVerified() {
+      return signedIn() && request.auth.token.get('email_verified', false) == true;
+    }
+
+    // The project owner account (also treated as Super Admin by the app)
+    function isOwnerAccount() {
+      return emailVerified() && myEmail() == 'support@aifoundation.net.au';
+    }
+
+    function userPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    // Dynamically resolve superadmin role from Firestore (accepts lowercase 'superadmin' and legacy 'Superadmin')
     function isSuperadmin() {
-      return signedIn() &&
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Superadmin';
+      return signedIn() && (
+        isOwnerAccount()
+        || (exists(userPath()) && get(userPath()).data.get('role', '').lower() == 'superadmin')
+      );
     }
 
     // Dynamically resolve staff privileges
     function isStaff() {
-      return signedIn() &&
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        (
-          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in [
-            'Superadmin', 'teacher', 'admin staff', 'CEO', 'COO', 'CFO', 'Financial team'
-          ] || request.auth.token.lmsStaff == true
-        );
+      return signedIn() && (
+        isSuperadmin()
+        || request.auth.token.get('lmsStaff', false) == true
+        || (exists(userPath()) && get(userPath()).data.get('role', '').lower() in [
+             'superadmin', 'teacher', 'admin staff', 'ceo', 'coo', 'cfo', 'financial team'
+           ])
+      );
+    }
+
+    function coursePath(courseId) {
+      return /databases/$(database)/documents/lms_courses/$(courseId);
+    }
+
+    // Teacher who owns the course ('' for legacy courses created before ownership was recorded)
+    function courseOwner(courseId) {
+      return get(coursePath(courseId)).data.get('authorId', '');
+    }
+
+    function managesCourse(courseId) {
+      return isSuperadmin() || (isStaff() && exists(coursePath(courseId)) && courseOwner(courseId) in [request.auth.uid, '']);
+    }
+
+    // Enrolment documents use the id "<courseId>__<lower-case email>"
+    function isEnrolled(courseId) {
+      return emailVerified() && exists(/databases/$(database)/documents/course_members/$(courseId + '__' + myEmail()));
     }
 
     // ---- User Profiles & Role Enforcement (/users/{userId}) ----
@@ -40,31 +85,67 @@ service cloud.firestore {
       // Users read own profile; staff can view user directory
       allow read: if isUser(userId) || isStaff();
 
-      // Newly registered users: MUST have default role & classification "Supporter" (prevents self-elevation)
+      // Newly registered users: default role & classification "supporter", 0 tokens, no Charity Pass
+      // (the verified project-owner account may register as superadmin)
       allow create: if isUser(userId)
-                    && request.resource.data.role == 'Supporter'
-                    && request.resource.data.classification == 'Supporter';
+                    && request.resource.data.get('token_balance', 0) == 0
+                    && request.resource.data.get('isCharityTeacher', false) == false
+                    && (
+                      (request.resource.data.role.lower() == 'supporter' && request.resource.data.classification.lower() == 'supporter')
+                      || (isOwnerAccount() && request.resource.data.role.lower() == 'superadmin')
+                    );
 
-      // Self-update: can update display profile / login counts, but CANNOT modify role or classification
-      // Role modifications are strictly restricted to verified Superadmins
+      // Self-update: profile, login counts and spending tokens (balance may only go DOWN).
+      // Role, classification and Charity Pass changes are reserved for the Super Admin,
+      // who can also give tokens.
       allow update: if (isUser(userId)
-                        && request.resource.data.role == resource.data.role
-                        && request.resource.data.classification == resource.data.classification)
+                        && request.resource.data.get('role', '') == resource.data.get('role', '')
+                        && request.resource.data.get('classification', '') == resource.data.get('classification', '')
+                        && request.resource.data.get('isCharityTeacher', false) == resource.data.get('isCharityTeacher', false)
+                        && request.resource.data.get('token_balance', 0) <= resource.data.get('token_balance', 0))
                     || (isSuperadmin()
-                        && request.resource.data.role in [
-                          'Supporter', 'student', 'teacher', 'admin staff', 'CEO', 'COO', 'CFO', 'Financial team', 'Superadmin'
-                        ]);
+                        && (request.resource.data.get('role', '') == resource.data.get('role', '')
+                            || request.resource.data.role.lower() in [
+                              'supporter', 'student', 'teacher', 'admin staff', 'ceo', 'coo', 'cfo', 'financial team', 'superadmin'
+                            ]));
 
       // Strict NO-DELETE policy on user profiles
       allow delete: if false;
     }
 
-    // ---- Courses (/lms_courses): Strict NO-DELETE policy ----
+    // ---- Courses (/lms_courses): owner-managed, Strict NO-DELETE policy ----
     match /lms_courses/{courseId} {
-      allow read: if resource.data.visibility == 'network' || signedIn();
-      allow create: if isStaff();
-      allow update: if isStaff();
+      allow read: if resource.data.get('visibility', '') == 'network' || signedIn();
+      allow create: if isSuperadmin()
+                    || (isStaff() && request.resource.data.get('authorId', '') == request.auth.uid);
+      // Owners keep ownership; legacy unowned courses may be claimed by the teacher who saves them.
+      allow update: if isSuperadmin()
+                    || (isStaff() && (
+                         (resource.data.get('authorId', '') == request.auth.uid
+                           && request.resource.data.get('authorId', '') == request.auth.uid)
+                         || (resource.data.get('authorId', '') == ''
+                           && request.resource.data.get('authorId', '') in ['', request.auth.uid])
+                       ));
       allow delete: if false; // Strict NO-DELETE policy; archive instead
+    }
+
+    // ---- Global Search copies (/course_copies): who copied which course, and when ----
+    match /course_copies/{copyId} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+                    && request.resource.data.teacherUid == request.auth.uid
+                    && request.resource.data.copyCourseId == copyId;
+      allow update, delete: if false;
+    }
+
+    // ---- Course rosters (/course_members/<courseId>__<email>) ----
+    match /course_members/{memberId} {
+      allow read: if isStaff() || (emailVerified() && resource.data.get('memberEmail', '') == myEmail());
+      allow create, update: if request.resource.data.courseId is string
+                            && managesCourse(request.resource.data.courseId)
+                            && (request.resource.data.get('memberEmail', '') == ''
+                                || memberId == request.resource.data.courseId + '__' + request.resource.data.memberEmail);
+      allow delete: if false; // removal is a status change
     }
 
     // ---- Students & Rosters (/lms_students): Strict NO-DELETE policy ----
@@ -95,11 +176,121 @@ service cloud.firestore {
       allow delete: if false; // Strict NO-DELETE policy
     }
 
-    // ---- Coursework (/lms_coursework): Strict NO-DELETE policy ----
+    // ---- Assessment submissions (/lms_coursework/<courseId>__<assessmentId>__<uid>) ----
+    // Students see and submit only their own work (while enrolled and until graded);
+    // teachers and staff can view and grade.
     match /lms_coursework/{workId} {
-      allow read: if signedIn();
-      allow create, update: if isStaff() || (signedIn() && request.resource.data.studentUid == request.auth.uid);
+      allow read: if isStaff() || (signedIn() && (resource == null || resource.data.get('studentUid', '') == request.auth.uid));
+      allow create: if isStaff()
+                    || (emailVerified()
+                        && request.resource.data.studentUid == request.auth.uid
+                        && request.resource.data.studentEmail == myEmail()
+                        && request.resource.data.status == 'submitted'
+                        && workId == request.resource.data.courseId + '__' + request.resource.data.assessmentId + '__' + request.auth.uid
+                        && !request.resource.data.keys().hasAny(['grade', 'feedback', 'gradedByUid', 'gradedByName', 'gradedAt', 'gradedAtIso'])
+                        && isEnrolled(request.resource.data.courseId));
+      allow update: if isStaff()
+                    || (emailVerified()
+                        && resource.data.studentUid == request.auth.uid
+                        && resource.data.get('status', '') != 'graded'
+                        && request.resource.data.studentUid == request.auth.uid
+                        && request.resource.data.status == 'submitted'
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                             'text', 'linkUrl', 'status', 'submittedAt', 'submittedAtIso', 'attempts',
+                             'courseTitle', 'assessmentTitle', 'unitId', 'unitTitle', 'teacherUid', 'studentName', 'studentEmail', 'tag'
+                           ])
+                        && isEnrolled(resource.data.courseId));
       allow delete: if false; // Strict NO-DELETE policy
+    }
+
+    // ---- Message board (/chat_interactions): one document per message ----
+    match /chat_interactions/{messageId} {
+      allow read: if isSuperadmin() || (emailVerified() && myEmail() in resource.data.participants);
+
+      allow create: if emailVerified()
+                    && request.resource.data.kind == 'lms_message'
+                    && request.resource.data.tag == 'lms'
+                    && request.resource.data.senderUid == request.auth.uid
+                    && request.resource.data.senderEmail == myEmail()
+                    && request.resource.data.body is string
+                    && request.resource.data.body.size() > 0
+                    && request.resource.data.body.size() <= 4000
+                    && request.resource.data.participants is list
+                    && request.resource.data.participants.size() >= 2
+                    && request.resource.data.participants.size() <= 3
+                    && (request.resource.data.participants.size() == 2 || isSuperadmin())
+                    && myEmail() in request.resource.data.participants
+                    && request.resource.data.recipientEmail in request.resource.data.participants
+                    && request.resource.data.recipientEmail != myEmail()
+                    && request.resource.data.readBy == [myEmail()]
+                    && request.resource.data.category in ['application', 'token_request', 'grant', 'teacher', 'student', 'support', 'admin']
+                    && (!(request.resource.data.category in ['grant', 'admin']) || isSuperadmin())
+                    && (
+                      // anyone -> the Super Admin team
+                      request.resource.data.recipientEmail == 'superadmin'
+                      // teachers / staff / Super Admin -> anyone (the app limits teachers to their students)
+                      || isStaff()
+                      // students -> the teacher of a course they are enrolled in
+                      || (request.resource.data.get('courseId', '') != ''
+                          && isEnrolled(request.resource.data.courseId)
+                          && get(coursePath(request.resource.data.courseId)).data.get('authorEmail', '') == request.resource.data.recipientEmail)
+                    );
+
+      // Recipients may only mark messages as read (add themselves to readBy).
+      allow update: if emailVerified()
+                    && (myEmail() in resource.data.participants || isSuperadmin())
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy'])
+                    && request.resource.data.readBy.hasAll(resource.data.readBy)
+                    && request.resource.data.readBy.size() == resource.data.readBy.size() + 1
+                    && myEmail() in request.resource.data.readBy;
+
+      allow delete: if false;
+    }
+
+    // ---- Teacher applications (/teacher_applications/app_<uid>) ----
+    match /teacher_applications/{appId} {
+      allow read: if isSuperadmin() || (signedIn() && appId == 'app_' + request.auth.uid);
+      allow create, update: if isSuperadmin()
+                            || (signedIn()
+                                && appId == 'app_' + request.auth.uid
+                                && request.resource.data.applicant_uid == request.auth.uid
+                                && request.resource.data.status == 'pending');
+      allow delete: if false;
+    }
+
+    // ---- Token ledger (/token_transactions): spends by the account holder, grants by the Super Admin ----
+    match /token_transactions/{txId} {
+      allow read: if isSuperadmin()
+                  || (signedIn() && (resource.data.get('student_uid', '') == request.auth.uid
+                                     || resource.data.get('recipient_uid', '') == request.auth.uid));
+      allow create: if isSuperadmin()
+                    || (signedIn()
+                        && request.resource.data.get('student_uid', '') == request.auth.uid
+                        && request.resource.data.get('type', '') != 'superadmin_grant');
+      allow update, delete: if false;
+    }
+
+    // ---- Stripe payments already credited (one credit per checkout session) ----
+    match /stripe_credits/{sessionId} {
+      allow read, create: if isSuperadmin();
+      allow update, delete: if false;
+    }
+
+    // ---- Token fund ledgers (Super Admin only) ----
+    match /token_donations/{donationId} {
+      allow read, create: if isSuperadmin();
+      allow update, delete: if false;
+    }
+
+    match /token_redistributions/{redistributionId} {
+      allow read, create: if isSuperadmin();
+      allow update, delete: if false;
+    }
+
+    // ---- Course completions (/lms_course_completions) ----
+    match /lms_course_completions/{completionId} {
+      allow read, create: if isStaff();
+      allow update, delete: if false;
     }
 
     // ---- Leads (/lms_leads): Public may create, staff may read, zero delete ----
@@ -123,5 +314,20 @@ service cloud.firestore {
     // ---- Legacy collections (read-only for staff, zero delete) ----
     match /courses/{id} { allow read: if isStaff(); allow write, delete: if false; }
     match /students/{id} { allow read: if isStaff(); allow write, delete: if false; }
+
+    // ---- AI Foundation Content (Articles, Projects, Tech, Community) ----
+    // Public read for website visitors; staff/superadmins can publish and edit
+    match /content/{docId} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+
+    // ---- Transactions / Checkout records ----
+    // Authenticated users can create & read their own transaction history; superadmins have full access
+    match /transactions/{txId} {
+      allow read: if signedIn() && (isSuperadmin() || resource.data.get('userId', '') == request.auth.uid || resource.data.get('uid', '') == request.auth.uid);
+      allow create: if signedIn();
+      allow update, delete: if isSuperadmin();
+    }
   }
 }

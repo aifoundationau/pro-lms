@@ -9,8 +9,9 @@ import {
 
 import { ALL_GLOBAL_COURSES, LMS_CATEGORIES } from './globalCoursesData.js';
 import { sanitizeStandardIds } from './curriculumStandards.js';
+import { readEnv } from './env.js';
 
-export const LMS_SITE_ID = (import.meta?.env?.VITE_LMS_SITE_ID || (typeof process !== 'undefined' ? process.env?.VITE_LMS_SITE_ID : '') || 'lms').trim();
+export const LMS_SITE_ID = String(readEnv(() => import.meta.env.VITE_LMS_SITE_ID, 'VITE_LMS_SITE_ID') || 'lms').trim();
 
 export const LMS_COLLECTIONS = {
   courses: 'lms_courses',
@@ -23,7 +24,7 @@ export const LMS_COLLECTIONS = {
 const LEGACY_COLLECTIONS = { courses: 'courses', students: 'students' };
 
 // Keep reading legacy collections (read-only) until migration is verified.
-export const LEGACY_READ_ENABLED = (import.meta?.env?.VITE_LMS_LEGACY_READ ?? (typeof process !== 'undefined' ? process.env?.VITE_LMS_LEGACY_READ : undefined)) !== 'false';
+export const LEGACY_READ_ENABLED = String(readEnv(() => import.meta.env.VITE_LMS_LEGACY_READ, 'VITE_LMS_LEGACY_READ') ?? '') !== 'false';
 
 async function readLegacy(name) {
   if (!LEGACY_READ_ENABLED) return [];
@@ -126,8 +127,12 @@ export function normalizeCourse(input = {}) {
   return {
     title: str(input.title, 300) || 'Untitled Course',
     code: str(input.code || '', 100),
+    // Ownership: the teacher who created or copied the course (empty for legacy courses).
+    authorId: str(input.authorId === 'anonymous' ? '' : input.authorId, 200),
+    authorName: str(input.authorName, 200),
+    authorEmail: str(input.authorEmail, 320).toLowerCase(),
     category: str(input.category || 'General Academic', 200),
-    aqfLevel: input.aqfLevel !== undefined ? Number(input.aqfLevel) : 4,
+    aqfLevel: input.aqfLevel !== undefined ? Number(input.aqfLevel) : 0,
     nominalHours: Number(input.nominalHours) || 40,
     token_cost: Number(input.token_cost) || 0,
     startDate: isoDateOr(input.startDate, new Date().toISOString().split('T')[0]),
@@ -136,7 +141,10 @@ export function normalizeCourse(input = {}) {
     thumbnail: str(input.thumbnail, 2000),
     outcomes: str(input.outcomes, 20000),
     knowledge: str(input.knowledge, 20000),
-    learningOutcomes: Array.isArray(input.learningOutcomes) ? input.learningOutcomes : [],
+    learningOutcomes: Array.isArray(input.learningOutcomes)
+      ? input.learningOutcomes.filter(o => typeof o === 'string' && o.trim()).map(o => str(o.trim(), 2000)).slice(0, 100)
+      : [],
+    aqfEquivalenceNotes: str(input.aqfEquivalenceNotes, 5000),
     curriculumStandards: sanitizeStandardIds(input.curriculumStandards),
     units: sanitizeArrayOfObjects(input.units),
     modules: sanitizeArrayOfObjects(input.modules),
@@ -149,6 +157,7 @@ export function normalizeCourse(input = {}) {
     visibility: isPublished ? (input.visibility || 'network') : 'site',
     sourceCourseId: input.sourceCourseId ? str(input.sourceCourseId, 200) : null,
     sourceSiteId: input.sourceSiteId ? str(input.sourceSiteId, 100) : null,
+    copiedAt: input.copiedAt ? str(input.copiedAt, 40) : null,
     tag: 'lms', // Standard tag for cross-app course sharing & completions
     tags: mergedTags
   };
@@ -225,6 +234,73 @@ export async function copyCourseToSite(sourceCourse) {
   };
   await saveCourse(id, copy, { isNew: true });
   return { id, ...normalizeCourse(copy), siteId: LMS_SITE_ID, tag: 'lms' };
+}
+
+export const COURSE_COPIES_COLLECTION = 'course_copies';
+
+/**
+ * Global Search -> "Copy to My Courses": makes a private Draft copy owned by the teacher and
+ * records who copied what, and when, in /course_copies.
+ * @returns {Promise<{ course: object, record: object }>}
+ */
+/**
+ * The teacher's private Draft copy of a Global Search course (pure; exported for tests).
+ * Identity, counters and timestamps stay with the original; lineage is recorded.
+ */
+export function buildCourseCopy(sourceCourse, teacher, nowIso = new Date().toISOString()) {
+  const OMIT_ON_COPY = new Set(['_legacy', 'archived', 'students', 'siteId', 'createdAt', 'updatedAt', 'publishedAt', 'id', 'copiedAt']);
+  const content = Object.fromEntries(Object.entries(sourceCourse || {}).filter(([key]) => !OMIT_ON_COPY.has(key)));
+  const sourceTags = Array.isArray(content.tags) ? content.tags : [];
+  return {
+    ...content,
+    title: str(sourceCourse?.title, 300) || 'Copied Course',
+    authorId: teacher.uid,
+    authorName: teacher.displayName || teacher.email?.split('@')[0] || 'Teacher',
+    authorEmail: String(teacher.email || '').toLowerCase(),
+    students: 0,
+    archived: false,
+    isDraft: true,
+    isPublished: false,
+    status: 'draft',
+    visibility: 'site',
+    tag: 'lms',
+    tags: Array.from(new Set([...sourceTags.filter(t => String(t).toLowerCase() !== 'draft'), 'lms', 'Draft', 'Copied'])),
+    sourceCourseId: String(sourceCourse?.id ?? ''),
+    sourceSiteId: sourceCourse?.siteId || 'global-catalog',
+    copiedAt: nowIso
+  };
+}
+
+export async function copyCourseForTeacher(sourceCourse, teacher) {
+  if (!sourceCourse) throw new Error('Choose a course to copy.');
+  if (!teacher?.uid) throw new Error('Please sign in to copy courses.');
+  const id = newCourseId();
+  const nowIso = new Date().toISOString();
+  const sourceId = sourceCourse.id;
+  const siteId = sourceCourse.siteId;
+  const copy = buildCourseCopy(sourceCourse, teacher, nowIso);
+  await saveCourse(id, copy, { isNew: true });
+
+  const record = {
+    sourceCourseId: String(sourceId ?? ''),
+    sourceTitle: str(sourceCourse.title, 300),
+    sourceAuthorId: str(sourceCourse.authorId, 200),
+    sourceAuthorName: str(sourceCourse.authorName || sourceCourse.author, 200),
+    sourceSiteId: siteId || 'global-catalog',
+    copyCourseId: id,
+    copyTitle: copy.title,
+    teacherUid: teacher.uid,
+    teacherEmail: String(teacher.email || '').toLowerCase(),
+    teacherName: copy.authorName,
+    copiedAtIso: nowIso,
+    siteId: LMS_SITE_ID,
+    tag: 'lms'
+  };
+  // The copy itself is saved; a failed audit write is logged but does not undo the copy.
+  await withRetry(() => setDoc(doc(db, COURSE_COPIES_COLLECTION, id), { ...record, copiedAt: serverTimestamp() }))
+    .catch(err => console.warn('Course copy record note:', err?.code || err));
+
+  return { course: { id, ...normalizeCourse(copy), siteId: LMS_SITE_ID, tag: 'lms' }, record };
 }
 
 /**

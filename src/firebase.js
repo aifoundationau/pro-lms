@@ -1,19 +1,26 @@
+import { readEnv } from './services/env.js';
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAnalytics } from "firebase/analytics";
-import { getFirestore } from "firebase/firestore";
-import { getAuth, browserLocalPersistence, setPersistence } from "firebase/auth";
+import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
+import { getAuth, browserLocalPersistence, setPersistence, connectAuthEmulator } from "firebase/auth";
+
+// Local emulators for automated tests only (set by `firebase emulators:exec` in Node).
+// Browser builds never define these variables, so production always uses the live project.
+const nodeEnv = typeof process !== 'undefined' && typeof window === 'undefined' ? process.env : {};
+const FIRESTORE_EMULATOR = nodeEnv.FIRESTORE_EMULATOR_HOST || '';
+const AUTH_EMULATOR = nodeEnv.FIREBASE_AUTH_EMULATOR_HOST || '';
 
 // Support static cPanel and shared hosting environments via window.__FIREBASE_CONFIG__ runtime injection
 const configFromWindow = typeof window !== "undefined" && window.__FIREBASE_CONFIG__ ? window.__FIREBASE_CONFIG__ : null;
 
 export const firebaseConfig = {
-  apiKey: configFromWindow?.apiKey || import.meta?.env?.VITE_FIREBASE_API_KEY || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_API_KEY : '') || "AIzaSyCPeAOWQj8456TeIWDIPsyxyWT7QLrC8J8",
-  authDomain: configFromWindow?.authDomain || import.meta?.env?.VITE_FIREBASE_AUTH_DOMAIN || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_AUTH_DOMAIN : '') || "ai-foundation-firebase.firebaseapp.com",
-  projectId: configFromWindow?.projectId || import.meta?.env?.VITE_FIREBASE_PROJECT_ID || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_PROJECT_ID : '') || "ai-foundation-firebase",
-  storageBucket: configFromWindow?.storageBucket || import.meta?.env?.VITE_FIREBASE_STORAGE_BUCKET || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_STORAGE_BUCKET : '') || "ai-foundation-firebase.firebasestorage.app",
-  messagingSenderId: configFromWindow?.messagingSenderId || import.meta?.env?.VITE_FIREBASE_MESSAGING_SENDER_ID || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_MESSAGING_SENDER_ID : '') || "614773274800",
-  appId: configFromWindow?.appId || import.meta?.env?.VITE_FIREBASE_APP_ID || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_APP_ID : '') || "1:614773274800:web:bcfa9d363de884cf9ea375",
-  measurementId: configFromWindow?.measurementId || import.meta?.env?.VITE_FIREBASE_MEASUREMENT_ID || (typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_MEASUREMENT_ID : '') || "G-9V4X460YRL"
+  apiKey: configFromWindow?.apiKey || readEnv(() => import.meta.env.VITE_FIREBASE_API_KEY, 'VITE_FIREBASE_API_KEY') || "AIzaSyCPeAOWQj8456TeIWDIPsyxyWT7QLrC8J8",
+  authDomain: configFromWindow?.authDomain || readEnv(() => import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, 'VITE_FIREBASE_AUTH_DOMAIN') || "ai-foundation-firebase.firebaseapp.com",
+  projectId: configFromWindow?.projectId || readEnv(() => import.meta.env.VITE_FIREBASE_PROJECT_ID, 'VITE_FIREBASE_PROJECT_ID') || "ai-foundation-firebase",
+  storageBucket: configFromWindow?.storageBucket || readEnv(() => import.meta.env.VITE_FIREBASE_STORAGE_BUCKET, 'VITE_FIREBASE_STORAGE_BUCKET') || "ai-foundation-firebase.firebasestorage.app",
+  messagingSenderId: configFromWindow?.messagingSenderId || readEnv(() => import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID, 'VITE_FIREBASE_MESSAGING_SENDER_ID') || "614773274800",
+  appId: configFromWindow?.appId || readEnv(() => import.meta.env.VITE_FIREBASE_APP_ID, 'VITE_FIREBASE_APP_ID') || "1:614773274800:web:bcfa9d363de884cf9ea375",
+  measurementId: configFromWindow?.measurementId || readEnv(() => import.meta.env.VITE_FIREBASE_MEASUREMENT_ID, 'VITE_FIREBASE_MEASUREMENT_ID') || "G-9V4X460YRL"
 };
 
 let app = null;
@@ -40,6 +47,14 @@ try {
   app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
   db = getFirestore(app);
   auth = getAuth(app);
+
+  if (FIRESTORE_EMULATOR) {
+    const [host, port] = FIRESTORE_EMULATOR.split(':');
+    connectFirestoreEmulator(db, host, Number(port) || 8080);
+  }
+  if (AUTH_EMULATOR) {
+    connectAuthEmulator(auth, `http://${AUTH_EMULATOR}`, { disableWarnings: true });
+  }
 
   // Enforce session persistence using browserLocalPersistence across web runtimes
   if (typeof window !== "undefined" && auth) {

@@ -149,7 +149,7 @@ export default function DonationModal({ isOpen, onClose, currentUser = null }) {
                 }}
               >
                 <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>👤 My Account Balance</div>
-                <div style={{ fontSize: '0.75rem', opacity: 0.85 }}>Credit to {currentUser ? 'your account' : 'active login'}</div>
+                <div style={{ fontSize: '0.75rem', opacity: 0.85 }}>Added to your balance once the Super Admin verifies the payment</div>
               </button>
             </div>
           </div>

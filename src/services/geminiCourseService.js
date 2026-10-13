@@ -1,10 +1,11 @@
+import { readEnv } from './env.js';
 /**
  * Gemini AI Service for parsing Google Sheets into Courses
  * Supports Gemini 3.8 Flash / 2.5 Flash with fallback heuristic parsing
  * Incorporates ISO 8601 dates with browser localization
  */
 
-export const DEFAULT_GEMINI_KEY = import.meta?.env?.VITE_GEMINI_API_KEY || (typeof process !== 'undefined' ? process.env?.VITE_GEMINI_API_KEY : '') || '';
+export const DEFAULT_GEMINI_KEY = readEnv(() => import.meta.env.VITE_GEMINI_API_KEY, 'VITE_GEMINI_API_KEY') || '';
 
 /**
  * Formats an ISO 8601 date string (YYYY-MM-DD) into the user's localized format

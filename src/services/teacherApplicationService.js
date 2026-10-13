@@ -14,38 +14,98 @@ import {
   where,
   orderBy
 } from 'firebase/firestore';
-import { db } from '../firebase';
+import { db } from '../firebase.js';
+import { sanitizeIdVerification } from './idVerificationService.js';
+
+/**
+ * The ID photo is never stored (it is only sent to Gemini for the check). Applicants give a web link
+ * to their original document instead, which keeps each application far below Firestore's 1 MiB limit.
+ */
+export const APPLICATION_TEXT_LIMITS = Object.freeze({
+  applicant_name: 200,
+  subject_specialty: 200,
+  proposed_course_title: 300,
+  teaching_bio: 8000,
+  postal_address_text: 500
+});
+export const MAX_DOCUMENT_URL_CHARS = 2000;
+
+function applicationError(message, code) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
+/** True for an https:// web address (the link to the applicant's original ID document). */
+export function isValidDocumentUrl(value) {
+  const s = String(value ?? '').trim();
+  if (!s || s.length > MAX_DOCUMENT_URL_CHARS || /\s/.test(s)) return false;
+  try {
+    const url = new URL(s);
+    return url.protocol === 'https:' && Boolean(url.hostname) && url.hostname.includes('.');
+  } catch {
+    return false;
+  }
+}
+
+/** '' (no link) or a valid https:// link; anything else is refused with a clear message. */
+export function validateDocumentUrl(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return '';
+  if (!isValidDocumentUrl(s)) {
+    throw applicationError('The document link must be a web address starting with https:// — for example a Google Drive, OneDrive or Dropbox share link.', 'ID_DOCUMENT_URL_INVALID');
+  }
+  return s;
+}
+
+/** Validated Firestore document for /teacher_applications/app_<uid>. */
+export function buildTeacherApplicationPayload(applicationData, nowIso = new Date().toISOString()) {
+  const data = applicationData || {};
+  if (!data.applicant_uid) throw new Error('Applicant UID is required.');
+  const textOf = (key, fallback = '') => String(data[key] ?? '').trim().slice(0, APPLICATION_TEXT_LIMITS[key]) || fallback;
+  const applicationId = `app_${data.applicant_uid}`;
+  return {
+    id: applicationId,
+    applicant_uid: data.applicant_uid,
+    applicant_name: textOf('applicant_name', 'Applicant'),
+    applicant_email: String(data.applicant_email || '').trim().slice(0, 320),
+    subject_specialty: textOf('subject_specialty'),
+    teaching_bio: textOf('teaching_bio'),
+    proposed_course_title: textOf('proposed_course_title'),
+    proposed_token_rate: Number(data.proposed_token_rate) || 10,
+    postal_address_text: textOf('postal_address_text', 'OzEdu Academic Registry, Sydney NSW'),
+    id_document_url: validateDocumentUrl(data.id_document_url),
+    ai_id_verification: sanitizeIdVerification(data.ai_id_verification),
+    status: 'pending', // 'pending' | 'approved' | 'rejected'
+    submitted_at: nowIso,
+    updated_at: nowIso,
+    tag: 'lms'
+  };
+}
+
+/** Firestore's "value is longer than … bytes" / "document exceeds the maximum allowed size" errors. */
+export function isFirestoreSizeError(err) {
+  return /longer than \d+ bytes|exceeds the maximum allowed size|maximum.*size.*document/i.test(String(err?.message || ''));
+}
 
 /**
  * Submits a new Teacher Application with Postcard details and AI-extracted ID data
  */
 export async function submitTeacherApplication(applicationData) {
   if (!db) throw new Error('Database is unavailable.');
-  if (!applicationData.applicant_uid) throw new Error('Applicant UID is required.');
-
   const nowIso = new Date().toISOString();
-  const applicationId = `app_${applicationData.applicant_uid}`;
+  const payload = buildTeacherApplicationPayload(applicationData, nowIso);
+  const applicationId = payload.id;
   const appRef = doc(db, 'teacher_applications', applicationId);
 
-  const payload = {
-    id: applicationId,
-    applicant_uid: applicationData.applicant_uid,
-    applicant_name: applicationData.applicant_name || 'Applicant',
-    applicant_email: applicationData.applicant_email || '',
-    subject_specialty: applicationData.subject_specialty || '',
-    teaching_bio: applicationData.teaching_bio || '',
-    proposed_course_title: applicationData.proposed_course_title || '',
-    proposed_token_rate: Number(applicationData.proposed_token_rate) || 10,
-    postal_address_text: applicationData.postal_address_text || 'OzEdu Academic Registry, Sydney NSW',
-    id_document_preview: applicationData.id_document_preview || '',
-    ai_id_verification: applicationData.ai_id_verification || null,
-    status: 'pending', // 'pending' | 'approved' | 'rejected'
-    submitted_at: nowIso,
-    updated_at: nowIso,
-    tag: 'lms'
-  };
-
-  await setDoc(appRef, payload, { merge: true });
+  try {
+    await setDoc(appRef, payload, { merge: true });
+  } catch (err) {
+    if (isFirestoreSizeError(err)) {
+      throw applicationError('Your application is too large to save. Please shorten the text and try again.', 'APPLICATION_TOO_LARGE');
+    }
+    throw err;
+  }
 
   // Update user profile in /users/{uid} to track pending application state
   const userRef = doc(db, 'users', applicationData.applicant_uid);

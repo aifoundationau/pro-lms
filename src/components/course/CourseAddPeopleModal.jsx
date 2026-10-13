@@ -2,9 +2,32 @@ import React, { useState, useEffect } from 'react';
 import {
   addMemberToCourseFree,
   listCourseMembers,
-  removeMemberFromCourse
+  removeMemberFromCourse,
+  bulkEnrolMembers,
+  parseMemberText,
+  parseRosterSheets,
+  normalizeMemberEmail,
+  MAX_BULK_MEMBERS
 } from '../../services/courseEnrollmentService.js';
 import { listSiteStudents } from '../../services/lmsRepository.js';
+import { readSpreadsheetFiles, SPREADSHEET_FILE_ACCEPT } from '../../services/spreadsheetReader.js';
+import { buildXlsxWorkbook, downloadFile, safeFileStem, XLSX_STYLE } from '../../services/xlsxWriter.js';
+
+/** Combines pasted and uploaded lists, removing duplicates. */
+function mergeMemberLists(...lists) {
+  const seen = new Set();
+  const members = [];
+  const invalid = [];
+  for (const list of lists) {
+    for (const m of list?.members || []) {
+      if (seen.has(m.email)) continue;
+      seen.add(m.email);
+      members.push(m);
+    }
+    invalid.push(...(list?.invalid || []));
+  }
+  return { members, invalid };
+}
 
 export default function CourseAddPeopleModal({
   course,
@@ -12,7 +35,14 @@ export default function CourseAddPeopleModal({
   onClose,
   onMemberAdded
 }) {
-  const [activeTab, setActiveTab] = useState('add-new'); // 'add-new' | 'pick-existing' | 'roster'
+  const [activeTab, setActiveTab] = useState('add-new'); // 'add-new' | 'bulk' | 'pick-existing' | 'roster'
+
+  // Bulk / spreadsheet enrolment state
+  const [bulkText, setBulkText] = useState('');
+  const [bulkFileResult, setBulkFileResult] = useState(null);
+  const [bulkFileName, setBulkFileName] = useState('');
+  const [bulkRole, setBulkRole] = useState('student');
+  const [isReadingBulkFile, setIsReadingBulkFile] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [role, setRole] = useState('student');
@@ -142,6 +172,76 @@ export default function CourseAddPeopleModal({
     }
   };
 
+  const bulkPreview = mergeMemberLists(parseMemberText(bulkText), bulkFileResult);
+  const enrolledEmails = new Set(roster.map(m => normalizeMemberEmail(m.memberEmail)).filter(Boolean));
+  const bulkNew = bulkPreview.members.filter(m => !enrolledEmails.has(m.email));
+  const bulkAlready = bulkPreview.members.length - bulkNew.length;
+
+  const handleBulkFile = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setIsReadingBulkFile(true);
+    setNotice(null);
+    try {
+      const { sheets } = await readSpreadsheetFiles(files);
+      const result = parseRosterSheets(sheets);
+      setBulkFileResult(result);
+      setBulkFileName(files.map(f => f.name).join(', '));
+      if (!result.members.length) setNotice({ type: 'error', message: 'No email addresses were found in that file. Add an "Email" column.' });
+    } catch (err) {
+      setNotice({ type: 'error', message: err.message || 'The spreadsheet could not be read.' });
+    } finally {
+      setIsReadingBulkFile(false);
+    }
+  };
+
+  const handleDownloadRosterTemplate = () => {
+    try {
+      const bytes = buildXlsxWorkbook([{
+        name: 'Students',
+        freezeRows: 1,
+        columns: [{ width: 32 }, { width: 40, style: XLSX_STYLE.TEXT }],
+        rows: [[{ v: 'Name', s: XLSX_STYLE.HEADER }, { v: 'Email', s: XLSX_STYLE.HEADER }]],
+        validations: [{ range: 'B2:B5000', promptTitle: 'Email', prompt: "The student's sign-in (Google) email address." }]
+      }]);
+      downloadFile(bytes, `${safeFileStem(course.title, 'Course')}_students.xlsx`);
+    } catch {
+      setNotice({ type: 'error', message: 'The roster template could not be created.' });
+    }
+  };
+
+  const handleBulkEnrol = async () => {
+    if (!bulkNew.length) return;
+    setIsSubmitting(true);
+    setNotice(null);
+    try {
+      const result = await bulkEnrolMembers({
+        course,
+        members: bulkNew,
+        memberRole: bulkRole,
+        addedByUid: currentUser?.uid || 'teacher',
+        addedByName: currentUser?.displayName || currentUser?.email || 'Teacher'
+      });
+      const noun = bulkRole === 'student' ? 'student' : bulkRole === 'teacher' ? 'co-teacher' : 'guest';
+      const parts = [`✓ Enrolled ${result.added} ${noun}${result.added === 1 ? '' : 's'} at 0 tokens.`];
+      if (result.alreadyEnrolled.length) parts.push(`${result.alreadyEnrolled.length} already enrolled.`);
+      if (result.failed.length) parts.push(`${result.failed.length} could not be saved — try again.`);
+      if (!result.persisted) parts.push('(Saved on this device only — the database could not be reached.)');
+      setNotice({ type: result.failed.length ? 'error' : 'success', message: parts.join(' ') });
+      if (result.failed.length === 0) {
+        setBulkText('');
+        setBulkFileResult(null);
+        setBulkFileName('');
+      }
+      await loadRoster();
+      if (onMemberAdded && result.added) onMemberAdded(course.id, result.added);
+    } catch (err) {
+      setNotice({ type: 'error', message: err.message || 'Bulk enrolment failed.' });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const filteredExistingStudents = existingStudents.filter(s => {
     if (!searchStudentQuery.trim()) return true;
     const q = searchStudentQuery.toLowerCase();
@@ -243,6 +343,13 @@ export default function CourseAddPeopleModal({
             ➕ Add Person by Name/Email
           </button>
           <button
+            className={`nav-btn ${activeTab === 'bulk' ? 'primary' : 'secondary'}`}
+            style={{ padding: '6px 14px', fontSize: '0.85rem' }}
+            onClick={() => setActiveTab('bulk')}
+          >
+            📋 Bulk / Spreadsheet
+          </button>
+          <button
             className={`nav-btn ${activeTab === 'pick-existing' ? 'primary' : 'secondary'}`}
             style={{ padding: '6px 14px', fontSize: '0.85rem' }}
             onClick={() => setActiveTab('pick-existing')}
@@ -326,6 +433,73 @@ export default function CourseAddPeopleModal({
               </button>
             </div>
           </form>
+        )}
+
+        {/* Tab: Bulk / Spreadsheet enrolment */}
+        {activeTab === 'bulk' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <label style={{ fontSize: '0.82rem', fontWeight: 600, color: '#94a3b8' }} htmlFor="bulk-emails">
+              Paste student emails — one per line or separated by commas. Names are optional, e.g. Jane Doe &lt;jane@school.edu&gt;
+            </label>
+            <textarea
+              id="bulk-emails"
+              className="form-input"
+              rows={6}
+              value={bulkText}
+              onChange={e => setBulkText(e.target.value)}
+              placeholder={'jane.doe@school.edu.au\nLiam Smith <liam.smith@school.edu.au>\nmia@example.com, Mia Chen'}
+            />
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+              <label className="nav-btn secondary" style={{ padding: '6px 14px', fontSize: '0.85rem', cursor: isReadingBulkFile ? 'wait' : 'pointer' }}>
+                {isReadingBulkFile ? 'Reading…' : '⬆ Upload spreadsheet (.xlsx / .csv)'}
+                <input type="file" accept={SPREADSHEET_FILE_ACCEPT} multiple style={{ display: 'none' }} disabled={isReadingBulkFile} onChange={e => { handleBulkFile(e.target.files); e.target.value = ''; }} />
+              </label>
+              <button type="button" className="nav-btn secondary" style={{ padding: '6px 14px', fontSize: '0.85rem' }} onClick={handleDownloadRosterTemplate}>
+                ⬇ Roster template
+              </button>
+              {bulkFileName && (
+                <span style={{ fontSize: '0.8rem', color: '#cbd5e1' }}>
+                  {bulkFileName}: {bulkFileResult?.members.length || 0} emails
+                  <button type="button" onClick={() => { setBulkFileResult(null); setBulkFileName(''); }} style={{ background: 'none', color: '#f87171', padding: '0 6px', fontSize: '0.8rem' }} aria-label="Remove uploaded file">✕</button>
+                </span>
+              )}
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: '#94a3b8', marginBottom: '6px' }} htmlFor="bulk-role">Role in course</label>
+              <select id="bulk-role" className="form-input" style={{ width: '100%', appearance: 'auto', backgroundColor: '#0f291e' }} value={bulkRole} onChange={e => setBulkRole(e.target.value)}>
+                <option value="student">🎓 Students</option>
+                <option value="teacher">👨‍🏫 Co-teachers</option>
+                <option value="guest">👁️ Guests / Observers</option>
+              </select>
+            </div>
+            <div style={{ fontSize: '0.85rem', color: '#e2e8f0', background: 'rgba(255,255,255,0.05)', borderRadius: '10px', padding: '10px 12px' }}>
+              <strong>{bulkNew.length}</strong> to enrol
+              {bulkAlready > 0 && <> • <strong>{bulkAlready}</strong> already enrolled</>}
+              {bulkPreview.invalid.length > 0 && (
+                <div style={{ color: '#fca5a5', marginTop: '4px' }}>
+                  {bulkPreview.invalid.length} invalid: {bulkPreview.invalid.slice(0, 6).join(', ')}{bulkPreview.invalid.length > 6 ? '…' : ''}
+                </div>
+              )}
+              {bulkNew.length > MAX_BULK_MEMBERS && (
+                <div style={{ color: '#fca5a5', marginTop: '4px' }}>Enrol at most {MAX_BULK_MEMBERS.toLocaleString()} people at a time.</div>
+              )}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button type="button" className="nav-btn secondary" onClick={onClose}>Close</button>
+              <button
+                type="button"
+                className="nav-btn primary"
+                disabled={isSubmitting || bulkNew.length === 0 || bulkNew.length > MAX_BULK_MEMBERS}
+                onClick={handleBulkEnrol}
+                style={{ background: 'linear-gradient(135deg, #059669, #10b981)' }}
+              >
+                {isSubmitting ? 'Enrolling…' : `✓ Enrol ${bulkNew.length} (0 Tokens)`}
+              </button>
+            </div>
+            <p style={{ margin: 0, fontSize: '0.78rem', color: '#94a3b8' }}>
+              Students sign in with Google using these emails, and the course appears in their 🎓 My Learning panel.
+            </p>
+          </div>
         )}
 
         {/* Tab 2: Pick Existing */}

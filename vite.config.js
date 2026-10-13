@@ -11,6 +11,52 @@ function devApiPlugin() {
       env = loadEnv(config.mode, process.cwd(), '');
     },
     configureServer(server) {
+      server.middlewares.use('/api/stripe/confirm', (req, res, next) => {
+        if (req.method !== 'GET') return next();
+        const send = (status, body) => {
+          res.statusCode = status;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(body));
+        };
+        const stripeKey = env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY;
+        if (!stripeKey) return send(500, { error: 'Missing STRIPE_SECRET_KEY in .env' });
+        const sessionId = new URL(req.originalUrl || req.url, 'http://localhost').searchParams.get('session_id') || '';
+        if (!/^cs_(test|live)_[A-Za-z0-9]{10,200}$/.test(sessionId)) return send(400, { error: 'Invalid checkout session id.' });
+        const stripeReq = https.request({
+          hostname: 'api.stripe.com',
+          path: `/v1/checkout/sessions/${encodeURIComponent(sessionId)}`,
+          method: 'GET',
+          headers: { Authorization: `Bearer ${stripeKey}` },
+          timeout: 15000
+        }, (stripeRes) => {
+          let raw = '';
+          stripeRes.on('data', chunk => raw += chunk);
+          stripeRes.on('end', () => {
+            let data = {};
+            try { data = JSON.parse(raw || '{}'); } catch { data = {}; }
+            if (stripeRes.statusCode < 200 || stripeRes.statusCode >= 300) {
+              return send(stripeRes.statusCode === 404 ? 404 : 502, { error: data?.error?.message || `Stripe API error (${stripeRes.statusCode})` });
+            }
+            const metadata = data.metadata || {};
+            send(200, {
+              sessionId: data.id,
+              paid: data.payment_status === 'paid',
+              status: data.status || '',
+              type: metadata.donation_type || '',
+              tokens: Math.max(0, Math.floor(Number(metadata.tokens) || 0)),
+              tokenPriceAud: Number(metadata.token_price_aud) || null,
+              targetUid: metadata.target_uid || '',
+              studentEmail: metadata.student_email || '',
+              amountTotal: Number.isFinite(Number(data.amount_total)) ? Number(data.amount_total) / 100 : null,
+              currency: String(data.currency || '').toUpperCase(),
+              created: data.created || null
+            });
+          });
+        });
+        stripeReq.on('timeout', () => stripeReq.destroy(new Error('Stripe did not respond in time.')));
+        stripeReq.on('error', (err) => send(502, { error: err.message }));
+        stripeReq.end();
+      });
       server.middlewares.use('/api/stripe/checkout', (req, res, next) => {
         if (req.method !== 'POST') return next();
         let bodyStr = '';

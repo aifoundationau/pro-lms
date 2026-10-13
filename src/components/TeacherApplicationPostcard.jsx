@@ -1,8 +1,49 @@
-import React, { useState, useEffect } from 'react';
-import { analyzeIdentificationDocument } from '../services/idVerificationService';
-import { submitTeacherApplication, getUserTeacherApplication } from '../services/teacherApplicationService';
+import React, { useState, useEffect, useRef } from 'react';
+import { analyzeIdentificationDocument, hasVerifiedScore } from '../services/idVerificationService';
+import {
+  submitTeacherApplication,
+  getUserTeacherApplication,
+  isValidDocumentUrl,
+  APPLICATION_TEXT_LIMITS,
+  MAX_DOCUMENT_URL_CHARS
+} from '../services/teacherApplicationService';
+import { postTeacherApplicationMessage } from '../services/messageService';
+import { compressImageToDataUrl } from '../services/imageUtils';
 
-export default function TeacherApplicationPostcard({ currentUser, onApplicationSuccess, onSubmitted }) {
+/** The AI ID check result: a confidence score when verified, otherwise an honest "Not verified". */
+function IdCheckSummary({ check }) {
+  if (!check) return null;
+  if (!hasVerifiedScore(check)) {
+    return (
+      <div className="id-check id-check-unverified" style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '12px', padding: '12px 14px', fontSize: '0.84rem', color: '#92400e' }}>
+        <div style={{ fontWeight: 800, marginBottom: '4px' }}>⚠️ Not verified — manual review needed</div>
+        <div>{check.verification_notes || 'The AI check could not run. The Super Admin will review your document link.'}</div>
+      </div>
+    );
+  }
+  return (
+    <div className="id-check id-check-verified" style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '12px', padding: '12px 14px', fontSize: '0.84rem', color: '#14532d', lineHeight: 1.45 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', gap: '8px' }}>
+        <span style={{ fontWeight: 800, color: '#166534' }}>✅ AI document check</span>
+        <span style={{ background: '#dcfce7', color: '#15803d', padding: '2px 8px', borderRadius: '10px', fontSize: '0.75rem', fontWeight: 700 }}>
+          Confidence: {check.confidence_score}%
+        </span>
+      </div>
+      <div><strong>Document:</strong> {check.document_type}</div>
+      {check.full_name && (
+        <div>
+          <strong>Name on document:</strong> {check.full_name}
+          {check.name_match === false && <span style={{ color: '#b45309' }}> (does not match your account name)</span>}
+        </div>
+      )}
+      {check.id_number_masked && <div><strong>Document number:</strong> {check.id_number_masked}</div>}
+      <div><strong>Assessment:</strong> {check.authenticity_assessment}</div>
+      {check.verification_notes && <div style={{ marginTop: '4px', fontStyle: 'italic' }}>{check.verification_notes}</div>}
+    </div>
+  );
+}
+
+export default function TeacherApplicationPostcard({ currentUser, userProfile, onApplicationSuccess, onSubmitted }) {
   const [existingApp, setExistingApp] = useState(null);
   const [loadingExisting, setLoadingExisting] = useState(true);
 
@@ -11,12 +52,16 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
   const [teachingBio, setTeachingBio] = useState('');
   const [proposedCourseTitle, setProposedCourseTitle] = useState('');
   const [proposedTokenRate, setProposedTokenRate] = useState(10);
-  const [idDocumentPreview, setIdDocumentPreview] = useState('');
+  const [checkedFileName, setCheckedFileName] = useState('');
+  const [documentUrl, setDocumentUrl] = useState('');
   const [isAiScanning, setIsAiScanning] = useState(false);
   const [aiVerification, setAiVerification] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [submitSuccess, setSubmitSuccess] = useState(false);
+  const [messageNotice, setMessageNotice] = useState('');
+  const uploadSeq = useRef(0);
+  const documentUrlInvalid = documentUrl.trim() !== '' && !isValidDocumentUrl(documentUrl);
 
   useEffect(() => {
     if (currentUser?.uid) {
@@ -29,40 +74,53 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
     }
   }, [currentUser]);
 
-  // Handle ID image upload & trigger AI Reader
+  // ID photo (optional): Gemini checks it and gives a confidence score. The photo is not stored.
   const handleIdFileUpload = async (e) => {
-    const file = e.target.files?.[0];
+    const input = e.target;
+    const file = input.files?.[0];
     if (!file) return;
+    // Only the most recently chosen photo may update the form.
+    const seq = ++uploadSeq.current;
+    const isLatest = () => seq === uploadSeq.current;
 
     setSubmitError('');
     setIsAiScanning(true);
     setAiVerification(null);
+    setCheckedFileName('');
 
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const dataUrl = reader.result;
-      setIdDocumentPreview(dataUrl);
+    let dataUrl = '';
+    try {
+      // Shrunk first so the check is quick (the photo is only sent to Gemini).
+      dataUrl = await compressImageToDataUrl(file);
+    } catch (err) {
+      if (!isLatest()) return;
+      setSubmitError(err?.message || 'The image could not be read.');
+      setIsAiScanning(false);
+      input.value = '';
+      return;
+    }
 
-      try {
-        const aiResult = await analyzeIdentificationDocument(dataUrl, {
-          name: currentUser?.displayName || 'Applicant',
-          email: currentUser?.email || ''
-        });
-        setAiVerification(aiResult);
-      } catch (err) {
-        console.warn('AI ID reading note:', err);
-        setSubmitError('AI document reader encountered a temporary delay, but image is attached.');
-      } finally {
-        setIsAiScanning(false);
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const aiResult = await analyzeIdentificationDocument(dataUrl, {
+        name: currentUser?.displayName || 'Applicant',
+        email: currentUser?.email || ''
+      });
+      if (!isLatest()) return;
+      setAiVerification(aiResult);
+      setCheckedFileName(file.name || 'document');
+    } catch (err) {
+      console.warn('AI ID check note:', err);
+      if (isLatest()) setSubmitError('The AI document check could not run. You can still post your application with a link to your document.');
+    } finally {
+      if (isLatest()) setIsAiScanning(false);
+    }
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!idDocumentPreview) {
-      setSubmitError('Please upload a valid form of identification (Passport, Driver License, or Teacher ID).');
+    const link = documentUrl.trim();
+    if (link && !isValidDocumentUrl(link)) {
+      setSubmitError('The document link must be a web address starting with https:// — for example a Google Drive, OneDrive or Dropbox share link.');
       return;
     }
 
@@ -79,13 +137,20 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
         proposed_course_title: proposedCourseTitle.trim(),
         proposed_token_rate: Number(proposedTokenRate) || 10,
         postal_address_text: 'OzEdu Academic Secretariat, 100 University Avenue, Sydney NSW 2000',
-        id_document_preview: idDocumentPreview,
+        id_document_url: link,
         ai_id_verification: aiVerification
       };
 
       const result = await submitTeacherApplication(payload);
       setExistingApp(result);
       setSubmitSuccess(true);
+      // The Teacher Statement & Course Proposal also goes to the Super Admin message board.
+      postTeacherApplicationMessage({ sender: currentUser, senderProfile: userProfile, application: result })
+        .then(() => setMessageNotice('📮 Your statement, course proposal, ID check and document link were sent to the Super Admin message board.'))
+        .catch(err => {
+          console.warn('Application message note:', err);
+          setMessageNotice('Your application was saved. (The message-board copy could not be sent: ' + (err?.message || 'unknown error') + ')');
+        });
       if (onApplicationSuccess) onApplicationSuccess(result);
       if (onSubmitted) onSubmitted(result);
     } catch (err) {
@@ -104,9 +169,18 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
   }
 
   // If user already applied and is pending or approved
-  if (existingApp && !submitSuccess) {
+  if (existingApp) {
     return (
       <div className="postcard-container animate-fade-in-up" style={{ maxWidth: '960px', margin: '2rem auto' }}>
+        {submitSuccess && (
+          <div role="status" style={{
+            background: 'rgba(34, 197, 94, 0.15)', border: '1px solid rgba(74, 222, 128, 0.5)', color: '#bbf7d0',
+            padding: '12px 16px', borderRadius: '12px', marginBottom: '14px', fontSize: '0.92rem'
+          }}>
+            ✅ Application posted! The Super Admin will review it.
+            {messageNotice && <div style={{ marginTop: '4px', fontSize: '0.85rem' }}>{messageNotice}</div>}
+          </div>
+        )}
         <div style={{
           background: '#fdfbf7', borderRadius: '16px', overflow: 'hidden',
           boxShadow: '0 20px 40px -15px rgba(0,0,0,0.4)', border: '8px solid #ffffff',
@@ -171,40 +245,24 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
               {/* Right Column: AI Verification Record */}
               <div>
                 <h4 style={{ margin: '0 0 12px 0', fontSize: '1.05rem', color: '#0f172a', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span>🛡️</span> AI ID Verification Record
+                  <span>🛡️</span> ID Document Check
                 </h4>
                 {existingApp.ai_id_verification ? (
-                  <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '12px', padding: '14px', fontSize: '0.88rem' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                      <span style={{ fontWeight: 600, color: '#166534' }}>Document Type:</span>
-                      <span style={{ color: '#14532d', fontWeight: 700 }}>{existingApp.ai_id_verification.document_type}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                      <span style={{ fontWeight: 600, color: '#166534' }}>Detected Name:</span>
-                      <span style={{ color: '#14532d' }}>{existingApp.ai_id_verification.full_name}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                      <span style={{ fontWeight: 600, color: '#166534' }}>Masked ID:</span>
-                      <span style={{ color: '#14532d' }}>{existingApp.ai_id_verification.id_number_masked}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                      <span style={{ fontWeight: 600, color: '#166534' }}>Authenticity:</span>
-                      <span style={{ color: '#15803d', fontWeight: 700 }}>{existingApp.ai_id_verification.authenticity_assessment}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                      <span style={{ fontWeight: 600, color: '#166534' }}>Confidence:</span>
-                      <span style={{ color: '#15803d', fontWeight: 800 }}>{existingApp.ai_id_verification.confidence_score}%</span>
-                    </div>
-                    <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px dashed #bbf7d0', fontSize: '0.82rem', color: '#166534', fontStyle: 'italic' }}>
-                      "{existingApp.ai_id_verification.verification_notes}"
-                    </div>
-                  </div>
+                  <IdCheckSummary check={existingApp.ai_id_verification} />
                 ) : (
                   <div style={{ background: '#f8fafc', padding: '12px', borderRadius: '8px', color: '#64748b', fontSize: '0.85rem' }}>
-                    ID Document logged in database.
+                    No document was uploaded for the AI check.
                   </div>
                 )}
 
+                <div style={{ marginTop: '12px', fontSize: '0.85rem', color: '#334155', wordBreak: 'break-all' }}>
+                  <strong>Original document link:</strong>{' '}
+                  {isValidDocumentUrl(existingApp.id_document_url)
+                    ? <a href={existingApp.id_document_url} target="_blank" rel="noopener noreferrer" style={{ color: '#4338ca' }}>{existingApp.id_document_url}</a>
+                    : <span style={{ color: '#64748b' }}>not provided</span>}
+                </div>
+
+                {/* Applications from before document links kept a small inline image. */}
                 {existingApp.id_document_preview && (
                   <div style={{ marginTop: '14px' }}>
                     <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '4px' }}>Submitted Credential Image:</div>
@@ -292,6 +350,7 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
                   type="text"
                   required
                   placeholder="e.g. Applied Machine Learning, Physics, Creative Writing..."
+                  maxLength={APPLICATION_TEXT_LIMITS.subject_specialty}
                   value={subjectSpecialty}
                   onChange={(e) => setSubjectSpecialty(e.target.value)}
                   style={{
@@ -309,6 +368,7 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
                   type="text"
                   required
                   placeholder="e.g. Practical Deep Learning with Python"
+                  maxLength={APPLICATION_TEXT_LIMITS.proposed_course_title}
                   value={proposedCourseTitle}
                   onChange={(e) => setProposedCourseTitle(e.target.value)}
                   style={{
@@ -349,6 +409,7 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
                   required
                   rows={4}
                   placeholder="Write a postcard message detailing your teaching background, credentials, and passion for accessible education..."
+                  maxLength={APPLICATION_TEXT_LIMITS.teaching_bio}
                   value={teachingBio}
                   onChange={(e) => setTeachingBio(e.target.value)}
                   style={{
@@ -406,13 +467,13 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
                 </div>
               </div>
 
-              {/* ID Document Upload & AI Reader */}
+              {/* ID Document check (optional): AI check of an uploaded photo + link to the original */}
               <div style={{ marginBottom: '18px' }}>
                 <label style={{ display: 'block', fontSize: '0.88rem', fontWeight: 700, color: '#0f172a', marginBottom: '4px' }}>
-                  Identification Document Verification *
+                  Identification Document Verification <span style={{ fontWeight: 500, color: '#64748b' }}>(optional)</span>
                 </label>
                 <p style={{ margin: '0 0 10px 0', fontSize: '0.8rem', color: '#64748b' }}>
-                  Must attach photo/scan of ID (Passport, Driver License, or Teacher Card). AI analyzes it in real-time.
+                  Upload a photo or scan of your ID (passport, driver licence or teacher card). Gemini AI checks it and gives a confidence score. The photo itself is not stored.
                 </p>
 
                 <input
@@ -426,14 +487,17 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
                   htmlFor="id-file-upload"
                   style={{
                     display: 'block', padding: '14px', border: '2px dashed #6366f1', borderRadius: '10px',
-                    textAlign: 'center', cursor: 'pointer', background: idDocumentPreview ? '#f8fafc' : '#eff6ff',
+                    textAlign: 'center', cursor: 'pointer', background: checkedFileName ? '#f8fafc' : '#eff6ff',
                     transition: 'all 0.2s ease'
                   }}
                 >
                   <span style={{ fontSize: '1.4rem', display: 'block', marginBottom: '4px' }}>📷</span>
                   <span style={{ fontWeight: 600, color: '#4338ca', fontSize: '0.9rem' }}>
-                    {idDocumentPreview ? 'Change Uploaded ID Document' : 'Upload Identification Document'}
+                    {checkedFileName ? 'Check a Different Document' : 'Upload Identification Document'}
                   </span>
+                  {checkedFileName && (
+                    <span style={{ display: 'block', marginTop: '2px', fontSize: '0.78rem', color: '#64748b' }}>Checked: {checkedFileName}</span>
+                  )}
                 </label>
               </div>
 
@@ -448,52 +512,62 @@ export default function TeacherApplicationPostcard({ currentUser, onApplicationS
                     borderRadius: '50%', animation: 'spin 1s linear infinite'
                   }} />
                   <span style={{ fontSize: '0.85rem', color: '#b45309', fontWeight: 600 }}>
-                    🤖 Gemini Vision is analyzing your ID document...
+                    🤖 Gemini is checking your ID document...
                   </span>
                 </div>
               )}
 
-              {/* Extracted AI ID Details */}
+              {/* AI check result: verified with a confidence score, or "Not verified" */}
               {aiVerification && (
-                <div style={{
-                  background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '12px',
-                  padding: '14px', marginBottom: '18px'
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                    <span style={{ fontWeight: 800, color: '#166534', fontSize: '0.85rem' }}>
-                      ✅ AI Extracted Information
-                    </span>
-                    <span style={{
-                      background: '#dcfce7', color: '#15803d', padding: '2px 8px', borderRadius: '10px',
-                      fontSize: '0.75rem', fontWeight: 700
-                    }}>
-                      Confidence: {aiVerification.confidence_score}%
-                    </span>
-                  </div>
-                  <div style={{ fontSize: '0.82rem', color: '#14532d', lineHeight: '1.4' }}>
-                    <div><strong>Document:</strong> {aiVerification.document_type}</div>
-                    <div><strong>Name on ID:</strong> {aiVerification.full_name}</div>
-                    <div><strong>Masked ID:</strong> {aiVerification.id_number_masked}</div>
-                    <div><strong>Authenticity:</strong> {aiVerification.authenticity_assessment}</div>
-                  </div>
+                <div style={{ marginBottom: '16px' }}>
+                  <IdCheckSummary check={aiVerification} />
                 </div>
               )}
+
+              {/* Link to the original document (stored with the application and sent to the Super Admin) */}
+              <div style={{ marginBottom: '18px' }}>
+                <label htmlFor="id-document-url" style={{ display: 'block', fontSize: '0.88rem', fontWeight: 700, color: '#0f172a', marginBottom: '4px' }}>
+                  Link to your original document <span style={{ fontWeight: 500, color: '#64748b' }}>(web URL, optional)</span>
+                </label>
+                <input
+                  id="id-document-url"
+                  type="url"
+                  inputMode="url"
+                  autoComplete="off"
+                  placeholder="https://drive.google.com/file/d/…"
+                  maxLength={MAX_DOCUMENT_URL_CHARS}
+                  value={documentUrl}
+                  onChange={(e) => setDocumentUrl(e.target.value)}
+                  aria-invalid={documentUrlInvalid}
+                  aria-describedby="id-document-url-help"
+                  style={{
+                    width: '100%', padding: '10px 14px', borderRadius: '8px',
+                    border: documentUrlInvalid ? '1px solid #f87171' : '1px solid #cbd5e1',
+                    fontSize: '0.92rem', boxSizing: 'border-box'
+                  }}
+                />
+                <p id="id-document-url-help" style={{ margin: '6px 0 0 0', fontSize: '0.78rem', color: documentUrlInvalid ? '#b91c1c' : '#64748b' }}>
+                  {documentUrlInvalid
+                    ? 'Use a web address that starts with https://'
+                    : 'Put the original document on Google Drive, OneDrive or Dropbox, share it as "Anyone with the link can view", and paste the link here. It is sent to the Super Admin with your application.'}
+                </p>
+              </div>
 
               {/* Submit Postcard Action */}
               <button
                 type="submit"
-                disabled={submitting || !idDocumentPreview || isAiScanning}
+                disabled={submitting || isAiScanning}
                 style={{
                   width: '100%', padding: '14px', borderRadius: '10px',
                   background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
                   color: '#ffffff', border: 'none', fontSize: '1rem', fontWeight: 700,
-                  cursor: submitting || !idDocumentPreview ? 'not-allowed' : 'pointer',
-                  opacity: submitting || !idDocumentPreview ? 0.6 : 1,
+                  cursor: submitting || isAiScanning ? 'not-allowed' : 'pointer',
+                  opacity: submitting || isAiScanning ? 0.6 : 1,
                   display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
                   boxShadow: '0 4px 6px -1px rgba(15, 23, 42, 0.4)'
                 }}
               >
-                {submitting ? 'Posting Application...' : 'Post Teacher Application 📮'}
+                {submitting ? 'Posting Application...' : isAiScanning ? 'Waiting for the ID check…' : 'Post Teacher Application 📮'}
               </button>
             </div>
           </div>

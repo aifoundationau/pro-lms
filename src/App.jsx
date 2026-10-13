@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   listSiteCourses, saveCourse, newCourseId, setCourseArchived,
-  copyCourseToSite, incrementCourseEnrolments, saveLead, isDbAvailable
+  copyCourseForTeacher, listNetworkCourses, getLmsCourseById,
+  incrementCourseEnrolments, isDbAvailable
 } from './services/lmsRepository';
 import { parseCourseSheetWithAI, SAMPLE_SHEET_CSV, DEFAULT_GEMINI_KEY, formatLocalizedDate } from './services/geminiCourseService';
 import StudentRegistration from './components/StudentRegistration';
@@ -11,9 +12,16 @@ import TeacherApplicationPostcard from './components/TeacherApplicationPostcard'
 import SuperAdminTokenPanel from './components/SuperAdminTokenPanel';
 import AQFCourseBuilder from './components/courseBuilder/AQFCourseBuilder';
 import CourseAddPeopleModal from './components/course/CourseAddPeopleModal';
+import CourseSubmissionsModal from './components/course/CourseSubmissionsModal';
+import TokenFundModal from './components/TokenFundModal';
+import MessageDock from './components/messaging/MessageDock';
+import StudentLearningPanel from './components/student/StudentLearningPanel';
 import { createBlankCourse, generateEntityId, createBlankUnit, createBlankLesson } from './types/courseBuilderTypes';
-import { createCheckoutSession } from './services/stripeService';
-import { getUserTokenBalance, creditUserTokens, donateToTokenFund } from './services/tokenService';
+import { confirmCheckoutSession } from './services/stripeService';
+import { getUserTokenBalance } from './services/tokenService';
+import { listMyEnrolments } from './services/courseEnrollmentService';
+import { sendMessage, SUPERADMIN_INBOX } from './services/messageService';
+import { formatTokenBalance } from './services/rolePrivileges';
 import { ALL_GLOBAL_COURSES } from './services/globalCoursesData';
 import {
   signInWithGoogle,
@@ -25,6 +33,9 @@ import {
 import './App.css';
 
 const IMGBB_API_KEY = import.meta.env.VITE_IMGBB_API_KEY || '';
+
+// Tabs only staff (teachers, admins, Super Admin) can open.
+const STAFF_TABS = ['my-courses', 'students', 'global'];
 
 async function uploadToImgbb(file) {
   if (!IMGBB_API_KEY) throw new Error('Image uploads are not configured (VITE_IMGBB_API_KEY missing).');
@@ -50,10 +61,9 @@ async function uploadToImgbb(file) {
 
 function App() {
   const [isContactOpen, setIsContactOpen] = useState(false);
-  const [mathA, setMathA] = useState(0);
-  const [mathB, setMathB] = useState(0);
-  const [userMathAnswer, setUserMathAnswer] = useState('');
-  
+  // Set when "Message the Super Admin" is pressed on the front page: the admin panel opens, then the composer.
+  const [pendingSuperadminMessage, setPendingSuperadminMessage] = useState(false);
+
   // AI Course Import State
   const [isAiImportOpen, setIsAiImportOpen] = useState(false);
   const [sheetText, setSheetText] = useState('');
@@ -61,13 +71,6 @@ function App() {
   const [aiError, setAiError] = useState('');
   const [aiApiKey, setAiApiKey] = useState(DEFAULT_GEMINI_KEY);
   const [showKeyConfig, setShowKeyConfig] = useState(false);
-  
-  const [contactForm, setContactForm] = useState({
-    name: '',
-    email: '',
-    phone: '',
-    message: ''
-  });
 
   // Google Auth & Dynamic RBAC state
   const [authUser, setAuthUser] = useState(null);
@@ -79,8 +82,27 @@ function App() {
   const [userTokenBalance, setUserTokenBalance] = useState(0);
   const [showFrontPage, setShowFrontPage] = useState(false);
 
-  const privileges = resolvePrivileges(userProfile);
+  const privileges = resolvePrivileges(userProfile || (authUser ? { email: authUser.email } : null));
   const isLoggedIn = !!authUser;
+  const tokenBalanceLabel = formatTokenBalance(userTokenBalance, userProfile || (authUser ? { email: authUser.email } : null));
+
+  // Token Fund (sponsor a student / emergency fund) — available after sign-in
+  const [isTokenFundOpen, setIsTokenFundOpen] = useState(false);
+
+  // Message board: other panels can ask the dock to start a message
+  const messageDockRef = useRef(null);
+  const requestCompose = (to, extra = {}) => messageDockRef.current?.compose({ to, ...extra });
+
+  // Student panel: courses this account is enrolled in (found by sign-in email)
+  const [enrolledCourses, setEnrolledCourses] = useState([]);
+  const [isLoadingEnrolments, setIsLoadingEnrolments] = useState(false);
+  const [enrolmentsError, setEnrolmentsError] = useState('');
+  const [enrolmentsVersion, setEnrolmentsVersion] = useState(0);
+
+  // Teacher tools
+  const [submissionsCourse, setSubmissionsCourse] = useState(null);
+  const [builderInitialPanel, setBuilderInitialPanel] = useState(null);
+  const [globalNotice, setGlobalNotice] = useState(null);
 
   // Real-time Auth subscription & redirect handler on mount
   useEffect(() => {
@@ -128,66 +150,105 @@ function App() {
       setUserProfile(null);
       setEditingCourse(null);
       setShowFrontPage(false);
+      setEnrolledCourses([]);
+      setActiveTab('my-courses');
     } catch (err) {
       console.error('Logout failed:', err);
     }
   };
 
-  // Stripe Donation & Student Sponsorship state
-  const [sponsorStudentEmail, setSponsorStudentEmail] = useState('');
+  // Stripe Donation state
   const [isDonationModalOpen, setIsDonationModalOpen] = useState(false);
-  const [isFundingLoading, setIsFundingLoading] = useState(false);
   const [paymentNotice, setPaymentNotice] = useState(null);
 
+  // Stripe redirect: the payment is verified on the server, then the Super Admin is notified to
+  // credit it (tokens are never added from the browser — that would let anyone mint tokens).
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get('payment') === 'success') {
-        const tokensParam = Number(params.get('tokens')) || 50;
-        const typeParam = params.get('type') || 'token_pool';
+    if (typeof window === 'undefined' || isAuthLoading) return undefined;
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has('payment')) return undefined;
+    const outcome = params.get('payment');
+    const sessionId = params.get('session_id') || '';
+    window.history.replaceState({}, document.title, window.location.pathname);
+    if (outcome !== 'success' && outcome !== 'cancelled') return undefined;
 
-        if (typeParam === 'token_purchase' && authUser?.uid) {
-          creditUserTokens(authUser.uid, tokensParam).then(() => {
-            setUserTokenBalance(prev => prev + tokensParam);
-          });
-          setPaymentNotice({
-            type: 'success',
-            message: `🎉 Success! ${tokensParam} tokens have been added to your account balance.`
-          });
-        } else {
-          donateToTokenFund(tokensParam).then(() => {});
-          setPaymentNotice({
-            type: 'success',
-            message: `🎉 Thank you! Your donation of ${tokensParam} tokens has been added to the accumulated token fund.`
-          });
-        }
-      } else if (params.get('payment') === 'cancelled') {
+    let cancelled = false;
+    (async () => {
+      if (outcome === 'cancelled') {
         setPaymentNotice({ type: 'info', message: 'Stripe checkout was cancelled.' });
+        return;
       }
-      if (params.has('payment')) {
-        window.history.replaceState({}, document.title, window.location.pathname);
+      setPaymentNotice({ type: 'info', message: 'Verifying your payment with Stripe…' });
+      let verified;
+      try {
+        verified = await confirmCheckoutSession(sessionId);
+      } catch (err) {
+        if (!cancelled) setPaymentNotice({ type: 'info', message: `Thank you! We could not verify the payment automatically (${err.message}). If you were charged, message the Super Admin with your receipt.` });
+        return;
       }
-    }
-  }, [authUser]);
+      if (cancelled) return;
+      if (!verified.paid) {
+        setPaymentNotice({ type: 'info', message: 'Stripe has not confirmed this payment yet. If you were charged, message the Super Admin with your receipt.' });
+        return;
+      }
 
-  const handleSponsorStudent = async (e) => {
-    if (e) e.preventDefault();
-    if (!sponsorStudentEmail.trim()) {
-      alert("Please enter the student's email address to fund their account.");
-      return;
-    }
-    setIsFundingLoading(true);
-    try {
-      await createCheckoutSession({
-        type: 'student_sponsorship',
-        amount: 52,
-        studentEmail: sponsorStudentEmail.trim()
-      });
-    } catch (err) {
-      alert(err.message || 'Failed to initialize Stripe checkout.');
-      setIsFundingLoading(false);
-    }
-  };
+      const reportedKey = `ozedu_reported_${verified.sessionId}`;
+      let alreadyReported = false;
+      try {
+        alreadyReported = Boolean(localStorage.getItem(reportedKey));
+      } catch {
+        alreadyReported = false;
+      }
+      const paid = verified.amountTotal !== null ? `${verified.currency} $${Number(verified.amountTotal).toFixed(2)}` : 'payment';
+
+      let body = '';
+      let meta = { stripeSessionId: verified.sessionId, amountPaid: verified.amountTotal, currency: verified.currency };
+      let category = 'support';
+      let thanks = '';
+      if (verified.type === 'token_purchase') {
+        category = 'token_request';
+        meta = { ...meta, tokensPurchased: verified.tokens, requesterEmail: (authUser?.email || '').toLowerCase(), requesterUid: authUser?.uid || '' };
+        body = `Stripe payment received (${paid}) for ${verified.tokens} tokens. Please credit my account.\nSession: ${verified.sessionId}`;
+        thanks = `🎉 Payment received for ${verified.tokens} tokens. The Super Admin has been notified and will add them to your balance shortly.`;
+      } else if (verified.type === 'student_sponsorship') {
+        meta = { ...meta, sponsorshipStudentEmail: verified.studentEmail };
+        body = `Stripe payment received (${paid}) to sponsor a year of access for ${verified.studentEmail || 'a student'}.\nSession: ${verified.sessionId}`;
+        thanks = `🎉 Thank you for sponsoring ${verified.studentEmail || 'a student'}! The Super Admin has been notified.`;
+      } else {
+        meta = { ...meta, donationTokens: verified.tokens };
+        body = `Stripe donation received (${paid}): ${verified.tokens} tokens for the Emergency Token Fund.\nSession: ${verified.sessionId}`;
+        thanks = `🎉 Thank you! Your donation of ${verified.tokens} tokens to the Emergency Token Fund has been received.`;
+      }
+
+      if (authUser && !alreadyReported) {
+        try {
+          await sendMessage({
+            sender: authUser,
+            senderProfile: userProfile || { email: authUser.email },
+            to: SUPERADMIN_INBOX,
+            category,
+            subject: verified.type === 'token_purchase' ? `Token purchase: ${verified.tokens} tokens` : 'Payment received',
+            body,
+            meta
+          });
+          try {
+            localStorage.setItem(reportedKey, '1');
+          } catch {
+            // private mode: the Super Admin may see a duplicate notice, never a duplicate credit
+          }
+        } catch (err) {
+          console.warn('Payment notice to Super Admin failed:', err);
+          thanks += ` (Please message the Super Admin with session ${verified.sessionId} — the automatic notice could not be sent.)`;
+        }
+      } else if (!authUser && verified.type === 'token_purchase') {
+        thanks += ' Sign in, then message the Super Admin with your receipt to have the tokens credited.';
+      }
+      if (!cancelled) setPaymentNotice({ type: 'success', message: thanks });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser, isAuthLoading, userProfile]);
 
   const [activeTab, setActiveTab] = useState('my-courses');
   const [searchQuery, setSearchQuery] = useState('');
@@ -201,6 +262,40 @@ function App() {
   
   const [archivedCourses, setArchivedCourses] = useState([]);
   const [showArchive, setShowArchive] = useState(false);
+
+  useEffect(() => {
+    if (!authUser || !userProfile) return;
+    if (!privileges.isStaff && STAFF_TABS.includes(activeTab)) setActiveTab('learning');
+  }, [authUser, userProfile, privileges.isStaff, activeTab]);
+
+  // Enrolled courses (student panel + "message my teacher")
+  useEffect(() => {
+    if (!authUser?.email) return undefined;
+    let cancelled = false;
+    (async () => {
+      setIsLoadingEnrolments(true);
+      setEnrolmentsError('');
+      try {
+        const enrolments = await listMyEnrolments(authUser.email);
+        const courses = await Promise.all(enrolments.slice(0, 60).map(e => getLmsCourseById(e.courseId).catch(() => null)));
+        if (cancelled) return;
+        setEnrolledCourses(courses.filter(Boolean).filter(c => !c.archived));
+      } catch (err) {
+        console.warn('Enrolled courses could not be loaded:', err);
+        if (!cancelled) setEnrolmentsError('Your courses could not be loaded. Check your connection.');
+      } finally {
+        if (!cancelled) setIsLoadingEnrolments(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser, enrolmentsVersion]);
+
+  // Courses this person may manage: their own (plus unowned legacy courses); the Super Admin sees all.
+  const visibleMyCourses = privileges.isSuperadmin
+    ? myCourses
+    : myCourses.filter(c => !c.authorId || c.authorId === authUser?.uid);
 
   // Synchronize courses from Cloud Firestore (lms_courses + unmigrated legacy) on mount
   useEffect(() => {
@@ -395,6 +490,7 @@ function App() {
     const base = createBlankCourse(authUser?.uid || 'anonymous', authUser?.displayName || 'Educator');
     return {
       ...base,
+      authorEmail: (authUser?.email || '').toLowerCase(),
       id: newCourseId(),
       startDate: todayIso,
       students: 0,
@@ -429,9 +525,12 @@ function App() {
   };
 
   const handleUploadSheetClick = () => {
-    openCourseInBuilder(buildBlankCourse());
-    setAiError('');
-    setIsAiImportOpen(true);
+    const newCourse = buildBlankCourse();
+    setBuilderInitialPanel('spreadsheet');
+    openCourseInBuilder(newCourse);
+    saveCourse(newCourse.id, newCourse, { isNew: true }).catch(error => {
+      console.error("Error adding course to Firebase: ", error);
+    });
   };
 
 
@@ -572,24 +671,68 @@ function App() {
 
   const [copyingCourseIds, setCopyingCourseIds] = useState({});
 
-  // Copies a catalog/network course into this site, persisted with lineage (sourceCourseId).
+  // Published courses from every OzEdu teacher (shown first in Global Search).
+  const [networkCourses, setNetworkCourses] = useState([]);
+  const [isLoadingNetwork, setIsLoadingNetwork] = useState(false);
+  const [networkError, setNetworkError] = useState('');
+  const [networkLoadedAt, setNetworkLoadedAt] = useState(0);
+
+  const loadNetworkCourses = async () => {
+    if (!isDbAvailable()) {
+      setNetworkError('Published OzEdu courses could not be loaded right now.');
+      return;
+    }
+    setIsLoadingNetwork(true);
+    setNetworkError('');
+    try {
+      const list = await listNetworkCourses();
+      setNetworkCourses(list.filter(c => !c.archived));
+      setNetworkLoadedAt(Date.now());
+    } catch (err) {
+      console.warn('Published courses could not be loaded:', err);
+      setNetworkError('Published OzEdu courses could not be loaded right now.');
+    } finally {
+      setIsLoadingNetwork(false);
+    }
+  };
+
+  const openGlobalSearch = () => {
+    setActiveTab('global');
+    if (Date.now() - networkLoadedAt > 60000) loadNetworkCourses();
+  };
+
+  const isCopiedByMe = (course) => myCourses.some(c =>
+    String(c.sourceCourseId) === String(course.id) && (!c.authorId || c.authorId === authUser?.uid)
+  ) || String(course.authorId || '') === String(authUser?.uid || '_');
+
+  // Global Search -> a private Draft copy for this teacher; /course_copies records teacher, copy and date.
   const handleCopyCourse = async (course) => {
     const key = String(course.id);
-    if (copyingCourseIds[key]) return;
-    if (myCourses.some(c => String(c.id) === key || String(c.sourceCourseId) === key)) return;
+    if (copyingCourseIds[key] || isCopiedByMe(course)) return;
 
     setCopyingCourseIds(prev => ({ ...prev, [key]: true }));
     try {
-      const copied = await copyCourseToSite(course);
-      setMyCourses(prev => [...prev, copied]);
+      const { course: copied } = await copyCourseForTeacher(course, authUser);
+      setMyCourses(prev => [copied, ...prev]);
+      setGlobalNotice({ type: 'success', message: `📋 "${copied.title}" was copied to My Courses as a private Draft. The copy, your name and the date were recorded.` });
     } catch (err) {
       console.warn("Course copy save note:", err);
-      // Graceful degradation: keep the copy locally so the user isn't blocked.
-      setMyCourses(prev => [...prev, { ...course, id: newCourseId(), sourceCourseId: key, students: 0 }]);
+      setGlobalNotice({ type: 'error', message: `The course could not be copied: ${err.message || 'please try again'}.` });
     } finally {
       setCopyingCourseIds(prev => ({ ...prev, [key]: false }));
     }
   };
+
+  const networkQuery = searchQuery.toLowerCase().trim();
+  const filteredNetworkCourses = networkCourses.filter(c => {
+    const matchesSearch = !networkQuery ||
+      String(c.title || '').toLowerCase().includes(networkQuery) ||
+      String(c.authorName || '').toLowerCase().includes(networkQuery) ||
+      String(c.category || '').toLowerCase().includes(networkQuery) ||
+      String(c.code || '').toLowerCase().includes(networkQuery);
+    const matchesCategory = globalCategory === 'ALL' || c.category === globalCategory;
+    return matchesSearch && matchesCategory;
+  });
 
   const filteredGlobalCourses = ALL_GLOBAL_COURSES.filter(c => {
     const q = searchQuery.toLowerCase().trim();
@@ -610,36 +753,22 @@ function App() {
 
   const globalCategoriesList = Array.from(new Set(ALL_GLOBAL_COURSES.map(c => c.category).filter(Boolean)));
 
-  useEffect(() => {
-    if (isContactOpen) {
-      setMathA(Math.floor(Math.random() * 10) + 1);
-      setMathB(Math.floor(Math.random() * 10) + 1);
-      setUserMathAnswer('');
-      setContactForm({ name: '', email: '', phone: '', message: '' });
-    }
-  }, [isContactOpen]);
-
-  const isMathCorrect = parseInt(userMathAnswer) === (mathA + mathB);
-  
-  const handleContactSubmit = (e) => {
-    e.preventDefault();
-    if (!isMathCorrect) return;
-
-    // Store the enquiry in lms_leads (fire-and-forget: the email always opens regardless)
-    if (isDbAvailable()) {
-      saveLead(contactForm).catch(err => console.warn("Lead save note:", err));
-    }
-
-    const subject = encodeURIComponent(`Contact from ${contactForm.name}`);
-    const body = encodeURIComponent(
-      `Name: ${contactForm.name}\n` +
-      `Email: ${contactForm.email}\n` +
-      `Phone: ${contactForm.phone}\n\n` +
-      `Message:\n${contactForm.message}`
-    );
-    window.location.href = `mailto:support@aifoundation.net.au?subject=${subject}&body=${body}`;
+  // Contact: signed-in people go to their admin panel and message the Super Admin there.
+  const handleContactMessageSuperadmin = () => {
     setIsContactOpen(false);
+    setShowFrontPage(false);
+    setPendingSuperadminMessage(true);
   };
+
+  useEffect(() => {
+    if (!pendingSuperadminMessage || showFrontPage || !authUser) return undefined;
+    // Wait one tick for the admin panel (and its message dock) to mount.
+    const timer = setTimeout(() => {
+      requestCompose(SUPERADMIN_INBOX);
+      setPendingSuperadminMessage(false);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [pendingSuperadminMessage, showFrontPage, authUser]);
   const cards = [
     {
       title: "Mission & Ecosystem",
@@ -654,7 +783,7 @@ function App() {
     {
       title: "Economic Architecture",
       icon: "💡",
-      content: "Operating at ~US$1.00/student monthly, it utilizes the TokenPulse Community Emergency Fund for transparent funding. Remote students access metropolitan-quality academics via Australian university integrations."
+      content: "Our system utilizes the TokenPulse Community Emergency Fund for transparent funding students. Remote students access metropolitan-quality academics via Australian university integrations and more."
     },
     {
       title: "Self-Sustaining Model",
@@ -818,7 +947,7 @@ function App() {
     if (editingCourse) {
       const normalizedCourse = {
         ...editingCourse,
-        aqfLevel: editingCourse.aqfLevel !== undefined ? editingCourse.aqfLevel : 4,
+        aqfLevel: editingCourse.aqfLevel !== undefined ? editingCourse.aqfLevel : 0,
         units: editingCourse.units?.length ? editingCourse.units : (
           editingCourse.modules?.length ? editingCourse.modules.map((m, mIdx) => ({
             id: m.id || generateEntityId('unit'),
@@ -842,16 +971,20 @@ function App() {
           <main className="main-content animate-fade-in-up" style={{ padding: '16px 20px', maxWidth: '1400px', margin: '0 auto', width: '100%' }}>
             <AQFCourseBuilder
               course={normalizedCourse}
+              initialPanel={builderInitialPanel}
               onSaveCourse={async (updated) => {
-                setMyCourses(prev => prev.map(c => c.id === updated.id ? updated : c));
-                setEditingCourse(updated);
-                try {
-                  await saveCourse(updated.id, updated);
-                } catch (err) {
-                  console.warn('Cloud save notice:', err);
-                }
+                // Legacy courses without an owner are claimed by the teacher who saves them.
+                const owned = !updated.authorId && authUser?.uid && !privileges.isSuperadmin
+                  ? { ...updated, authorId: authUser.uid, authorName: authUser.displayName || '', authorEmail: (authUser.email || '').toLowerCase() }
+                  : updated;
+                setMyCourses(prev => prev.map(c => c.id === owned.id ? owned : c));
+                setEditingCourse(owned);
+                await saveCourse(owned.id, owned);
               }}
-              onBack={() => setEditingCourse(null)}
+              onBack={() => {
+                setEditingCourse(null);
+                setBuilderInitialPanel(null);
+              }}
               currentUser={authUser}
               userProfile={userProfile}
               userTokenBalance={userTokenBalance}
@@ -861,7 +994,16 @@ function App() {
                 }
               }}
             />
+            <div className="message-dock-spacer" aria-hidden="true" />
           </main>
+          <MessageDock
+            currentUser={authUser}
+            userProfile={userProfile}
+            teachingCourses={visibleMyCourses}
+            enrolledCourses={enrolledCourses}
+            ref={messageDockRef}
+            onBalanceChanged={() => authUser?.uid && getUserTokenBalance(authUser.uid).then(bal => setUserTokenBalance(bal || 0))}
+          />
         </div>
       );
     }
@@ -1284,36 +1426,63 @@ function App() {
           )}
 
           <nav className={`header-nav ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
-            <button className={`nav-btn ${activeTab === 'my-courses' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('my-courses'); setIsMobileMenuOpen(false); }}>My Courses</button>
+            {privileges.isStaff && (
+              <button className={`nav-btn ${activeTab === 'my-courses' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('my-courses'); setIsMobileMenuOpen(false); }}>My Courses</button>
+            )}
+            {(!privileges.isStaff || enrolledCourses.length > 0) && (
+              <button className={`nav-btn ${activeTab === 'learning' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('learning'); setIsMobileMenuOpen(false); }}>
+                🎓 My Learning{enrolledCourses.length ? ` (${enrolledCourses.length})` : ''}
+              </button>
+            )}
             {privileges.isStaff && (
               <button className={`nav-btn ${activeTab === 'students' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('students'); setIsMobileMenuOpen(false); }}>Student Registration</button>
             )}
-            <button className={`nav-btn ${activeTab === 'global' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('global'); setIsMobileMenuOpen(false); }}>Global Search</button>
-            
-            {/* Teacher Postcard Registration Tab */}
-            <button 
-              className={`nav-btn ${activeTab === 'teacher-app' ? 'primary' : 'secondary'}`} 
-              onClick={() => { setActiveTab('teacher-app'); setIsMobileMenuOpen(false); }}
-              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-              title="Postcard Application to join the OzEdu Faculty as a Teacher"
+            {privileges.isStaff && (
+              <button className={`nav-btn ${activeTab === 'global' ? 'primary' : 'secondary'}`} onClick={() => { openGlobalSearch(); setIsMobileMenuOpen(false); }}>Global Search</button>
+            )}
+
+            {/* Teacher Postcard Registration Tab (not needed once someone is a teacher) */}
+            {!privileges.isStaff && (
+              <button
+                className={`nav-btn ${activeTab === 'teacher-app' ? 'primary' : 'secondary'}`}
+                onClick={() => { setActiveTab('teacher-app'); setIsMobileMenuOpen(false); }}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+                title="Postcard Application to join the OzEdu Faculty as a Teacher"
+              >
+                📮 Join as Teacher
+              </button>
+            )}
+
+            {/* Token Fund: sponsor a student or donate to the emergency fund */}
+            <button
+              className="nav-btn secondary"
+              onClick={() => { setIsTokenFundOpen(true); setIsMobileMenuOpen(false); }}
+              style={{ borderColor: 'rgba(250, 204, 21, 0.6)', color: '#fef08a', display: 'flex', alignItems: 'center', gap: '6px' }}
+              title="Sponsor a student's year of access or donate to the Emergency Token Fund"
             >
-              📮 Join as Teacher
+              💛 Token Fund
             </button>
 
-            {/* User Token Balance & Buy Button */}
+            {/* Token balance: UNL (unlimited) for the Super Admin; others can buy tokens */}
             <button
               className="nav-btn secondary token-badge-btn"
-              onClick={() => { setIsDonationModalOpen(true); setIsMobileMenuOpen(false); }}
+              onClick={() => {
+                if (privileges.isSuperadmin) setIsSuperAdminPanelOpen(true);
+                else setIsDonationModalOpen(true);
+                setIsMobileMenuOpen(false);
+              }}
               style={{
                 borderColor: '#f59e0b', color: '#fef08a', display: 'flex', alignItems: 'center', gap: '6px',
                 background: 'rgba(245, 158, 11, 0.15)', cursor: 'pointer'
               }}
-              title="Click to buy tokens or contribute to the accumulated token fund (Minimum 50 tokens)"
+              title={privileges.isSuperadmin ? 'Super Admin: unlimited tokens — open the Give Tokens panel' : 'Buy tokens (minimum 50), or ask the Super Admin in 💬 Messages'}
             >
-              <span>🪙 {userTokenBalance} Tokens</span>
-              <span style={{ fontSize: '0.72rem', background: '#d97706', color: '#fff', padding: '1px 6px', borderRadius: '6px', fontWeight: 700 }}>
-                +Buy/Donate
-              </span>
+              <span>🪙 {tokenBalanceLabel} Tokens</span>
+              {!privileges.isSuperadmin && (
+                <span style={{ fontSize: '0.72rem', background: '#d97706', color: '#fff', padding: '1px 6px', borderRadius: '6px', fontWeight: 700 }}>
+                  +Buy
+                </span>
+              )}
             </button>
 
             {/* Super Admin Control Panel */}
@@ -1357,7 +1526,30 @@ function App() {
         </header>
 
         <main className="main-content animate-fade-in-up">
-          {activeTab === 'my-courses' && (
+          {globalNotice && (
+            <div className={`app-global-notice ${globalNotice.type}`} role="status">
+              <span>{globalNotice.message}</span>
+              <button onClick={() => setGlobalNotice(null)} aria-label="Dismiss">×</button>
+            </div>
+          )}
+
+          {activeTab === 'learning' && (
+            <StudentLearningPanel
+              currentUser={authUser}
+              courses={enrolledCourses}
+              loading={isLoadingEnrolments}
+              error={enrolmentsError}
+              onRetry={() => setEnrolmentsVersion(v => v + 1)}
+              onMessageTeacher={(course) => requestCompose(course.authorEmail, {
+                toName: course.authorName,
+                courseId: course.id,
+                courseTitle: course.title,
+                subject: course.title
+              })}
+            />
+          )}
+
+          {activeTab === 'my-courses' && privileges.isStaff && (
             <div className="admin-section">
               <h2 className="section-title">My Courses</h2>
               
@@ -1389,7 +1581,7 @@ function App() {
                   </div>
                 </div>
 
-                {myCourses.map(course => {
+                {visibleMyCourses.map(course => {
                   const isDraft = Boolean(course.isDraft || course.status === 'draft' || (Array.isArray(course.tags) && course.tags.includes('Draft')));
 
                   return (
@@ -1449,26 +1641,42 @@ function App() {
                         </span>
                       </div>
                       <div style={{display: 'flex', gap: '8px', marginTop: '16px', flexWrap: 'wrap'}}>
-                        {!isDraft && (
-                          <button 
-                            className="nav-btn primary" 
-                            style={{
-                              flex: '1 1 100%', 
-                              background: 'linear-gradient(135deg, #059669, #10b981)', 
-                              color: '#fff',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              gap: '6px',
-                              fontSize: '0.85rem',
-                              padding: '9px 12px'
-                            }} 
-                            onClick={() => setManagingPeopleCourse(course)}
-                            title="Free Teacher Privilege: Add any students, teachers, or colleagues at 0 tokens"
-                          >
-                            👥 Add People (0 Tokens)
-                          </button>
+                        {course.sourceCourseId && (
+                          <span style={{ flex: '1 1 100%', fontSize: '0.75rem', color: '#a5b4fc' }}>
+                            📋 Copied from Global Search{course.copiedAt ? ` on ${formatLocalizedDate(String(course.copiedAt).slice(0, 10))}` : ''}
+                          </span>
                         )}
+                        {!course.authorId && (
+                          <span style={{ flex: '1 1 100%', fontSize: '0.75rem', color: '#fcd34d' }} title="Created before course ownership was recorded. Saving it makes you the owner.">
+                            ⚠️ Unassigned course — save it to claim ownership
+                          </span>
+                        )}
+                        <button
+                          className="nav-btn primary"
+                          style={{
+                            flex: '1 1 100%',
+                            background: 'linear-gradient(135deg, #059669, #10b981)',
+                            color: '#fff',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '6px',
+                            fontSize: '0.85rem',
+                            padding: '9px 12px'
+                          }}
+                          onClick={() => setManagingPeopleCourse(course)}
+                          title="Add students by email — one at a time, in bulk, or from a spreadsheet (0 tokens)"
+                        >
+                          👥 Students & People (0 Tokens)
+                        </button>
+                        <button
+                          className="nav-btn secondary"
+                          style={{ flex: '1 1 100%', fontSize: '0.85rem', padding: '8px 12px' }}
+                          onClick={() => setSubmissionsCourse(course)}
+                          title="View and grade students' assessment submissions"
+                        >
+                          📥 Submissions
+                        </button>
                         <button 
                           className="nav-btn secondary" 
                           style={{
@@ -1519,14 +1727,14 @@ function App() {
             </div>
           )}
 
-          {activeTab === 'students' && (
-            <StudentRegistration 
-              myCourses={myCourses} 
-              onUpdateCourses={handleUpdateCourseEnrollments} 
+          {activeTab === 'students' && privileges.isStaff && (
+            <StudentRegistration
+              myCourses={visibleMyCourses}
+              onUpdateCourses={handleUpdateCourseEnrollments}
             />
           )}
 
-          {activeTab === 'global' && (
+          {activeTab === 'global' && privileges.isStaff && (
             <div className="admin-section">
               <div className="global-search-header-bar">
                 <div>
@@ -1566,6 +1774,50 @@ function App() {
                 </div>
               </div>
 
+              {/* Published OzEdu courses (live from the database) */}
+              <div className="network-courses-block">
+                <div className="network-courses-head">
+                  <h3>🌏 Published by OzEdu teachers ({filteredNetworkCourses.length})</h3>
+                  <button className="nav-btn secondary" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={loadNetworkCourses} disabled={isLoadingNetwork}>
+                    {isLoadingNetwork ? 'Loading…' : '↻ Refresh'}
+                  </button>
+                </div>
+                {networkError && <p style={{ color: '#fca5a5', fontSize: '0.85rem' }}>{networkError}</p>}
+                {!isLoadingNetwork && !networkError && filteredNetworkCourses.length === 0 && (
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
+                    {networkCourses.length === 0 ? 'No teacher has published a course yet. Publish yours from the Course Builder and it appears here for every teacher.' : 'No published courses match your search.'}
+                  </p>
+                )}
+                {filteredNetworkCourses.length > 0 && (
+                  <div className="global-cards-grid-4x6">
+                    {filteredNetworkCourses.map(course => {
+                      const copied = isCopiedByMe(course);
+                      const own = String(course.authorId || '') === String(authUser?.uid || '_');
+                      return (
+                        <div key={`net-${course.id}`} className="glass global-course-card network-course-card">
+                          <div>
+                            <div className="global-category-tag" title={course.category}>{course.category || 'General Academic'}</div>
+                            <h4 className="global-course-title" title={course.title}>{course.title}</h4>
+                            <p className="global-course-author"><span>✍️</span><strong>{course.authorName || 'OzEdu teacher'}</strong></p>
+                            <p className="global-course-students">📚 {(course.units || []).length} units • 👥 {Number(course.students) || 0} enrolled</p>
+                          </div>
+                          <button
+                            className="nav-btn primary"
+                            style={{ width: '100%', fontSize: '0.88rem', padding: '10px 14px', background: copied ? 'rgba(52, 211, 153, 0.25)' : undefined }}
+                            onClick={() => handleCopyCourse(course)}
+                            disabled={copied || own || Boolean(copyingCourseIds[String(course.id)])}
+                          >
+                            {own ? 'Your course' : copied ? '✓ In My Courses' : copyingCourseIds[String(course.id)] ? 'Copying…' : '+ Copy to My Courses'}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <h3 className="catalog-heading">📖 Curated course catalog</h3>
+
               {/* 4 Courses Across × 6 Rows Down (24 Per Page) - Centered */}
               <div className="global-cards-grid-4x6">
                 {paginatedGlobalCourses.map(course => (
@@ -1586,18 +1838,18 @@ function App() {
                       </p>
                     </div>
 
-                    <button 
-                      className="nav-btn primary" 
-                      style={{ 
-                        width: '100%', 
-                        fontSize: '0.88rem', 
+                    <button
+                      className="nav-btn primary"
+                      style={{
+                        width: '100%',
+                        fontSize: '0.88rem',
                         padding: '10px 14px',
-                        background: myCourses.some(c => c.id === course.id) ? 'rgba(52, 211, 153, 0.25)' : undefined 
+                        background: isCopiedByMe(course) ? 'rgba(52, 211, 153, 0.25)' : undefined
                       }}
                       onClick={() => handleCopyCourse(course)}
-                      disabled={myCourses.some(c => c.id === course.id)}
+                      disabled={isCopiedByMe(course) || Boolean(copyingCourseIds[String(course.id)])}
                     >
-                      {myCourses.some(c => c.id === course.id) ? '✓ Added to My Courses' : '+ Copy to My Courses'}
+                      {isCopiedByMe(course) ? '✓ In My Courses' : copyingCourseIds[String(course.id)] ? 'Copying…' : '+ Copy to My Courses'}
                     </button>
                   </div>
                 ))}
@@ -1674,9 +1926,11 @@ function App() {
           {activeTab === 'teacher-app' && (
             <TeacherApplicationPostcard
               currentUser={authUser}
+              userProfile={userProfile}
               onSubmitted={() => {}}
             />
           )}
+          <div className="message-dock-spacer" aria-hidden="true" />
         </main>
         {isUserRolesOpen && (
           <UserRoleManagementModal
@@ -1688,6 +1942,7 @@ function App() {
         {isSuperAdminPanelOpen && (
           <SuperAdminTokenPanel
             currentUser={authUser}
+            userProfile={userProfile}
             isOpen={isSuperAdminPanelOpen}
             onClose={() => {
               setIsSuperAdminPanelOpen(false);
@@ -1709,6 +1964,51 @@ function App() {
             }}
           />
         )}
+        {isTokenFundOpen && (
+          <TokenFundModal
+            isOpen={isTokenFundOpen}
+            currentUser={authUser}
+            onClose={() => setIsTokenFundOpen(false)}
+            onOpenDonation={() => {
+              setIsTokenFundOpen(false);
+              setIsDonationModalOpen(true);
+            }}
+          />
+        )}
+        {managingPeopleCourse && (
+          <CourseAddPeopleModal
+            course={managingPeopleCourse}
+            currentUser={authUser}
+            onClose={() => setManagingPeopleCourse(null)}
+            onMemberAdded={(courseId, delta = 1) => {
+              setMyCourses(prev => prev.map(c => c.id === courseId ? { ...c, students: Math.max(0, (Number(c.students) || 0) + delta) } : c));
+            }}
+          />
+        )}
+        {submissionsCourse && (
+          <CourseSubmissionsModal
+            course={submissionsCourse}
+            currentUser={authUser}
+            onClose={() => setSubmissionsCourse(null)}
+            onMessageStudent={(submission) => {
+              setSubmissionsCourse(null);
+              requestCompose(submission.studentEmail, {
+                toName: submission.studentName,
+                courseId: submission.courseId,
+                courseTitle: submission.courseTitle,
+                subject: submission.assessmentTitle
+              });
+            }}
+          />
+        )}
+        <MessageDock
+          currentUser={authUser}
+          userProfile={userProfile}
+          teachingCourses={privileges.isStaff ? visibleMyCourses : []}
+          enrolledCourses={enrolledCourses}
+          ref={messageDockRef}
+          onBalanceChanged={() => authUser?.uid && getUserTokenBalance(authUser.uid).then(bal => setUserTokenBalance(bal || 0))}
+        />
       </div>
     );
   }
@@ -1747,13 +2047,21 @@ function App() {
           <button className="nav-btn secondary" onClick={() => { setIsContactOpen(true); setIsMobileMenuOpen(false); }}>Contact</button>
           {isLoggedIn ? (
             <>
-              <button 
-                className="nav-btn primary" 
+              <button
+                className="nav-btn primary"
                 onClick={() => { setShowFrontPage(false); setIsMobileMenuOpen(false); }}
                 style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
                 title="Return to OzEdu Admin Dashboard"
               >
                 <span>🛡️ Go to Admin</span>
+              </button>
+              <button
+                className="nav-btn secondary"
+                onClick={() => { setIsTokenFundOpen(true); setIsMobileMenuOpen(false); }}
+                style={{ borderColor: 'rgba(250, 204, 21, 0.6)', color: '#fef08a' }}
+                title="Sponsor a student's year of access or donate to the Emergency Token Fund"
+              >
+                💛 Token Fund
               </button>
               <div className="user-profile-badge">
                 {authUser?.photoURL ? (
@@ -1837,30 +2145,6 @@ function App() {
           ))}
         </div>
 
-        <div className="twin-panels animate-fade-in-up delay-5">
-          <div className="glass twin-panel">
-            <h3>Sponsor a Student</h3>
-            <p>Donate $52 to fully fund a specific student's access for a year.</p>
-            <form onSubmit={handleSponsorStudent} className="input-group">
-              <input 
-                type="email" 
-                placeholder="Student's Email Address" 
-                className="email-input" 
-                value={sponsorStudentEmail}
-                onChange={e => setSponsorStudentEmail(e.target.value)}
-                required
-              />
-              <button type="submit" className="nav-btn primary" disabled={isFundingLoading}>
-                {isFundingLoading ? 'Connecting...' : 'Fund Account ($52)'}
-              </button>
-            </form>
-          </div>
-          <div className="glass twin-panel">
-            <h3>Emergency Token Fund</h3>
-            <p>Contribute to our token pool for disadvantaged students around the world.</p>
-            <button className="nav-btn primary" onClick={() => setIsDonationModalOpen(true)}>Donate to Token Fund</button>
-          </div>
-        </div>
       </main>
 
       <footer className="footer glass animate-fade-in-up delay-5">
@@ -1882,88 +2166,58 @@ function App() {
               <details className="info-box">
                 <summary>If you are a teacher and want to share materials</summary>
                 <div className="dropdown-content">
-                  Our platform thrives on community-contributed content. Send us a message and attach your syllabus or modules. Our academic team will review and integrate your work.
+                  Our platform thrives on community-contributed content. Register with Google, then message the Super Admin with links to your syllabus or modules (for example on Google Drive). Our academic team will review and integrate your work.
                 </div>
               </details>
               <details className="info-box">
                 <summary>If you are a donor and want to know how to sponsor students</summary>
                 <div className="dropdown-content">
-                  Sponsoring a student costs just $12/year. You can fund specific students using the panel on the main page, or contact us to sponsor larger groups and entire classrooms.
+                  Sign in with Google and press the 💛 Token Fund button to sponsor a specific student or donate to the Emergency Token Fund, or contact us to sponsor larger groups and entire classrooms.
                 </div>
               </details>
             </div>
-            <form onSubmit={handleContactSubmit} className="contact-form">
-              <input 
-                type="text" 
-                placeholder="Name" 
-                required 
-                className="form-input"
-                value={contactForm.name}
-                onChange={e => setContactForm({...contactForm, name: e.target.value})}
-              />
-              <input 
-                type="email" 
-                placeholder="Email" 
-                required 
-                className="form-input"
-                value={contactForm.email}
-                onChange={e => setContactForm({...contactForm, email: e.target.value})}
-              />
-              <input 
-                type="tel" 
-                placeholder="Phone Number" 
-                required 
-                className="form-input"
-                value={contactForm.phone}
-                onChange={e => setContactForm({...contactForm, phone: e.target.value})}
-              />
-              <textarea 
-                placeholder="Message" 
-                required 
-                rows="4"
-                className="form-input"
-                value={contactForm.message}
-                onChange={e => setContactForm({...contactForm, message: e.target.value})}
-              ></textarea>
-              
-              <div className="math-verification">
-                <label>What is {mathA} + {mathB}?</label>
-                <input 
-                  type="number" 
-                  required 
-                  className="form-input math-input"
-                  value={userMathAnswer}
-                  onChange={e => setUserMathAnswer(e.target.value)}
-                />
-              </div>
-
-              <button 
-                type="submit" 
-                className="nav-btn primary" 
-                disabled={!isMathCorrect || !userMathAnswer}
-                style={{ opacity: (!isMathCorrect || !userMathAnswer) ? 0.5 : 1, cursor: (!isMathCorrect || !userMathAnswer) ? 'not-allowed' : 'pointer' }}
-              >
-                Send Message
-              </button>
-            </form>
+            <div className="contact-steps">
+              <p className="contact-welcome">
+                Welcome! To message our team, register with Google first. New accounts start as <strong>Supporters</strong>,
+                and every Supporter can message the Super Admin from the 💬 Messages panel at the bottom of their admin panel.
+              </p>
+              <ol className="contact-step-list">
+                <li><strong>Register with Google</strong>: one click, no forms.</li>
+                <li><strong>You become a Supporter</strong> and your admin panel opens.</li>
+                <li><strong>Open 💬 Messages</strong> and write to the 🛡️ Super Admin. Replies arrive in the same place.</li>
+              </ol>
+              {isLoggedIn ? (
+                <button type="button" className="nav-btn primary contact-cta" onClick={handleContactMessageSuperadmin}>
+                  💬 Message the Super Admin
+                </button>
+              ) : (
+                <button type="button" className="nav-btn primary contact-cta" onClick={() => { setIsContactOpen(false); handleSignIn(); }} disabled={isAuthLoading}>
+                  {isAuthLoading ? 'Connecting...' : 'Register with Google'}
+                </button>
+              )}
+              <p className="contact-email-note">
+                You can also email us at <a href="mailto:support@aifoundation.net.au">support@aifoundation.net.au</a>.
+              </p>
+            </div>
           </div>
         </div>
       )}
       {isAiImportOpen && renderAiModal()}
-      {isDonationModalOpen && (
+      {isDonationModalOpen && isLoggedIn && (
         <DonationModal
           currentUser={authUser}
           isOpen={isDonationModalOpen}
           onClose={() => setIsDonationModalOpen(false)}
         />
       )}
-      {managingPeopleCourse && (
-        <CourseAddPeopleModal
-          course={managingPeopleCourse}
+      {isTokenFundOpen && isLoggedIn && (
+        <TokenFundModal
+          isOpen={isTokenFundOpen}
           currentUser={authUser}
-          onClose={() => setManagingPeopleCourse(null)}
-          onMemberAdded={(courseId, delta = 1) => {
-            setMyCourses(prev => prev.map(c => c.id === courseId ? { ...c, students: Math.max(0, (c.students || 0) + delta) } : c));
+          onClose={() => setIsTokenFundOpen(false)}
+          onOpenDonation={() => {
+            setIsTokenFundOpen(false);
+            setIsDonationModalOpen(true);
           }}
         />
       )}

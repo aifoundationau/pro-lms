@@ -101,7 +101,8 @@ async function run() {
   } finally {
     cap.restore();
   }
-  const [pg, vocational] = cap.prompts;
+  // Each AI Assist call may try several Gemini models with the same prompt; keep one per call.
+  const [pg, vocational] = [...new Set(cap.prompts)];
   assert(pg.includes('AACSB-RULES-MARKER') && pg.includes('ACARA-RULES-MARKER'));
   assert(!pg.includes('TEQSA-RULES-MARKER'), 'Unselected standards are not injected');
   assert(pg.includes('Ignore their consultation-workflow'));

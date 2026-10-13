@@ -34,23 +34,15 @@ import {
   query,
   increment
 } from 'firebase/firestore';
-import { auth, db, getOrInitAuth } from '../firebase';
+import { auth, db, getOrInitAuth } from '../firebase.js';
+import { ALLOWED_ROLES, resolvePrivileges, isOwnerEmail } from './rolePrivileges.js';
+import { readEnv } from './env.js';
+
+export { ALLOWED_ROLES, resolvePrivileges };
 
 export const OAUTH_CLIENT_ID =
-  import.meta.env.VITE_GOOGLE_OAUTH_CLIENT_ID ||
+  readEnv(() => import.meta.env.VITE_GOOGLE_OAUTH_CLIENT_ID, 'VITE_GOOGLE_OAUTH_CLIENT_ID') ||
   '614773274800-9pooin0jia9ij91qjlk7r6r6ne02mbhg.apps.googleusercontent.com';
-
-export const ALLOWED_ROLES = [
-  'Supporter',
-  'student',
-  'teacher',
-  'admin staff',
-  'CEO',
-  'COO',
-  'CFO',
-  'Financial team',
-  'Superadmin'
-];
 
 // Configure Google Auth Provider with offline access and account selection prompt
 export const googleProvider = new GoogleAuthProvider();
@@ -83,10 +75,10 @@ export async function syncUserToFirestore(user) {
     const nowIso = new Date().toISOString();
 
     if (!snap.exists()) {
-      // Newly registered user: assign default classification and role "Supporter"
-      // If user is the Firebase project owner/admin (support@aifoundation.net.au), automatically grant Superadmin
-      const isFirebaseOwner = user.email?.toLowerCase() === 'support@aifoundation.net.au';
-      const initialRole = isFirebaseOwner ? 'Superadmin' : 'Supporter';
+      // Newly registered user: assign default classification and role "supporter"
+      // If user is the Firebase project owner/admin (support@aifoundation.net.au), automatically grant superadmin
+      const isFirebaseOwner = isOwnerEmail(user.email);
+      const initialRole = isFirebaseOwner ? 'superadmin' : 'supporter';
       const newProfile = {
         uid: user.uid,
         email: user.email || '',
@@ -130,8 +122,8 @@ export async function syncUserToFirestore(user) {
       email: user.email || '',
       displayName: user.displayName || '',
       photoURL: user.photoURL || '',
-      role: 'Supporter',
-      classification: 'Supporter',
+      role: 'supporter',
+      classification: 'supporter',
       login_count: 1
     };
   }
@@ -237,60 +229,27 @@ export async function fetchUserProfile(uid) {
 }
 
 /**
- * Resolves administrative and Superadmin privileges dynamically from Firestore role attributes.
- * Never hardcodes user identities or emails.
- */
-export function resolvePrivileges(profile) {
-  const isFirebaseAdmin = profile?.email?.toLowerCase() === 'support@aifoundation.net.au';
-  const role = profile?.role || (isFirebaseAdmin ? 'Superadmin' : 'Supporter');
-  const isSuperadmin = role === 'Superadmin' || isFirebaseAdmin;
-  const isAdminStaff = isSuperadmin || role === 'CEO' || role === 'COO' || role === 'admin staff';
-  const isFinancial = isSuperadmin || role === 'CFO' || role === 'Financial team';
-  const isTeacher = isSuperadmin || role === 'teacher';
-  const isStaff = isSuperadmin || isAdminStaff || isFinancial || isTeacher;
-  const isStudent = role === 'student';
-  const isSupporter = role === 'Supporter' && !isSuperadmin;
-
-  return {
-    role: isSuperadmin && role !== 'Superadmin' ? 'Superadmin' : role,
-    classification: profile?.classification || (isSuperadmin ? 'Superadmin' : 'Supporter'),
-    isSuperadmin,
-    isAdminStaff,
-    isFinancial,
-    isTeacher,
-    isStaff,
-    isStudent,
-    isSupporter,
-    canManageRoles: isSuperadmin,
-    canCreateCourse: isStaff,
-    canEditCourse: isStaff,
-    canArchiveCourse: isStaff,
-    canEnrolStudents: isStaff,
-    canViewAllStudents: isStaff
-  };
-}
-
-/**
  * Updates a member role. Only permitted when authenticated user is a verified Superadmin.
  */
 export async function updateMemberRole(currentUid, targetUid, newRole) {
   if (!db) throw new Error('Firestore is unavailable.');
-  if (!ALLOWED_ROLES.includes(newRole)) {
+  const normalizedRole = String(newRole || '').trim().toLowerCase();
+  if (!ALLOWED_ROLES.includes(normalizedRole)) {
     throw new Error(`Invalid role '${newRole}'. Allowed roles: ${ALLOWED_ROLES.join(', ')}`);
   }
 
   // Verify Superadmin privileges dynamically from Firestore
   const currentSnap = await getDoc(doc(db, 'users', currentUid));
   const userData = currentSnap.exists() ? currentSnap.data() : null;
-  const isSuperadmin = userData?.role === 'Superadmin' || userData?.email?.toLowerCase() === 'support@aifoundation.net.au';
+  const isSuperadmin = resolvePrivileges(userData).isSuperadmin;
   if (!isSuperadmin) {
-    throw new Error('Access Denied: Only users with the Superadmin role can modify member roles.');
+    throw new Error('Access Denied: Only users with the superadmin role can modify member roles.');
   }
 
   const targetRef = doc(db, 'users', targetUid);
   await updateDoc(targetRef, {
-    role: newRole,
-    classification: newRole,
+    role: normalizedRole,
+    classification: normalizedRole,
     role_updated_at: new Date().toISOString(),
     role_updated_by: currentUid
   });
@@ -305,9 +264,9 @@ export async function updateUserCharityStatus(currentUid, targetUid, isCharityTe
   if (!db) throw new Error('Firestore is unavailable.');
   const currentSnap = await getDoc(doc(db, 'users', currentUid));
   const userData = currentSnap.exists() ? currentSnap.data() : null;
-  const isSuperadmin = userData?.role === 'Superadmin' || userData?.email?.toLowerCase() === 'support@aifoundation.net.au';
+  const isSuperadmin = resolvePrivileges(userData).isSuperadmin;
   if (!isSuperadmin) {
-    throw new Error('Access Denied: Only Superadmins can modify charity status.');
+    throw new Error('Access Denied: Only superadmins can modify charity status.');
   }
 
   const targetRef = doc(db, 'users', targetUid);
@@ -329,9 +288,9 @@ export async function listAllUsers(currentUid) {
   // Verify Superadmin privileges dynamically
   const currentSnap = await getDoc(doc(db, 'users', currentUid));
   const userData = currentSnap.exists() ? currentSnap.data() : null;
-  const isSuperadmin = userData?.role === 'Superadmin' || userData?.email?.toLowerCase() === 'support@aifoundation.net.au';
+  const isSuperadmin = resolvePrivileges(userData).isSuperadmin;
   if (!isSuperadmin) {
-    throw new Error('Access Denied: Only Superadmins can view the member directory.');
+    throw new Error('Access Denied: Only superadmins can view the member directory.');
   }
 
   const q = query(collection(db, 'users'));
@@ -407,7 +366,8 @@ export function subscribeToAuth(onAuthChanged) {
           uid: firebaseUser.uid,
           email: firebaseUser.email,
           displayName: firebaseUser.displayName,
-          role: 'Supporter'
+          role: 'supporter',
+          classification: 'supporter'
         });
       }
     } else {
