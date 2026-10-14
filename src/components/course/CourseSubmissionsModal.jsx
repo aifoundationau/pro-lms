@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { listCourseSubmissions, gradeSubmission, MAX_FEEDBACK_CHARS } from '../../services/submissionService';
 import { isHttpUrl } from '../../services/courseSpreadsheetSchema';
-import { moveUnitAssessmentsToCourse } from '../../types/courseBuilderTypes';
+import { upgradeCourseStructure } from '../../types/courseBuilderTypes';
 import { listCourseQuizzes } from '../../services/quizModel';
 import QuizMarkingPanel from './QuizMarkingPanel.jsx';
 
@@ -101,7 +101,7 @@ export default function CourseSubmissionsModal({ course, currentUser, onClose, o
   };
 
   // One Assessments & Rubrics list per course (older courses: tasks moved up from their units).
-  const structured = moveUnitAssessmentsToCourse(course);
+  const structured = upgradeCourseStructure(course);
   const assessments = (structured.assessments || []).filter(a => a && typeof a === 'object').map(a => {
     const unit = (structured.units || []).find(u => u?.id && u.id === a.unitId);
     return { ...a, unitTitle: unit?.unitTitle || '', unitCode: unit?.unitCode || '' };

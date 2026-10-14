@@ -8,14 +8,14 @@
 import { AQF_LEVELS, MAX_RUBRIC_LEVELS } from '../types/courseBuilderTypes.js';
 import { CURRICULUM_STANDARDS } from './curriculumStandards.js';
 
-export const SPREADSHEET_TEMPLATE_VERSION = 'OzEdu Course Spreadsheet v3';
+export const SPREADSHEET_TEMPLATE_VERSION = 'OzEdu Course Spreadsheet v4';
 
 export const SHEET = Object.freeze({
   instructions: 'Instructions',
   course: 'Course',
   outcomes: 'Learning Outcomes',
   units: 'Units',
-  lessons: 'Lessons',
+  lessons: 'Lessons', // older workbooks only (v3 and earlier): units no longer have lessons
   blocks: 'Content Blocks',
   quizzes: 'Quiz Questions',
   assessments: 'Assessments',
@@ -53,7 +53,7 @@ function containsWords(haystack, needle) {
 
 /** Block types offered in the spreadsheet dropdown (file attachments are not offered yet). */
 export const BLOCK_TYPE_OPTIONS = Object.freeze([
-  { type: 'text_description', label: 'Content Description' },
+  { type: 'text_description', label: 'Unit Description' },
   { type: 'teacher_guide', label: 'Teacher Guide' },
   { type: 'youtube_video', label: 'YouTube Video' },
   { type: 'google_drive_link', label: 'Google Drive Resource' },
@@ -62,7 +62,7 @@ export const BLOCK_TYPE_OPTIONS = Object.freeze([
 ]);
 
 const BLOCK_TYPE_LABELS = {
-  text_description: 'Content Description',
+  text_description: 'Unit Description',
   teacher_guide: 'Teacher Guide',
   youtube_video: 'YouTube Video',
   google_drive_link: 'Google Drive Resource',
@@ -83,7 +83,7 @@ const BLOCK_TYPE_KEYWORDS = [
   ['youtube_video', ['youtube', 'youtube video', 'youtube_video', 'video']],
   ['google_drive_link', ['google drive', 'drive', 'google_drive_link', 'google doc', 'google docs', 'google slides', 'google sheet', 'google sheets', 'google drive resource']],
   ['file_upload', ['direct file attachment', 'file_upload', 'file', 'attachment', 'pdf', 'download', 'handout']],
-  ['text_description', ['content description', 'text_description', 'text', 'content', 'description', 'reading', 'notes', 'theory', 'lesson content']]
+  ['text_description', ['unit description', 'content description', 'text_description', 'text', 'content', 'description', 'reading', 'notes', 'theory', 'lesson content']]
 ];
 
 /** @returns {{ type: string, recognized: boolean }} */
@@ -410,6 +410,28 @@ export const COURSE_FIELDS = Object.freeze([
   })
 ]);
 
+/**
+ * Link-list columns: as many links as needed in one cell, one per line ("Title | link"). Each link
+ * becomes its own block, after the unit's Content Blocks rows (videos, then Drive, then notebooks).
+ */
+const LINK_LIST_COLUMNS = [
+  col('youtubeLinks', 'YouTube Video Links', ['youtube videos', 'youtube video', 'youtube links', 'youtube', 'videos', 'video links', 'video'], {
+    width: 46, style: 'wrap', linkType: 'youtube_video',
+    help: 'YouTube videos for this unit — as many as you need, one per line (Alt+Enter in Excel, Ctrl+Enter in Google Sheets). Add a title with "Title | link".',
+    example: 'Intro video | https://www.youtube.com/watch?v=VIDEO_ID'
+  }),
+  col('driveLinks', 'Google Drive Resource Links', ['google drive resources', 'google drive resource', 'google drive links', 'google drive', 'drive links', 'drive resources', 'resources', 'resource links'], {
+    width: 46, style: 'wrap', linkType: 'google_drive_link',
+    help: 'Google Drive / Docs / Slides links for this unit — as many as you need, one per line. Share them as "Anyone with the link can view". Add a title with "Title | link".',
+    example: 'Worksheet | https://drive.google.com/file/d/FILE_ID/view'
+  }),
+  col('notebookLinks', 'Gemini Notebook Links', ['gemini notebooks', 'gemini notebook', 'notebook links', 'notebooks', 'notebook', 'notebooklm links', 'notebooklm'], {
+    width: 46, style: 'wrap', linkType: 'notebook_link',
+    help: 'Gemini Notebook (or NotebookLM) share links for this unit — as many as you need, one per line. Add a title with "Title | link".',
+    example: 'Study notebook | https://notebooklm.google.com/notebook/NOTEBOOK_ID'
+  })
+];
+
 export const TABLES = Object.freeze({
   outcomes: Object.freeze({
     sheet: SHEET.outcomes,
@@ -425,7 +447,7 @@ export const TABLES = Object.freeze({
   units: Object.freeze({
     sheet: SHEET.units,
     minScore: 4,
-    signatures: ['unit title', 'unit name', 'nominal hours', 'unit description performance criteria', 'unit description', 'unit learning outcomes', 'module title'],
+    signatures: ['unit title', 'unit name', 'nominal hours', 'performance criteria', 'unit description performance criteria', 'unit description', 'unit learning outcomes', 'unit content', 'module title'],
     columns: [
       col('order', 'Unit #', ['unit no', 'unit number', 'unit order', '#', 'no', 'order', 'sequence'], { exactOnly: true, width: 8, help: 'Order of the unit (optional).', example: '1' }),
       col('unitCode', 'Unit Code', ['code', 'unit id', 'module code', 'subject code', 'competency code'], {
@@ -437,12 +459,18 @@ export const TABLES = Object.freeze({
       col('nominalHours', 'Nominal Hours', ['hours', 'nominal guided hours', 'guided learning hours', 'duration', 'study hours'], {
         width: 10, help: 'Guided learning hours (whole number).', example: '40'
       }),
-      col('description', 'Unit Description / Performance Criteria', ['unit description', 'description', 'performance criteria', 'unit overview', 'overview', 'summary'], {
-        width: 60, style: 'wrap', help: 'Scope and performance criteria.', example: 'Explains sustainability principles and applies systems thinking to workplace decisions.'
+      col('description', 'Performance Criteria', ['unit description / performance criteria', 'unit description', 'description', 'performance criteria', 'unit overview', 'overview', 'summary'], {
+        width: 60, style: 'wrap', help: 'What a learner must demonstrate to be competent in this unit.', example: 'Explains sustainability principles and applies systems thinking to workplace decisions.'
       }),
       col('learningOutcomes', 'Unit Learning Outcomes', ['learning outcomes', 'outcomes', 'elements', 'unit outcomes'], {
         width: 60, style: 'wrap', help: 'One outcome per line (Alt+Enter in Excel, Ctrl+Enter in Google Sheets).', example: 'Explain the triple bottom line\nMap a workplace system'
-      })
+      }),
+      col('content', 'Unit Content', ['unit text', 'lesson paragraphs', 'unit notes', 'teaching content', 'unit body'], {
+        width: 80, style: 'wrap',
+        help: 'The lesson paragraphs students read for this unit — as long as you need (Alt+Enter in Excel, Ctrl+Enter in Google Sheets starts a new line).',
+        example: 'Sustainability means meeting today\'s needs without compromising the ability of future generations to meet theirs.'
+      }),
+      ...LINK_LIST_COLUMNS
     ]
   }),
   lessons: Object.freeze({
@@ -454,21 +482,7 @@ export const TABLES = Object.freeze({
       col('lessonNo', 'Lesson #', ['lesson no', 'lesson number', 'lesson', 'session #', 'session', 'week #', 'week', 'week no', '#', 'no', 'order'], { exactOnly: true, width: 10, help: 'Lesson number within the unit.', example: '1' }),
       col('title', 'Lesson Title', ['lesson name', 'lesson topic', 'topic', 'session title', 'title', 'name'], { width: 50, style: 'wrap', help: 'Lesson title.', example: 'What is sustainability?' }),
       col('estimatedMinutes', 'Duration (minutes)', ['duration', 'minutes', 'estimated minutes', 'length', 'time', 'mins'], { width: 12, help: 'Lesson length in minutes.', example: '60' }),
-      col('youtubeLinks', 'YouTube Video Links', ['youtube videos', 'youtube video', 'youtube links', 'youtube', 'videos', 'video links', 'video'], {
-        width: 46, style: 'wrap', linkType: 'youtube_video',
-        help: 'As many YouTube links as you need, one per line (Alt+Enter in Excel, Ctrl+Enter in Google Sheets). Add a title with "Title | link".',
-        example: 'Intro video | https://www.youtube.com/watch?v=VIDEO_ID'
-      }),
-      col('driveLinks', 'Google Drive Resource Links', ['google drive resources', 'google drive resource', 'google drive links', 'google drive', 'drive links', 'drive resources', 'resources', 'resource links'], {
-        width: 46, style: 'wrap', linkType: 'google_drive_link',
-        help: 'As many Google Drive / Docs / Slides links as you need, one per line. Share them as "Anyone with the link can view". Add a title with "Title | link".',
-        example: 'Worksheet | https://drive.google.com/file/d/FILE_ID/view'
-      }),
-      col('notebookLinks', 'Gemini Notebook Links', ['gemini notebooks', 'gemini notebook', 'notebook links', 'notebooks', 'notebook', 'notebooklm links', 'notebooklm'], {
-        width: 46, style: 'wrap', linkType: 'notebook_link',
-        help: 'As many Gemini Notebook (or NotebookLM) share links as you need, one per line. Add a title with "Title | link".',
-        example: 'Study notebook | https://notebooklm.google.com/notebook/NOTEBOOK_ID'
-      })
+      ...LINK_LIST_COLUMNS
     ]
   }),
   blocks: Object.freeze({
@@ -477,15 +491,16 @@ export const TABLES = Object.freeze({
     signatures: ['block type', 'block title', 'block #', 'content or link url', 'content type'],
     columns: [
       col('unitRef', 'Unit Code', UNIT_REF_ALIASES, { exactOnly: true, width: 14, style: 'text', help: 'Unit Code (blank = same as the row above).', example: 'SBP501' }),
-      col('lessonRef', 'Lesson #', ['lesson no', 'lesson number', 'lesson', 'lesson title', 'week', 'week #', 'session'], { exactOnly: true, width: 10, help: 'Lesson number from the Lessons tab (blank = same as the row above).', example: '1' }),
-      col('order', 'Block #', ['block no', 'block number', 'block order', 'order', '#'], { exactOnly: true, width: 9, help: 'Order inside the lesson (optional).', example: '1' }),
+      // Older layouts (v3) placed blocks in lessons; still imported (and flattened), not in the template.
+      col('lessonRef', 'Lesson #', ['lesson no', 'lesson number', 'lesson', 'lesson title', 'week', 'week #', 'session'], { exactOnly: true, inTemplate: false }),
+      col('order', 'Block #', ['block no', 'block number', 'block order', 'order', '#'], { exactOnly: true, width: 9, help: 'Order inside the unit (optional).', example: '1' }),
       col('type', 'Block Type', ['type', 'content type', 'resource type', 'kind'], {
         width: 24, list: BLOCK_TYPE_OPTIONS.map(o => o.label),
-        help: 'Content Description, Teacher Guide (hidden from students), YouTube Video, Google Drive Resource or Gemini Notebook. Add one row per block — as many of each as you need.', example: 'Content Description'
+        help: 'Unit Description, Teacher Guide (hidden from students), YouTube Video, Google Drive Resource, Gemini Notebook or Quiz & Questions. Add one row per block — as many of each as you need.', example: 'Unit Description'
       }),
       col('title', 'Block Title', ['heading', 'section heading', 'title', 'name'], { width: 34, style: 'wrap', help: 'Heading shown above the block.', example: 'Key ideas' }),
       col('content', 'Text', ['text content', 'content or link url', 'content', 'text', 'body', 'notes', 'content text'], {
-        width: 70, style: 'wrap', help: 'Lesson text for Content Description and Teacher Guide blocks.', example: 'Sustainability balances environmental, social and economic outcomes...'
+        width: 70, style: 'wrap', help: 'Text for Unit Description and Teacher Guide blocks (a Quiz & Questions row: the quiz instructions).', example: 'Sustainability balances environmental, social and economic outcomes...'
       }),
       col('linkUrl', 'Link URL', ['link url', 'link', 'url', 'resource link', 'video link', 'resource url'], {
         width: 46, help: 'The https:// link for YouTube Video, Google Drive Resource and Gemini Notebook blocks.', example: 'https://www.youtube.com/watch?v=VIDEO_ID'
@@ -499,8 +514,8 @@ export const TABLES = Object.freeze({
     signatures: ['question type', 'quiz title', 'correct answer', 'question', 'quiz', 'options', 'quiz question'],
     columns: [
       col('unitRef', 'Unit Code', UNIT_REF_ALIASES, { exactOnly: true, width: 14, style: 'text', help: 'Unit Code (blank = same as the row above).', example: 'SBP501' }),
-      col('lessonRef', 'Lesson #', ['lesson no', 'lesson number', 'lesson', 'lesson title', 'week', 'week #', 'session'], { exactOnly: true, width: 10, help: 'Lesson number from the Lessons tab (blank = same as the row above).', example: '1' }),
-      col('quizTitle', 'Quiz Title', ['quiz', 'quiz name', 'quiz block', 'test title'], { width: 26, style: 'wrap', help: 'Which quiz in the lesson (its block title). Blank = same as the row above. A new title adds a quiz at the end of the lesson.', example: 'Check your understanding' }),
+      col('lessonRef', 'Lesson #', ['lesson no', 'lesson number', 'lesson', 'lesson title', 'week', 'week #', 'session'], { exactOnly: true, inTemplate: false }),
+      col('quizTitle', 'Quiz Title', ['quiz', 'quiz name', 'quiz block', 'test title'], { width: 26, style: 'wrap', help: 'Which quiz in the unit (its block title). Blank = same as the row above. A new title adds a quiz at the end of the unit.', example: 'Check your understanding' }),
       col('questionNo', 'Question #', ['question no', 'question number', 'q #', 'q', 'no', '#'], { exactOnly: true, width: 11, help: 'Order inside the quiz (optional).', example: '1' }),
       col('qType', 'Question Type', ['type', 'question kind', 'kind', 'format'], {
         width: 18, list: QUESTION_TYPE_OPTIONS.map(o => o.label),
@@ -633,7 +648,6 @@ export function detectHeaderRow(cells, { strict = false } = {}) {
   return best;
 }
 
-/** Matches a vertical "Label | Value" row on the Course tab. */
 /**
  * Course rows from older templates that are no longer used (courses have no enrolment cost).
  * Rows with these labels are skipped quietly instead of being reported as unrecognised.
@@ -645,6 +659,7 @@ export function isRetiredCourseLabel(label) {
   return Boolean(norm) && RETIRED_COURSE_LABELS.has(norm);
 }
 
+/** Matches a vertical "Label | Value" row on the Course tab. */
 export function matchCourseFieldLabel(label) {
   const norm = normalizeHeader(label);
   if (!norm) return null;

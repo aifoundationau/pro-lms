@@ -3,7 +3,7 @@
  * Pure module (no Firebase, no DOM).
  */
 
-import { moveUnitAssessmentsToCourse } from '../types/courseBuilderTypes.js';
+import { upgradeCourseStructure } from '../types/courseBuilderTypes.js';
 import { listCourseQuizzes } from './quizModel.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -28,7 +28,7 @@ export function assessmentStatus(submission, dueAt, todayStart) {
 }
 
 /**
- * @param {Array} courses enrolled courses (units with lessons; assessments at course level)
+ * @param {Array} courses enrolled courses (units with content & blocks; assessments at course level)
  * @param {Object<string, Object<string, object>>} submissionsByCourse courseId -> assessmentId -> submission
  * @param {number} now current time (ms)
  * @param {Object<string, Object<string, object>>} quizAttemptsByCourse courseId -> quizId -> attempt
@@ -42,7 +42,7 @@ export function summarizeStudentProgress(courses, submissionsByCourse = {}, now 
 
   for (const rawCourse of Array.isArray(courses) ? courses : []) {
     if (!rawCourse || rawCourse.id === undefined || rawCourse.id === null) continue;
-    const course = moveUnitAssessmentsToCourse(rawCourse);
+    const course = upgradeCourseStructure(rawCourse);
     stats.courses++;
     const subs = submissionsByCourse[course.id] || {};
     const attempts = quizAttemptsByCourse[course.id] || {};

@@ -32,7 +32,7 @@ import {
 import { subscribeToEnrolledCourses } from '../src/services/enrolledCourses.js';
 import { validateSubmission, validateDraftSubmission, submissionDocId, buildSubmissionPayload } from '../src/services/submissionService.js';
 import { validateGrantAmount, MAX_GRANT_TOKENS } from '../src/services/tokenService.js';
-import { resolvePrivileges, formatTokenBalance, hasUnlimitedTokens, MAX_SUPERADMIN_GRANT } from '../src/services/rolePrivileges.js';
+import { resolvePrivileges, formatTokenBalance, hasUnlimitedTokens, MAX_SUPERADMIN_GRANT, canEnrolInCourses } from '../src/services/rolePrivileges.js';
 import { buildCourseCopy, normalizeCourse } from '../src/services/lmsRepository.js';
 import { executeContentClone } from '../src/services/courseMarketplaceService.js';
 import { checkAiAssistBalance } from '../src/services/aiCourseShared.js';
@@ -40,7 +40,7 @@ import { youtubeVideoId } from '../src/services/mediaLinks.js';
 import { dataUrlBytes } from '../src/services/imageUtils.js';
 import { splitTextLinks } from '../src/services/mediaLinks.js';
 import { summarizeStudentProgress } from '../src/services/studentDashboard.js';
-import { moveUnitAssessmentsToCourse, createQuizQuestion, createBlankCourse } from '../src/types/courseBuilderTypes.js';
+import { moveUnitAssessmentsToCourse, upgradeCourseStructure, flattenUnitLessons, createQuizQuestion, createBlankCourse, createBlankUnit, createBlankAssessment, createDefaultRubric, isSampleRubric } from '../src/types/courseBuilderTypes.js';
 import {
   extractQuizAnswerKeys,
   stripQuizAnswerKeys,
@@ -198,6 +198,23 @@ async function run() {
   assert.strictEqual(resolvePrivileges({ role: 'teacher' }).isStaff, true);
   assert.strictEqual(resolvePrivileges({ role: 'student' }).isStaff, false);
   assert.strictEqual(resolvePrivileges({ role: 'student' }).canViewDraftCourses, true, 'students can view draft courses');
+
+  // Enrolment authority:
+  // "When someone logs in for the first time, they are a supporter. they can only be added to courses by teachers, admin, superadmin, coo, cfo."
+  assert.strictEqual(canEnrolInCourses('teacher'), true, 'teachers can add people to courses');
+  assert.strictEqual(canEnrolInCourses('admin staff'), true, 'admin staff can add people to courses');
+  assert.strictEqual(canEnrolInCourses('admin'), true, 'admin can add people to courses');
+  assert.strictEqual(canEnrolInCourses('superadmin'), true, 'superadmin can add people to courses');
+  assert.strictEqual(canEnrolInCourses('coo'), true, 'coo can add people to courses');
+  assert.strictEqual(canEnrolInCourses('cfo'), true, 'cfo can add people to courses');
+  assert.strictEqual(canEnrolInCourses('ceo'), true, 'ceo can add people to courses');
+
+  // Denied enrolment authority:
+  assert.strictEqual(canEnrolInCourses('supporter'), false, 'supporters cannot add people to courses');
+  assert.strictEqual(canEnrolInCourses('student'), false, 'students cannot add people to courses');
+  assert.strictEqual(canEnrolInCourses('financial team'), false, 'general financial team cannot add people to courses');
+  assert.strictEqual(canEnrolInCourses(null), false, 'unauthenticated/new users cannot add people to courses');
+
   const clone = await executeContentClone({ currentUser: { uid: 'a1' }, userProfile: { role: 'superadmin' }, targetAuthorId: 't1', entityId: 'u1', entityTitle: 'Unit' });
   assert.strictEqual(clone.cost, 0);
   assert.strictEqual(clone.superadminPass, true);
@@ -476,7 +493,45 @@ async function run() {
     assert.deepStrictEqual(migrated.assessments.map(a => [a.id, a.unitId || '']), [['a0', ''], ['a1', 'u1'], ['a2', 'u2']], 'ids kept (submissions stay linked), duplicates skipped');
     assert(migrated.units.every(u => !('assessments' in u)) && legacyCourse.units[0].assessments.length === 2, 'units cleaned; input untouched');
     assert.strictEqual(moveUnitAssessmentsToCourse(migrated), migrated, 'idempotent');
-    assert(!('assessments' in createBlankCourse('t1').units[0]) && createBlankCourse('t1').assessments.length === 1, 'new courses: lessons in units, one assessment list');
+    const blankUnit = createBlankUnit('CRS-100-1', '');
+    assert(!('assessments' in blankUnit) && !('lessons' in blankUnit) && blankUnit.content === '' && Array.isArray(blankUnit.blocks),
+      'new courses: units hold Unit Content and blocks (no lessons)');
+    assert.deepStrictEqual(createBlankCourse('t1').units, [], 'no default units: the teacher clicks + Add Unit to start');
+    assert.deepStrictEqual(createBlankCourse('t1').assessments, [], 'no default assessment: the teacher adds every task');
+    // Each new task starts with the sample rubric for its type.
+    const formativeTask = createBlankAssessment('formative', 'Practice');
+    const summativeTask = createBlankAssessment('summative', 'Exam');
+    assert.deepStrictEqual(formativeTask.rubric.map(c => c.criterionTitle), ['Understanding of Key Concepts', 'Application in Practice Activities', 'Reflection & Next Steps']);
+    assert.deepStrictEqual(summativeTask.rubric.map(c => c.criterionTitle), ['Knowledge Application & Conceptual Understanding', 'Practical Execution & Evidence of Skills', 'Communication & Documentation']);
+    for (const task of [formativeTask, summativeTask]) {
+      assert.strictEqual(task.rubric.reduce((sum, c) => sum + c.weightPercentage, 0), 100, 'sample weights add up to 100');
+      assert(task.rubric.every(c => c.levels.length === 4 && c.levels.every(l => l.descriptor)), 'every level described');
+    }
+    assert.notStrictEqual(createDefaultRubric('formative')[0].id, formativeTask.rubric[0].id, 'fresh ids for every task');
+    assert(isSampleRubric(formativeTask.rubric, 'formative') && !isSampleRubric(formativeTask.rubric, 'summative'));
+    assert(!isSampleRubric([{ ...formativeTask.rubric[0], weightPercentage: 41 }, ...formativeTask.rubric.slice(1)], 'formative'), 'an edited rubric is not the sample');
+
+    // Older units (unit -> lessons -> blocks) become unit -> blocks: every block kept in order with its id
+    // (quiz keys and attempts stay linked); lesson titles the teacher wrote fill a blank Unit Content.
+    const lessonCourse = {
+      id: 'c8',
+      units: [{
+        id: 'u1', unitTitle: 'Coral basics', content: '',
+        lessons: [
+          { id: 'l1', title: 'Polyps', blocks: [{ id: 'b1', type: 'text_description', order: 0 }, { id: 'qz', type: 'quiz', order: 1 }] },
+          { id: 'l2', title: 'Lesson 2', blocks: [{ id: 'b2', type: 'youtube_video', order: 0 }] },
+          { id: 'l3', title: 'Bleaching', blocks: [] }
+        ],
+        assessments: [{ id: 'a7', title: 'Reef task' }]
+      }]
+    };
+    const upgraded = upgradeCourseStructure(lessonCourse);
+    assert.deepStrictEqual(upgraded.units[0].blocks.map(b => [b.id, b.order]), [['b1', 0], ['qz', 1], ['b2', 2]], 'blocks flattened in order, ids kept');
+    assert.strictEqual(upgraded.units[0].content, 'Polyps\nBleaching', 'teacher lesson titles kept (placeholder titles dropped)');
+    assert(!('lessons' in upgraded.units[0]) && 'lessons' in lessonCourse.units[0], 'lessons removed; input untouched');
+    assert.deepStrictEqual(upgraded.assessments.map(a => [a.id, a.unitId]), [['a7', 'u1']]);
+    assert.strictEqual(upgradeCourseStructure(upgraded), upgraded, 'idempotent');
+    assert.strictEqual(flattenUnitLessons({ ...lessonCourse.units[0], content: 'Mine' }).content, 'Mine', 'existing Unit Content is never replaced');
 
     const mc = { ...createQuizQuestion('multiple_choice'), prompt: 'Primes?' };
     mc.options = [{ id: 'o1', text: '2' }, { id: 'o2', text: '4' }, { id: 'o3', text: '3' }];
@@ -495,7 +550,7 @@ async function run() {
         ]
       }
     };
-    const quizCourse = { id: 'cq', title: 'Quiz course', authorId: 't1', units: [{ id: 'u1', unitTitle: 'U', lessons: [{ id: 'l1', title: 'L', blocks: [quizBlock] }] }], assessments: [] };
+    const quizCourse = { id: 'cq', title: 'Quiz course', authorId: 't1', units: [{ id: 'u1', unitTitle: 'U', content: '', blocks: [quizBlock] }], assessments: [] };
     const keys = extractQuizAnswerKeys(quizCourse);
     assert.deepStrictEqual(keys.quiz1.q1, { correctOptionIds: ['o1', 'o3'] });
     assert.deepStrictEqual(Object.keys(keys.quiz1), ['q1', 'q2', 'q3', 'q4']);
@@ -504,16 +559,23 @@ async function run() {
     for (const field of ['correctOptionIds', 'correctAnswer', 'acceptedAnswers', 'modelAnswer']) {
       assert(!storedJson.includes(field), `${field} never stored in the course document students can read`);
     }
-    assert.strictEqual(stored.units[0].lessons[0].blocks[0].quiz.questions.length, 4, 'questions themselves are kept');
+    assert.strictEqual(stored.units[0].blocks[0].quiz.questions.length, 4, 'questions themselves are kept');
     const teacherView = mergeQuizAnswerKeys(stripQuizAnswerKeys(quizCourse), keys);
-    assert.deepStrictEqual(teacherView.units[0].lessons[0].blocks[0].quiz, quizBlock.quiz, 'teachers get the keys back');
+    assert.deepStrictEqual(teacherView.units[0].blocks[0].quiz, quizBlock.quiz, 'teachers get the keys back');
+    // An older course that still nests the quiz in a lesson: keys are stripped there too, and saving flattens it.
+    const nestedCourse = { ...quizCourse, units: [{ id: 'u1', unitTitle: 'U', lessons: [{ id: 'l1', title: 'L', blocks: [quizBlock] }] }] };
+    for (const field of ['correctOptionIds', 'correctAnswer', 'acceptedAnswers', 'modelAnswer']) {
+      assert(!JSON.stringify(stripQuizAnswerKeys(nestedCourse)).includes(field), `${field} stripped from lesson blocks too`);
+    }
+    assert.deepStrictEqual(normalizeCourse(nestedCourse).units[0].blocks.map(b => b.id), ['quiz1'], 'saved with the quiz on the unit');
     assert.deepStrictEqual(Object.keys(remapQuizAnswerKeys(keys, { quiz1: 'quizNew' })), ['quizNew']);
 
-    const studentQuiz = normalizeQuiz(stored.units[0].lessons[0].blocks[0].quiz);
+    const studentQuiz = normalizeQuiz(stored.units[0].blocks[0].quiz);
     const answers = { q1: ['o3', 'o1', 'bogus'], q2: false, q3: '  paris. ', q4: 'Because…', extra: 'ignored' };
     assert.deepStrictEqual(cleanQuizAnswers(studentQuiz, answers), { q1: ['o3', 'o1'], q2: false, q3: 'paris.', q4: 'Because…' });
-    const payload = buildQuizAttemptPayload({ course: quizCourse, unit: quizCourse.units[0], lesson: quizCourse.units[0].lessons[0], block: stored.units[0].lessons[0].blocks[0], user: student, answers, nowIso: '2026-10-14T00:00:00.000Z' });
-    assert.deepStrictEqual([payload.quizId, payload.status, payload.questionCount, quizAttemptDocId('cq', 'quiz1', 's1')], ['quiz1', 'submitted', 4, 'cq__quiz1__s1']);
+    const payload = buildQuizAttemptPayload({ course: quizCourse, unit: quizCourse.units[0], block: stored.units[0].blocks[0], user: student, answers, nowIso: '2026-10-14T00:00:00.000Z' });
+    assert.deepStrictEqual([payload.quizId, payload.unitId, payload.status, payload.questionCount, quizAttemptDocId('cq', 'quiz1', 's1')], ['quiz1', 'u1', 'submitted', 4, 'cq__quiz1__s1']);
+    assert(!('lessonId' in payload), 'attempts name the unit (no lessons)');
     assert(!('score' in payload) && !('results' in payload), 'students never write marks');
     assert.throws(() => buildQuizAttemptPayload({ course: quizCourse, block: quizBlock, user: student, answers: {} }), e => e.code === 'EMPTY_ATTEMPT');
 

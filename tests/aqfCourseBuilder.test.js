@@ -10,7 +10,6 @@ import {
   getAqfLevelMeta,
   createBlankCourse,
   createBlankUnit,
-  createBlankLesson,
   createBlankContentBlock,
   createBlankAssessment,
   createDefaultRubric,
@@ -64,12 +63,13 @@ async function runTestSuite() {
   const course = createBlankCourse('user_123', 'Professor Higgins');
   assert(course.id.startsWith('course_'), 'Course ID must be prefixed');
   assert.strictEqual(course.authorId, 'user_123');
-  assert.strictEqual(course.units.length, 1, 'Initial course has 1 unit');
-  assert.strictEqual(course.units[0].lessons.length, 1, 'Initial unit has 1 lesson');
-  assert.strictEqual(course.units[0].lessons[0].blocks.length, 1, 'Initial lesson has 1 block');
-  assert(!('assessments' in course.units[0]), 'Units hold lessons & blocks only');
-  assert.strictEqual(course.assessments.length, 1, 'Initial course has 1 assessment (one course list)');
-  assert.strictEqual(course.assessments[0].rubric.length, 3, 'Default rubric has 3 criteria');
+  assert.strictEqual(course.units.length, 0, 'Initial course has no default units (teacher clicks + Add Unit to start)');
+  const sampleUnit = createBlankUnit('CRS-100-1', '');
+  assert(Array.isArray(sampleUnit.blocks) && !('lessons' in sampleUnit), 'Units hold their blocks directly (no lessons)');
+  assert.strictEqual(sampleUnit.content, '', 'Unit Content starts blank');
+  assert(!('assessments' in sampleUnit), 'Units hold their content & blocks only');
+  assert.strictEqual(course.assessments.length, 0, 'A new course has no assessment until the teacher adds one');
+  assert.strictEqual(createBlankAssessment('formative').rubric.length, 3, 'A new task starts with a 3-criterion sample rubric');
   console.log('✅ Test 2 Passed: Domain models and rubric matrices initialize properly.');
 
   // Test 3: Charity Teacher Privilege Detection
@@ -138,8 +138,9 @@ Unit 2: Container Orchestration with Kubernetes`,
   assert(aiResult.course, 'AI Ingestion must generate a Course object');
   assert.strictEqual(aiResult.course.aqfLevel, 6, 'Generated course must match target AQF Level 6');
   assert(aiResult.course.units.length >= 1, 'Generated course must contain units');
-  assert(aiResult.course.units[0].lessons.length >= 1, 'Units must contain lessons');
-  assert(aiResult.course.units[0].lessons[0].blocks.length >= 1, 'Lessons must contain modular blocks');
+  assert(!('lessons' in aiResult.course.units[0]), 'Units have no lessons');
+  assert(aiResult.course.units[0].content.length > 0, 'Units have Unit Content');
+  assert(aiResult.course.units[0].blocks.length >= 1, 'Units contain modular blocks');
   assert(aiResult.course.assessments.length >= 1, 'The course must contain assessment tasks (one course list)');
   console.log('✅ Test 6 Passed: 10-Token AI Ingestion correctly hydrates full AQF Course schema.');
 
@@ -170,10 +171,9 @@ Unit 2: Container Orchestration with Kubernetes`,
   const blankCourse = createBlankCourse('author_test', 'Prof Test');
   assert.strictEqual(blankCourse.tag, 'lms', 'Course must have tag "lms"');
   assert(blankCourse.tags.includes('lms'), 'Course tags must contain "lms"');
-  assert.strictEqual(blankCourse.units[0].tag, 'lms', 'Unit must have tag "lms"');
-  assert.strictEqual(blankCourse.units[0].lessons[0].tag, 'lms', 'Lesson must have tag "lms"');
-  assert.strictEqual(blankCourse.units[0].lessons[0].blocks[0].tag, 'lms', 'Block must have tag "lms"');
-  assert.strictEqual(blankCourse.assessments[0].tag, 'lms', 'Assessment must have tag "lms"');
+  assert.strictEqual(createBlankUnit('CRS-100-1', '').tag, 'lms', 'Unit must have tag "lms"');
+  assert.strictEqual(createBlankContentBlock('text_description').tag, 'lms', 'Block must have tag "lms"');
+  assert.strictEqual(createBlankAssessment('summative').tag, 'lms', 'Assessment must have tag "lms"');
 
   // Verify categories have tag 'lms'
   const categories = await fetchLmsCategories();
@@ -186,7 +186,7 @@ Unit 2: Container Orchestration with Kubernetes`,
   // Verify enrolled member has tag 'lms'
   assert.strictEqual(teacherEnrollment.member.tag, 'lms', 'Enrolled member record must have tag "lms"');
   assert(teacherEnrollment.member.tags.includes('lms'), 'Enrolled member tags must contain "lms"');
-  console.log('✅ Test 8 Passed: Every category, course, unit, lesson, block, assessment, and enrollment possesses tag "lms".');
+  console.log('✅ Test 8 Passed: Every category, course, unit, block, assessment, and enrollment possesses tag "lms".');
 
   // Test 9: Cross-App Course Query & Course Completion under "lms" Tag
   console.log('\nTest 9: Cross-App Course Query & Course Completion under "lms" Tag');

@@ -14,7 +14,7 @@ function answerText(question, value) {
 }
 
 /** Student view of a "Quiz & Questions" block: answer, submit (resubmit until released), see results. */
-export default function StudentQuiz({ course, unit, lesson, block, currentUser, attempt, onSaved }) {
+export default function StudentQuiz({ course, unit, block, currentUser, attempt, onSaved }) {
   const quiz = normalizeQuiz(block.quiz);
   const [answers, setAnswers] = useState(() => (attempt?.answers && typeof attempt.answers === 'object' ? attempt.answers : {}));
   const [busy, setBusy] = useState(false);
@@ -57,7 +57,7 @@ export default function StudentQuiz({ course, unit, lesson, block, currentUser, 
     setBusy(true);
     setNotice(null);
     try {
-      const saved = await submitQuizAttempt({ course, unit, lesson, block, user: currentUser, answers });
+      const saved = await submitQuizAttempt({ course, unit, block, user: currentUser, answers });
       setNotice({ type: 'success', message: '✅ Quiz submitted. Your results appear here when your teacher releases them.' });
       onSaved?.(saved);
     } catch (err) {

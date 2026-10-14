@@ -42,15 +42,18 @@ export function questionTypeLabel(type) {
   return QUIZ_QUESTION_TYPES.find(t => t.type === type)?.label || 'Question';
 }
 
-/** Every quiz block in a course, in order: [{ unit, lesson, block, unitIndex, lessonIndex }]. */
+/** A unit's blocks, in order (older units still nest them in lessons; both are read). */
+function unitBlocks(unit) {
+  return [...list(unit?.blocks), ...list(unit?.lessons).flatMap(lesson => list(lesson?.blocks))];
+}
+
+/** Every quiz block in a course, in order: [{ unit, block, unitIndex }]. */
 export function listCourseQuizzes(course) {
   const found = [];
   list(course?.units).forEach((unit, unitIndex) => {
-    list(unit?.lessons).forEach((lesson, lessonIndex) => {
-      for (const block of list(lesson?.blocks)) {
-        if (isQuizBlock(block)) found.push({ unit, lesson, block, unitIndex, lessonIndex });
-      }
-    });
+    for (const block of unitBlocks(unit)) {
+      if (isQuizBlock(block)) found.push({ unit, block, unitIndex });
+    }
   });
   return found;
 }
@@ -102,28 +105,44 @@ export function publicQuestion(question) {
   return out;
 }
 
+/** Applies transform to every quiz block in a list; returns the same array when nothing changed. */
+function mapQuizList(blocks, transform) {
+  if (!Array.isArray(blocks)) return blocks;
+  let changed = false;
+  const next = blocks.map(block => {
+    if (!isQuizBlock(block)) return block;
+    const out = transform(block);
+    if (out !== block) changed = true;
+    return out;
+  });
+  return changed ? next : blocks;
+}
+
+/**
+ * Applies transform to every quiz block in the course: unit blocks, and blocks still nested in
+ * lessons (older courses), so answer keys are always found — and always stripped.
+ */
 function mapQuizBlocks(course, transform) {
   if (!isObject(course) || !Array.isArray(course.units)) return course;
   let changed = false;
   const units = course.units.map(unit => {
-    if (!isObject(unit) || !Array.isArray(unit.lessons)) return unit;
-    let unitChanged = false;
-    const lessons = unit.lessons.map(lesson => {
-      if (!isObject(lesson) || !Array.isArray(lesson.blocks)) return lesson;
-      let lessonChanged = false;
-      const blocks = lesson.blocks.map(block => {
-        if (!isQuizBlock(block)) return block;
-        const next = transform(block);
-        if (next !== block) lessonChanged = true;
-        return next;
+    if (!isObject(unit)) return unit;
+    const blocks = mapQuizList(unit.blocks, transform);
+    let lessons = unit.lessons;
+    if (Array.isArray(unit.lessons)) {
+      let lessonsChanged = false;
+      const nextLessons = unit.lessons.map(lesson => {
+        if (!isObject(lesson)) return lesson;
+        const lessonBlocks = mapQuizList(lesson.blocks, transform);
+        if (lessonBlocks === lesson.blocks) return lesson;
+        lessonsChanged = true;
+        return { ...lesson, blocks: lessonBlocks };
       });
-      if (!lessonChanged) return lesson;
-      unitChanged = true;
-      return { ...lesson, blocks };
-    });
-    if (!unitChanged) return unit;
+      if (lessonsChanged) lessons = nextLessons;
+    }
+    if (blocks === unit.blocks && lessons === unit.lessons) return unit;
     changed = true;
-    return { ...unit, lessons };
+    return { ...unit, ...(blocks !== unit.blocks ? { blocks } : {}), ...(lessons !== unit.lessons ? { lessons } : {}) };
   });
   return changed ? { ...course, units } : course;
 }
@@ -302,7 +321,7 @@ function quizError(message, code) {
 }
 
 /** Attempt fields a student writes (no marks; the caller adds server timestamps and attempt count). */
-export function buildQuizAttemptPayload({ course, unit, lesson, block, user, answers, nowIso = new Date().toISOString() }) {
+export function buildQuizAttemptPayload({ course, unit, block, user, answers, nowIso = new Date().toISOString() }) {
   if (!user?.uid || !user?.email) throw quizError('Please sign in to submit the quiz.', 'NOT_SIGNED_IN');
   if (!course?.id || !isQuizBlock(block)) throw quizError('This quiz cannot accept answers yet.', 'INVALID_QUIZ');
   const quiz = normalizeQuiz(block.quiz);
@@ -315,8 +334,6 @@ export function buildQuizAttemptPayload({ course, unit, lesson, block, user, ans
     teacherUid: str(course.authorId, 200),
     unitId: str(unit?.id, 120),
     unitTitle: str(unit?.unitTitle, 300),
-    lessonId: str(lesson?.id, 120),
-    lessonTitle: str(lesson?.title, 300),
     quizId: String(block.id),
     quizTitle: str(block.title, 300) || 'Quiz',
     studentUid: user.uid,

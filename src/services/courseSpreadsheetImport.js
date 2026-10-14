@@ -22,7 +22,10 @@ import {
   isGoogleNotebookUrl,
   defaultLevelPoints,
   createQuizQuestion,
-  QUIZ_LIMITS
+  QUIZ_LIMITS,
+  UNIT_LIMITS,
+  flattenUnitLessons,
+  lessonTopicTitles
 } from '../types/courseBuilderTypes.js';
 import { normalizeQuiz } from './quizModel.js';
 import { sanitizeStandardIds } from './curriculumStandards.js';
@@ -57,8 +60,9 @@ import {
 
 export const IMPORT_LIMITS = Object.freeze({
   units: 60,
-  lessonsPerUnit: 80,
-  blocksPerLesson: 40,
+  lessonsPerUnit: 80, // older workbooks (Lessons tab); lessons are flattened into their unit
+  blocksPerUnit: UNIT_LIMITS.blocks,
+  unitContent: UNIT_LIMITS.content,
   assessments: 60,
   criteria: 100,
   outcomes: 60,
@@ -241,11 +245,18 @@ function newUnitDraft(init = {}) {
     nominalHours: null,
     description: '',
     learningOutcomes: [],
+    content: '',
     order: null,
-    lessons: [],
+    lessons: [], // only while parsing (older Lessons tabs and Lesson # columns); flattened at the end
+    _links: [],
     _seq: 0,
     ...init
   };
+}
+
+/** Blocks the unit holds so far (every lesson draft's blocks). */
+function unitBlockCount(unit) {
+  return unit.lessons.reduce((n, lesson) => n + lesson.blocks.length, 0);
 }
 
 function newLessonDraft(init = {}) {
@@ -670,15 +681,27 @@ function processUnits(state) {
     const description = text(cellAt(row, map.description));
     const outcomes = splitListCell(cellAt(row, map.learningOutcomes)).map(o => text(o, 2000));
     const hoursCell = cellAt(row, map.nominalHours);
-    if (!code && !title && !description && !outcomes.length && !hoursCell) continue;
+    const contentCell = cellAt(row, map.content);
+    const linkCells = linkListCells(row);
+    if (!code && !title && !description && !outcomes.length && !hoursCell && !contentCell) {
+      if (!linkCells.length) continue;
+      // A row with only links adds them to the unit above.
+      if (row.section.lastUnit) addLinks(state, row, row.section.lastUnit, linkCells);
+      else ctx.warn(row.sheet, row.row, 'These links have no unit — add a Unit Code or Unit Title on this row.');
+      continue;
+    }
 
     if (code && state.unitByCode.has(normalizeKey(code))) {
       ctx.warn(row.sheet, row.row, `Unit Code "${code}" is used more than once — this row was skipped.`);
+      row.section.lastUnit = null;
       continue;
     }
     if (state.units.length >= IMPORT_LIMITS.units) {
       ctx.warn(row.sheet, row.row, `Only the first ${IMPORT_LIMITS.units} units were imported.`);
       break;
+    }
+    if (contentCell.length > IMPORT_LIMITS.unitContent) {
+      ctx.warn(row.sheet, row.row, `Unit Content is limited to ${IMPORT_LIMITS.unitContent.toLocaleString()} characters — the rest was cut.`);
     }
     if (!code && !title) ctx.warn(row.sheet, row.row, 'This unit has no Unit Code or Unit Title — other tabs cannot link to it.');
 
@@ -692,22 +715,25 @@ function processUnits(state) {
       nominalHours: hours.value ?? null,
       description,
       learningOutcomes: outcomes,
+      content: text(contentCell, IMPORT_LIMITS.unitContent),
       order: order.value ?? null
     });
     unit._seq = state.seq++;
     state.units.push(unit);
     indexUnit(state, unit);
+    row.section.lastUnit = unit;
+    addLinks(state, row, unit, linkCells);
   }
   state.units.sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity) || a._seq - b._seq);
 }
 
-/** Lessons-tab link columns (YouTube Video / Google Drive Resource / Gemini Notebook Links). */
-const LESSON_LINK_COLUMNS = TABLES.lessons.columns.filter(column => column.linkType);
-const LINK_TYPE_RANK = new Map(LESSON_LINK_COLUMNS.map((column, i) => [column.linkType, i]));
+/** Link-list columns (YouTube Video / Google Drive Resource / Gemini Notebook Links) on the Units tab (and older Lessons tabs). */
+const LINK_LIST_COLUMNS = TABLES.units.columns.filter(column => column.linkType);
+const LINK_TYPE_RANK = new Map(LINK_LIST_COLUMNS.map((column, i) => [column.linkType, i]));
 
-function lessonLinkCells(row) {
+function linkListCells(row) {
   const cells = [];
-  for (const column of LESSON_LINK_COLUMNS) {
+  for (const column of LINK_LIST_COLUMNS) {
     const index = row.section.map[column.key];
     if (index === undefined) continue;
     const value = cellAt(row, index);
@@ -717,8 +743,8 @@ function lessonLinkCells(row) {
   return cells;
 }
 
-/** Every link in a lesson row becomes its own block (added after the lesson's Content Blocks rows). */
-function addLessonLinks(state, row, lesson, linkCells) {
+/** Every link in a link-list cell becomes its own block (added after the Content Blocks rows). */
+function addLinks(state, row, target, linkCells) {
   for (const { column, value, hyperlink } of linkCells) {
     const { links, skipped } = parseLinkCell(value, hyperlink);
     for (const entry of skipped) {
@@ -727,7 +753,7 @@ function addLessonLinks(state, row, lesson, linkCells) {
     for (const link of links) {
       const content = checkBlockLink(state, row, column.linkType, link.url);
       if (!content) continue;
-      lesson._links.push({
+      target._links.push({
         type: column.linkType,
         title: link.title,
         content,
@@ -750,13 +776,13 @@ function processLessons(state) {
     const numberCell = cellAt(row, map.lessonNo);
     let title = text(cellAt(row, map.title), IMPORT_LIMITS.title);
     const minutesCell = cellAt(row, map.estimatedMinutes);
-    const linkCells = lessonLinkCells(row);
+    const linkCells = linkListCells(row);
     if (!numberCell && !title && !minutesCell) {
       if (!linkCells.length) continue;
       // A row with only links adds them to the lesson above.
       const previous = row.section.lastLesson;
       if (previous && previous.unit === unit) {
-        addLessonLinks(state, row, previous.lesson, linkCells);
+        addLinks(state, row, previous.lesson, linkCells);
         continue;
       }
     }
@@ -773,7 +799,7 @@ function processLessons(state) {
       const sameTitle = !title || normalizeKey(title) === normalizeKey(existing.title);
       const sameMinutes = !minutesCell || minutes.value === existing.estimatedMinutes;
       if (linkCells.length && sameTitle && sameMinutes) {
-        addLessonLinks(state, row, existing, linkCells);
+        addLinks(state, row, existing, linkCells);
         row.section.lastLesson = { unit, lesson: existing };
         continue;
       }
@@ -791,22 +817,22 @@ function processLessons(state) {
     lesson._seq = state.seq++;
     unit.lessons.push(lesson);
     row.section.lastLesson = { unit, lesson };
-    addLessonLinks(state, row, lesson, linkCells);
+    addLinks(state, row, lesson, linkCells);
   }
   for (const unit of state.units) numberItems(unit.lessons);
 }
 
-/** Lessons-tab links follow the lesson's Content Blocks: videos, then Drive resources, then notebooks. */
+/** Links listed on an older Lessons tab follow that lesson's Content Blocks: videos, then Drive resources, then notebooks. */
 function appendLessonLinks(state) {
   for (const unit of state.units) {
     for (const lesson of unit.lessons) {
       const links = (lesson._links || []).slice().sort((a, b) => a._rank - b._rank || a._seq - b._seq);
       lesson._links = [];
       if (!links.length) continue;
-      const room = Math.max(0, IMPORT_LIMITS.blocksPerLesson - lesson.blocks.length);
+      const room = Math.max(0, IMPORT_LIMITS.blocksPerUnit - unitBlockCount(unit));
       if (links.length > room) {
         const [sheet, rowNumber] = links[room]._where;
-        state.ctx.warn(sheet, rowNumber, `Only ${IMPORT_LIMITS.blocksPerLesson} blocks per lesson are supported — ${links.length - room} link(s) were not added.`);
+        state.ctx.warn(sheet, rowNumber, `Only ${IMPORT_LIMITS.blocksPerUnit} blocks per unit are supported — ${links.length - room} link(s) were not added.`);
       }
       lesson.blocks.push(...links.slice(0, room));
     }
@@ -903,8 +929,8 @@ function processBlocks(state) {
     if (!lesson) continue;
     const order = parseIntegerInRange(cellAt(row, map.order), 0, 100000, 'Block #').value ?? null;
     const add = (block) => {
-      if (lesson.blocks.length >= IMPORT_LIMITS.blocksPerLesson) {
-        ctx.warn(row.sheet, row.row, `Only ${IMPORT_LIMITS.blocksPerLesson} blocks per lesson are supported.`);
+      if (unitBlockCount(unit) >= IMPORT_LIMITS.blocksPerUnit) {
+        ctx.warn(row.sheet, row.row, `Only ${IMPORT_LIMITS.blocksPerUnit} blocks per unit are supported.`);
         return false;
       }
       lesson.blocks.push({ ...block, order, _seq: state.seq++ });
@@ -913,7 +939,7 @@ function processBlocks(state) {
     };
 
     const parsedType = parseBlockType(typeCell);
-    if (typeCell && !parsedType.recognized) ctx.warn(row.sheet, row.row, `Block Type "${typeCell}" was not recognised — used Content Description.`);
+    if (typeCell && !parsedType.recognized) ctx.warn(row.sheet, row.row, `Block Type "${typeCell}" was not recognised — used ${blockTypeLabel('text_description')}.`);
     // Links go in the Link URL column; older templates typed them in the Text column.
     const hasLinkColumn = Boolean(linkCell || linkTarget);
     const linkSource = hasLinkColumn
@@ -932,7 +958,7 @@ function processBlocks(state) {
     }
 
     if (!LINK_BLOCK_METADATA_KEYS[type]) {
-      // Content Description / Teacher Guide. A Link URL on a text row is kept at the end of the text.
+      // Unit Description / Teacher Guide. A Link URL on a text row is kept at the end of the text.
       let content = text(rawContent);
       if (hasLinkColumn) {
         content = text([content, text(linkCellAt(row, map.linkUrl))].filter(Boolean).join('\n'));
@@ -945,7 +971,7 @@ function processBlocks(state) {
     // Link blocks: one block per link (a Link URL cell may list several, one per line).
     const besideText = hasLinkColumn && !linkSource.links.some(link => link.url === text(rawContent)) ? text(rawContent) : '';
     if (besideText) {
-      ctx.warn(row.sheet, row.row, `The Text of this ${blockTypeLabel(type)} row was added as a Content Description block above it (link blocks show a title and a link).`);
+      ctx.warn(row.sheet, row.row, `The Text of this ${blockTypeLabel(type)} row was added as a ${blockTypeLabel('text_description')} block above it (link blocks show a title and a link).`);
       if (!add({ type: 'text_description', title, content: checkBlockLink(state, row, 'text_description', besideText), fileName: '' })) continue;
     }
     if (!linkSource.links.length) {
@@ -1199,8 +1225,8 @@ function newQuizBlockDraft(state, title) {
   return { type: 'quiz', title: text(title, IMPORT_LIMITS.title), content: '', fileName: '', order: null, quiz: { questions: [] }, _seq: state.seq++ };
 }
 
-/** The quiz a question row belongs to: by title (or "Quiz 2" = the 2nd quiz), else a new one at the end. */
-function quizForRow(state, lesson, row) {
+/** The quiz a question row belongs to: by title (or "Quiz 2" = the 2nd quiz), else a new one at the end of the unit. */
+function quizForRow(state, unit, lesson, row) {
   const { section } = row;
   let ref = section.map.quizTitle !== undefined ? cellAt(row, section.map.quizTitle) : '';
   if (ref) section.last.quiz = { lesson, ref };
@@ -1212,8 +1238,8 @@ function quizForRow(state, lesson, row) {
   const ordinal = /^quiz\s*#?\s*(\d{1,2})$/i.exec(String(ref).trim());
   if (!hit && ordinal) hit = quizzes[Number(ordinal[1]) - 1] || null;
   if (hit) return hit;
-  if (lesson.blocks.length >= IMPORT_LIMITS.blocksPerLesson) {
-    state.ctx.warn(row.sheet, row.row, `Only ${IMPORT_LIMITS.blocksPerLesson} blocks per lesson are supported — this quiz was not added.`);
+  if (unitBlockCount(unit) >= IMPORT_LIMITS.blocksPerUnit) {
+    state.ctx.warn(row.sheet, row.row, `Only ${IMPORT_LIMITS.blocksPerUnit} blocks per unit are supported — this quiz was not added.`);
     return null;
   }
   const block = newQuizBlockDraft(state, ref || 'Quiz');
@@ -1288,7 +1314,7 @@ function processQuizzes(state) {
     if (!unit) continue;
     const lesson = lessonForRow(state, unit, row);
     if (!lesson) continue;
-    const quizBlock = quizForRow(state, lesson, row);
+    const quizBlock = quizForRow(state, unit, lesson, row);
     if (!quizBlock || !hasQuestion) continue;
     if (quizBlock.quiz.questions.length >= QUIZ_LIMITS.questions) {
       state.ctx.warn(row.sheet, row.row, `Only ${QUIZ_LIMITS.questions} questions per quiz are supported.`);
@@ -1322,13 +1348,11 @@ function buildUnstructuredText(groups) {
 }
 
 function countStats(course, units, assessments = []) {
-  const lessons = units.reduce((n, u) => n + u.lessons.length, 0);
-  const allBlocks = units.flatMap(u => u.lessons.flatMap(l => l.blocks));
+  const allBlocks = units.flatMap(u => u.blocks);
   const quizzes = allBlocks.filter(b => b.type === 'quiz');
   return {
     outcomes: course.learningOutcomes.length,
     units: units.length,
-    lessons,
     blocks: allBlocks.length,
     quizzes: quizzes.length,
     questions: quizzes.reduce((n, b) => n + (b.quiz?.questions?.length || 0), 0),
@@ -1377,24 +1401,34 @@ export function parseCourseSpreadsheet(sheets) {
   processAssessments(state);
   processRubrics(state);
 
-  const units = state.units.map(unit => ({
-    unitCode: unit.unitCode,
-    unitTitle: unit.unitTitle,
-    nominalHours: unit.nominalHours,
-    description: unit.description,
-    learningOutcomes: unit.learningOutcomes,
-    lessons: unit.lessons.map(lesson => ({
-      title: lesson.title,
-      estimatedMinutes: lesson.estimatedMinutes,
-      blocks: lesson.blocks.map(b => ({
+  // Units hold their content and blocks: lessons from older workbooks are flattened (in order), their
+  // titles kept as topics, and the unit's own links follow its Content Blocks rows.
+  const units = state.units.map(unit => {
+    const blocks = unit.lessons.flatMap(lesson => lesson.blocks);
+    const links = unit._links.slice().sort((a, b) => a._rank - b._rank || a._seq - b._seq);
+    const room = Math.max(0, IMPORT_LIMITS.blocksPerUnit - blocks.length);
+    if (links.length > room) {
+      const [sheet, rowNumber] = links[room]._where;
+      ctx.warn(sheet, rowNumber, `Only ${IMPORT_LIMITS.blocksPerUnit} blocks per unit are supported — ${links.length - room} link(s) were not added.`);
+    }
+    const topics = lessonTopicTitles(unit.unitTitle, unit.lessons);
+    return {
+      unitCode: unit.unitCode,
+      unitTitle: unit.unitTitle,
+      nominalHours: unit.nominalHours,
+      description: unit.description,
+      learningOutcomes: unit.learningOutcomes,
+      content: unit.content,
+      ...(topics.length ? { topics } : {}),
+      blocks: [...blocks, ...links.slice(0, room)].map(b => ({
         type: b.type,
         title: b.title,
         content: b.content,
         fileName: b.fileName,
         ...(b.type === 'quiz' ? { quiz: { questions: b.quiz?.questions || [] } } : {})
       }))
-    }))
-  }));
+    };
+  });
   // One Assessments & Rubrics list for the course; unitIndex links a task to the unit it covers.
   const unitIndex = new Map(state.units.map((u, i) => [u, i]));
   const assessments = orderedAssessments(state).map(a => ({
@@ -1522,31 +1556,29 @@ function finalizeAssessment(draft, index) {
     nominalWeight: Number.isFinite(weight) && draft.nominalWeight !== null ? Math.min(100, Math.max(0, weight)) : (type === 'summative' ? 50 : 20),
     externalSubmissionLinks: (draft.externalSubmissionLinks || []).filter(isHttpUrl).slice(0, 5),
     tag: 'lms',
-    rubric: draft.rubric?.length ? finalizeRubricCriteria(draft.rubric) : createDefaultRubric()
+    rubric: draft.rubric?.length ? finalizeRubricCriteria(draft.rubric) : createDefaultRubric(type)
   };
 }
 
-function finalizeUnit(draft, index) {
+/**
+ * Unit draft -> Course Builder unit: Unit Code, Unit Title, Nominal Hours, Performance Criteria,
+ * Unit Learning Outcomes, Unit Content and blocks. Drafts that still nest blocks in lessons (older
+ * callers, AI replies) are flattened; topics (old lesson titles) fill a blank Unit Content.
+ */
+function finalizeUnit(rawDraft, index) {
+  const draft = flattenUnitLessons(rawDraft && typeof rawDraft === 'object' ? rawDraft : {});
   const hours = Number(draft.nominalHours);
+  const topics = (Array.isArray(draft.topics) ? draft.topics : []).map(t => text(t, IMPORT_LIMITS.title)).filter(Boolean);
   return {
     id: generateEntityId('unit'),
     unitCode: text(draft.unitCode, 100) || `UNIT-${index + 1}01`,
     unitTitle: text(draft.unitTitle, IMPORT_LIMITS.title) || `Unit ${index + 1}`,
-    nominalHours: Number.isInteger(hours) && hours > 0 ? Math.min(2000, hours) : 40,
+    nominalHours: Number.isInteger(hours) && hours > 0 ? Math.min(2000, hours) : null,
     description: text(draft.description),
     learningOutcomes: (draft.learningOutcomes || []).map(o => text(o, 2000)).filter(Boolean).slice(0, IMPORT_LIMITS.outcomes),
+    content: text(draft.content, IMPORT_LIMITS.unitContent) || topics.join('\n'),
     tag: 'lms',
-    lessons: (draft.lessons || []).slice(0, IMPORT_LIMITS.lessonsPerUnit).map((lesson, lIdx) => {
-      const minutes = Number(lesson.estimatedMinutes);
-      return {
-        id: generateEntityId('lesson'),
-        title: text(lesson.title, IMPORT_LIMITS.title) || `Lesson ${lIdx + 1}`,
-        order: lIdx,
-        estimatedMinutes: Number.isInteger(minutes) && minutes > 0 ? Math.min(1440, minutes) : 45,
-        tag: 'lms',
-        blocks: (lesson.blocks || []).slice(0, IMPORT_LIMITS.blocksPerLesson).map(finalizeBlock)
-      };
-    })
+    blocks: (Array.isArray(draft.blocks) ? draft.blocks : []).filter(b => b && typeof b === 'object').slice(0, IMPORT_LIMITS.blocksPerUnit).map(finalizeBlock)
   };
 }
 

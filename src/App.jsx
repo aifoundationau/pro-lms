@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   listSiteCourses, saveCourse, newCourseId, setCourseArchived,
   copyCourseForTeacher, listNetworkCourses,
-  incrementCourseEnrolments, isDbAvailable
+  incrementCourseEnrolments, isDbAvailable, subscribeToSiteCourses
 } from './services/lmsRepository';
 import { parseCourseSheetWithAI, SAMPLE_SHEET_CSV, DEFAULT_GEMINI_KEY, formatLocalizedDate } from './services/geminiCourseService';
 import StudentRegistration from './components/StudentRegistration';
@@ -16,7 +16,7 @@ import CourseSubmissionsModal from './components/course/CourseSubmissionsModal';
 import TokenFundModal from './components/TokenFundModal';
 import MessageDock from './components/messaging/MessageDock';
 import StudentLearningPanel from './components/student/StudentLearningPanel';
-import { createBlankCourse, generateEntityId, createBlankUnit, createBlankLesson } from './types/courseBuilderTypes';
+import { createBlankCourse, generateEntityId, createBlankUnit } from './types/courseBuilderTypes';
 import { confirmCheckoutSession } from './services/stripeService';
 import { getUserTokenBalance } from './services/tokenService';
 import { subscribeToEnrolledCourses } from './services/enrolledCourses';
@@ -62,6 +62,7 @@ async function uploadToImgbb(file) {
 
 function App() {
   const [isContactOpen, setIsContactOpen] = useState(false);
+  const [isAboutDavidOpen, setIsAboutDavidOpen] = useState(false);
   // Set when "Message the Super Admin" is pressed on the front page: the admin panel opens, then the composer.
   const [pendingSuperadminMessage, setPendingSuperadminMessage] = useState(false);
 
@@ -335,7 +336,34 @@ function App() {
     ? myCourses
     : myCourses.filter(c => !c.authorId || c.authorId === authUser?.uid);
 
-  // Synchronize courses from Cloud Firestore (lms_courses + unmigrated legacy) on mount
+  // Student-visible courses:
+  // Registered students (or staff previewing the student panel) see active enrolled courses
+  // PLUS courses currently in draft mode created on the platform, so registered students see live updates as teachers start creating courses.
+  const studentVisibleCourses = useMemo(() => {
+    const map = new Map();
+
+    // 1. If user is a registered student or staff, include draft site courses so they see courses being created in real time
+    if (privileges.isStudent || privileges.isStaff || privileges.canViewDraftCourses) {
+      for (const c of myCourses) {
+        if (!c || !c.id || c.archived) continue;
+        const isDraft = Boolean(c.isDraft || c.status === 'draft' || (Array.isArray(c.tags) && c.tags.includes('Draft')));
+        if (isDraft) {
+          map.set(String(c.id), c);
+        }
+      }
+    }
+
+    // 2. Merge all enrolled courses (which take precedence for student state / submissions)
+    for (const c of enrolledCourses) {
+      if (!c || !c.id || c.archived) continue;
+      const existing = map.get(String(c.id));
+      map.set(String(c.id), existing ? { ...existing, ...c } : c);
+    }
+
+    return Array.from(map.values());
+  }, [myCourses, enrolledCourses, privileges.isStudent, privileges.isStaff, privileges.canViewDraftCourses]);
+
+  // Synchronize courses from Cloud Firestore (lms_courses + unmigrated legacy) on mount and live updates
   useEffect(() => {
     let cancelled = false;
     const loadCourses = async () => {
@@ -352,7 +380,40 @@ function App() {
       }
     };
     loadCourses();
-    return () => { cancelled = true; };
+
+    let unsubscribeCourses = () => {};
+    if (isDbAvailable()) {
+      try {
+        unsubscribeCourses = subscribeToSiteCourses(
+          (liveCourses) => {
+            if (cancelled || !Array.isArray(liveCourses)) return;
+            const active = liveCourses.filter(c => !c.archived);
+            if (active.length > 0) {
+              setMyCourses(prev => {
+                const map = new Map();
+                for (const c of prev) {
+                  if (c && c.id) map.set(String(c.id), c);
+                }
+                for (const c of active) {
+                  if (c && c.id) map.set(String(c.id), c);
+                }
+                return Array.from(map.values());
+              });
+            }
+          },
+          (err) => {
+            console.warn("Real-time site courses listener note:", err?.message || err);
+          }
+        );
+      } catch (err) {
+        console.warn("Real-time site courses setup note:", err);
+      }
+    }
+
+    return () => {
+      cancelled = true;
+      unsubscribeCourses();
+    };
   }, []);
 
   const handleDeleteCourse = (course) => {
@@ -554,18 +615,12 @@ function App() {
   const handleCreateBlankCourse = () => {
     const newCourse = buildBlankCourse();
     openCourseInBuilder(newCourse);
-    saveCourse(newCourse.id, newCourse, { isNew: true }).catch(error => {
-      console.error("Error adding course to Firebase: ", error);
-    });
   };
 
   const handleUploadSheetClick = () => {
     const newCourse = buildBlankCourse();
     setBuilderInitialPanel('spreadsheet');
     openCourseInBuilder(newCourse);
-    saveCourse(newCourse.id, newCourse, { isNew: true }).catch(error => {
-      console.error("Error adding course to Firebase: ", error);
-    });
   };
 
 
@@ -983,15 +1038,17 @@ function App() {
       const normalizedCourse = {
         ...editingCourse,
         aqfLevel: editingCourse.aqfLevel !== undefined ? editingCourse.aqfLevel : 0,
-        units: editingCourse.units?.length ? editingCourse.units : (
+        units: Array.isArray(editingCourse.units) ? editingCourse.units : (
           editingCourse.modules?.length ? editingCourse.modules.map((m, mIdx) => ({
             id: m.id || generateEntityId('unit'),
             unitCode: m.code || `UNIT-${mIdx + 1}01`,
             unitTitle: m.unitName || m.title || `Unit ${mIdx + 1}`,
-            nominalHours: 40,
+            nominalHours: m.nominalHours !== undefined && m.nominalHours !== null ? m.nominalHours : '',
             description: m.description || '',
-            lessons: [createBlankLesson(0, 'Lesson 1: Core Concepts')]
-          })) : [createBlankUnit('UNIT-101', 'Unit 1: Foundation Knowledge')]
+            learningOutcomes: [],
+            content: '',
+            blocks: []
+          })) : []
         ),
         // One Assessments & Rubrics section per course (never copied into each unit).
         assessments: Array.isArray(editingCourse.assessments) ? editingCourse.assessments : []
@@ -1013,7 +1070,10 @@ function App() {
                 const owned = !updated.authorId && authUser?.uid && !privileges.isSuperadmin
                   ? { ...updated, authorId: authUser.uid, authorName: authUser.displayName || '', authorEmail: (authUser.email || '').toLowerCase() }
                   : updated;
-                setMyCourses(prev => prev.map(c => c.id === owned.id ? owned : c));
+                setMyCourses(prev => {
+                  const exists = prev.some(c => String(c.id) === String(owned.id));
+                  return exists ? prev.map(c => String(c.id) === String(owned.id) ? owned : c) : [owned, ...prev];
+                });
                 setEditingCourse(owned);
                 await saveCourse(owned.id, owned);
               }}
@@ -1438,12 +1498,12 @@ function App() {
             {privileges.isStaff && (
               <button className={`nav-btn ${activeTab === 'my-courses' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('my-courses'); setIsMobileMenuOpen(false); }}>My Courses</button>
             )}
-            {(!privileges.isStaff || enrolledCourses.length > 0) && (
+            {(!privileges.isStaff || enrolledCourses.length > 0 || studentVisibleCourses.length > 0) && (
               <button className={`nav-btn ${activeTab === 'learning' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('learning'); setIsMobileMenuOpen(false); }}>
-                🎓 Student Panel{enrolledCourses.length ? ` (${enrolledCourses.length})` : ''}
+                🎓 Student Panel{studentVisibleCourses.length ? ` (${studentVisibleCourses.length})` : ''}
               </button>
             )}
-            {privileges.isStaff && (
+            {privileges.canEnrolStudents && (
               <button className={`nav-btn ${activeTab === 'students' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('students'); setIsMobileMenuOpen(false); }}>Student Registration</button>
             )}
             {(privileges.isStaff || privileges.canViewGlobalCourses) && (
@@ -1545,7 +1605,7 @@ function App() {
           {activeTab === 'learning' && (
             <StudentLearningPanel
               currentUser={authUser}
-              courses={enrolledCourses}
+              courses={studentVisibleCourses}
               loading={isLoadingEnrolments}
               error={enrolmentsError}
               onRetry={() => setEnrolmentsVersion(v => v + 1)}
@@ -1659,26 +1719,28 @@ function App() {
                             ⚠️ Unassigned course
                           </span>
                         )}
-                        <button
-                          className="nav-btn primary"
-                          style={{
-                            background: 'linear-gradient(135deg, #059669, #10b981)',
-                            color: '#fff',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            gap: '4px',
-                            fontSize: '0.76rem',
-                            padding: '6px 4px',
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis'
-                          }}
-                          onClick={() => setManagingPeopleCourse(course)}
-                          title="Add students by email (Students & People)"
-                        >
-                          👥 Students & People
-                        </button>
+                        {privileges.canEnrolStudents && (
+                          <button
+                            className="nav-btn primary"
+                            style={{
+                              background: 'linear-gradient(135deg, #059669, #10b981)',
+                              color: '#fff',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: '4px',
+                              fontSize: '0.76rem',
+                              padding: '6px 4px',
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis'
+                            }}
+                            onClick={() => setManagingPeopleCourse(course)}
+                            title="Add students by email (Students & People)"
+                          >
+                            👥 Students & People
+                          </button>
+                        )}
                         <button
                           className="nav-btn secondary"
                           style={{ fontSize: '0.76rem', padding: '6px 4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
@@ -1755,7 +1817,7 @@ function App() {
             </div>
           )}
 
-          {activeTab === 'students' && privileges.isStaff && (
+          {activeTab === 'students' && privileges.canEnrolStudents && (
             <StudentRegistration
               myCourses={visibleMyCourses}
               onUpdateCourses={handleUpdateCourseEnrollments}
@@ -1802,21 +1864,22 @@ function App() {
                 </div>
               </div>
 
-              {/* Published OzEdu courses (live from the database) */}
-              <div className="network-courses-block">
-                <div className="network-courses-head">
-                  <h3>🌏 Published by OzEdu teachers ({filteredNetworkCourses.length})</h3>
-                  <button className="nav-btn secondary" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={loadNetworkCourses} disabled={isLoadingNetwork}>
-                    {isLoadingNetwork ? 'Loading…' : '↻ Refresh'}
-                  </button>
+              {/* Network error notice if published courses failed to load */}
+              {networkError && (
+                <div className="network-error-notice" style={{ margin: '16px 0', padding: '10px 14px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.25)' }}>
+                  <p style={{ color: '#fca5a5', fontSize: '0.85rem', margin: 0 }}>{networkError}</p>
                 </div>
-                {networkError && <p style={{ color: '#fca5a5', fontSize: '0.85rem' }}>{networkError}</p>}
-                {!isLoadingNetwork && !networkError && filteredNetworkCourses.length === 0 && (
-                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
-                    {networkCourses.length === 0 ? 'No teacher has published a course yet. Publish yours from the Course Builder and it appears here for every teacher.' : 'No published courses match your search.'}
-                  </p>
-                )}
-                {filteredNetworkCourses.length > 0 && (
+              )}
+
+              {/* Published OzEdu courses (live from the database) - only shown when courses exist */}
+              {filteredNetworkCourses.length > 0 && (
+                <div className="network-courses-block">
+                  <div className="network-courses-head">
+                    <h3>🌏 Published by OzEdu teachers ({filteredNetworkCourses.length})</h3>
+                    <button className="nav-btn secondary" style={{ padding: '6px 12px', fontSize: '0.8rem' }} onClick={loadNetworkCourses} disabled={isLoadingNetwork}>
+                      {isLoadingNetwork ? 'Loading…' : '↻ Refresh'}
+                    </button>
+                  </div>
                   <div className="global-cards-grid-4x6">
                     {filteredNetworkCourses.map(course => {
                       const copied = isCopiedByMe(course);
@@ -1865,10 +1928,10 @@ function App() {
                       );
                     })}
                   </div>
-                )}
-              </div>
+                </div>
+              )}
 
-              <h3 className="catalog-heading">📖 Curated course catalog</h3>
+              <h3 className="catalog-heading" style={{ textAlign: 'center' }}>📖 Curated Course Catalog</h3>
 
               {/* 4 Courses Across × 6 Rows Down (24 Per Page) - Centered */}
               <div className="global-cards-grid-4x6">
@@ -2227,7 +2290,18 @@ function App() {
       </main>
 
       <footer className="footer glass animate-fade-in-up delay-5">
-        <p>© {new Date().getFullYear()} AI Foundation Australia</p>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '14px', flexWrap: 'wrap' }}>
+          <span>© {new Date().getFullYear()} AI Foundation Australia</span>
+          <span style={{ opacity: 0.35 }}>•</span>
+          <button 
+            type="button" 
+            className="nav-btn secondary" 
+            style={{ padding: '4px 14px', fontSize: '0.82rem', borderRadius: '20px', cursor: 'pointer' }}
+            onClick={() => setIsAboutDavidOpen(true)}
+          >
+            About David
+          </button>
+        </div>
       </footer>
 
       {isContactOpen && (
@@ -2277,6 +2351,119 @@ function App() {
               <p className="contact-email-note">
                 You can also email us at <a href="mailto:support@aifoundation.net.au">support@aifoundation.net.au</a>.
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isAboutDavidOpen && (
+        <div className="modal-overlay" onClick={() => setIsAboutDavidOpen(false)}>
+          <div 
+            className="glass modal-content animate-fade-in-up" 
+            onClick={e => e.stopPropagation()}
+            style={{ maxWidth: '860px', width: '94%', maxHeight: '92vh', overflowY: 'auto', padding: '32px 38px' }}
+          >
+            <button className="close-btn" onClick={() => setIsAboutDavidOpen(false)}>✕</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '22px', marginBottom: '18px', flexWrap: 'wrap' }}>
+              <img 
+                src="/david-photo.jpg" 
+                alt="David" 
+                style={{ 
+                  width: '92px', 
+                  height: '92px', 
+                  borderRadius: '50%', 
+                  objectFit: 'cover',
+                  border: '3px solid rgba(52, 211, 153, 0.6)',
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)'
+                }} 
+              />
+              <div style={{ flex: '1', minWidth: '240px' }}>
+                <h2 style={{ margin: '0 0 6px 0', fontSize: '1.55rem', color: '#fef08a' }}>About David</h2>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '0.8rem', background: 'rgba(52, 211, 153, 0.15)', color: '#34d399', padding: '3px 10px', borderRadius: '12px', border: '1px solid rgba(52, 211, 153, 0.3)' }}>
+                    AI Researcher & HDR Doctoral Candidate
+                  </span>
+                  <span style={{ fontSize: '0.8rem', background: 'rgba(250, 204, 21, 0.15)', color: '#fef08a', padding: '3px 10px', borderRadius: '12px', border: '1px solid rgba(250, 204, 21, 0.3)' }}>
+                    Griffith University
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.94rem', lineHeight: '1.6', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <p style={{ margin: 0 }}>
+                As an AI researcher, digital transformation specialist, and educator, I lead Higher Degree by Research (HDR) doctoral studies at Griffith University examining the organizational and human adoption of AI agent frameworks.
+              </p>
+              <p style={{ margin: 0 }}>
+                Holding an MBA in Digital Transformation, a Master of Applied Linguistics, and a Bachelor of International Relations, I leverage an extensive academic background lecturing across Southeast Asia—where I deployed curricula in digital agility, communication ecosystems, and AI prompt engineering—to develop resilient educational technologies for low-resource environments.
+              </p>
+              <p style={{ margin: 0 }}>
+                Through AI Foundation Australia, I architect offline-first, token-supported learning management systems like HealthPulse and OzEdu to deliver critical AI-driven training to remote frontline healthcare workers globally, while actively designing practical AI training programs for Australian small-to-medium businesses.
+              </p>
+            </div>
+
+            <div style={{ 
+              marginTop: '18px', 
+              padding: '14px 18px', 
+              background: 'rgba(255, 255, 255, 0.05)', 
+              borderRadius: '16px', 
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '10px'
+            }}>
+              <p style={{ margin: 0, fontSize: '0.92rem', color: '#e2e8f0', lineHeight: '1.5' }}>
+                To get in touch, become a supporter by registering today, or contact me directly by sending a message through our message panel.
+              </p>
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                {isLoggedIn ? (
+                  <button 
+                    type="button" 
+                    className="nav-btn primary" 
+                    style={{ padding: '8px 18px', fontSize: '0.88rem' }}
+                    onClick={() => {
+                      setIsAboutDavidOpen(false);
+                      handleContactMessageSuperadmin();
+                    }}
+                  >
+                    💬 Send Message to David
+                  </button>
+                ) : (
+                  <>
+                    <button 
+                      type="button" 
+                      className="nav-btn primary" 
+                      style={{ padding: '8px 18px', fontSize: '0.88rem' }}
+                      onClick={() => {
+                        setIsAboutDavidOpen(false);
+                        handleSignIn();
+                      }}
+                      disabled={isAuthLoading}
+                    >
+                      {isAuthLoading ? 'Connecting...' : '✨ Register as Supporter'}
+                    </button>
+                    <button 
+                      type="button" 
+                      className="nav-btn secondary" 
+                      style={{ padding: '8px 14px', fontSize: '0.85rem' }}
+                      onClick={() => {
+                        setIsAboutDavidOpen(false);
+                        setIsContactOpen(true);
+                      }}
+                    >
+                      ✉️ Contact Options
+                    </button>
+                  </>
+                )}
+                <button 
+                  type="button" 
+                  className="nav-btn secondary" 
+                  style={{ padding: '8px 16px', fontSize: '0.85rem', marginLeft: 'auto' }}
+                  onClick={() => setIsAboutDavidOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         </div>

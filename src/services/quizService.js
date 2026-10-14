@@ -47,9 +47,9 @@ export async function loadQuizAnswerKeys(courseId) {
 }
 
 /** Student submits (or resubmits, until results are released) a quiz attempt. */
-export async function submitQuizAttempt({ course, unit, lesson, block, user, answers }) {
+export async function submitQuizAttempt({ course, unit, block, user, answers }) {
   if (!db) throw quizError('Quizzes are unavailable right now (database offline).', 'DB_UNAVAILABLE');
-  const fields = buildQuizAttemptPayload({ course, unit, lesson, block, user, answers });
+  const fields = buildQuizAttemptPayload({ course, unit, block, user, answers });
   const id = quizAttemptDocId(course.id, block.id, user.uid);
   const ref = doc(db, QUIZ_ATTEMPTS_COLLECTION, id);
   const existing = await getDoc(ref).catch(() => null);

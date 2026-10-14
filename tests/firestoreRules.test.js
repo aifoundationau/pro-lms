@@ -191,7 +191,7 @@ async function run() {
       { id: 'q2', type: 'open', prompt: 'Explain', points: 5 }
     ] } };
     const attemptId = quizAttemptDocId('c1', 'quiz1', 'stu1');
-    const attempt = { ...buildQuizAttemptPayload({ course: quizCourse, unit: { id: 'u1', unitTitle: 'Cells' }, lesson: { id: 'l1', title: 'L1' }, block: quizBlock, user: PEOPLE.student, answers: { q1: ['o2'], q2: 'Because' } }), submittedAt: serverTimestamp(), attempts: increment(1) };
+    const attempt = { ...buildQuizAttemptPayload({ course: quizCourse, unit: { id: 'u1', unitTitle: 'Cells' }, block: quizBlock, user: PEOPLE.student, answers: { q1: ['o2'], q2: 'Because' } }), submittedAt: serverTimestamp(), attempts: increment(1) };
     await check('student reads missing attempt', () => assertSucceeds(getDoc(doc(as('student'), 'lms_quiz_attempts', attemptId))));
     await check('enrolled student submits a quiz', () => assertSucceeds(setDoc(doc(as('student'), 'lms_quiz_attempts', attemptId), attempt, { merge: true })));
     await check('student resubmits before release', () => assertSucceeds(setDoc(doc(as('student'), 'lms_quiz_attempts', attemptId), { ...attempt, answers: { q1: ['o1'] } }, { merge: true })));

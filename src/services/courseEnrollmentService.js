@@ -27,6 +27,7 @@ import {
 import { db } from '../firebase.js';
 import { incrementCourseEnrolments } from './lmsRepository.js';
 import { normalizeHeader } from './courseSpreadsheetSchema.js';
+import { canEnrolInCourses } from './rolePrivileges.js';
 
 const STORAGE_COURSE_MEMBERS_KEY = 'ozedu_course_members_cache';
 export const COURSE_MEMBERS_COLLECTION = 'course_members';
@@ -277,8 +278,12 @@ export async function addMemberToCourseFree({
   memberEmail = '',
   memberRole = 'student', // 'student' | 'teacher' | 'guest'
   addedByUid = 'teacher',
-  addedByName = 'Course Teacher'
+  addedByName = 'Course Teacher',
+  addedByProfile = null
 }) {
+  if (addedByProfile && !canEnrolInCourses(addedByProfile)) {
+    throw new Error('Only teachers, admin, superadmin, COO, and CFO can add members to courses.');
+  }
   if (!courseId) {
     throw new Error('Course ID is required.');
   }
@@ -346,7 +351,10 @@ export async function addMemberToCourseFree({
  * Enrols many people at once (pasted list or spreadsheet). Already-enrolled emails are skipped.
  * @returns {Promise<{ added: number, alreadyEnrolled: string[], failed: string[], persisted: boolean }>}
  */
-export async function bulkEnrolMembers({ course, members, memberRole = 'student', addedByUid = 'teacher', addedByName = 'Course Teacher' }) {
+export async function bulkEnrolMembers({ course, members, memberRole = 'student', addedByUid = 'teacher', addedByName = 'Course Teacher', addedByProfile = null }) {
+  if (addedByProfile && !canEnrolInCourses(addedByProfile)) {
+    throw new Error('Only teachers, admin, superadmin, COO, and CFO can add members to courses.');
+  }
   if (!course?.id) throw new Error('Course ID is required.');
   const unique = [];
   const seen = new Set();

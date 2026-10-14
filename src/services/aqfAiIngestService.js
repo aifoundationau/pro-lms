@@ -1,6 +1,6 @@
 /**
  * ✨ AI Assist: Gemini Full-Course Generation & AQF Equivalence Pipeline
- * Parses raw text or syllabus files directly into full AQF Course, Unit, Lesson, Block, and Assessment schemas.
+ * Parses raw text or syllabus files directly into full AQF Course, Unit (content & blocks) and Assessment schemas.
  * Guided by the course's selected Curriculum Standards (/skills/*.md).
  * Includes token metering (Super Admin fee, default 10 tokens; 0 for Charity Teachers and the Super Admin).
  * Spreadsheet uploads use courseSpreadsheetAiService.js; both share aiCourseShared.js.
@@ -50,9 +50,9 @@ Source Material to Ingest:
 ${syllabusText.slice(0, 15000)}
 """
 
-Structure: units hold lessons and content blocks only. The course has ONE "assessments" list (nominalWeight = % of the course grade, all tasks add up to 100; "unitCode" = the unit a task mainly assesses, or "" for the whole course). End each unit's last lesson with one "quiz" block of 4-6 questions ("multiple_choice" with "options" and zero-based "correct" indexes, "true_false" with "correctAnswer", "short_answer" with "acceptedAnswers", and one "open" question with a "modelAnswer").
+Structure: each unit has its "content" (the lesson paragraphs students read: accurate, engaging instructional text, 500-1,000 words, simple Markdown allowed) and its "blocks" — there are no lessons. The course has ONE "assessments" list (nominalWeight = % of the course grade, all tasks add up to 100; "unitCode" = the unit a task mainly assesses, or "" for the whole course). End each unit's blocks with one "quiz" block of 4-6 questions ("multiple_choice" with "options" and zero-based "correct" indexes, "true_false" with "correctAnswer", "short_answer" with "acceptedAnswers", and one "open" question with a "modelAnswer").
 
-Links: never invent URLs. Only use URLs that appear in the source material. Create "youtube_video" (YouTube Video), "google_drive_link" (Google Drive Resource) or "notebook_link" (Gemini Notebook) blocks only for such URLs, one block per link (a lesson may have several of each); otherwise suggest videos or resources inside the teacher_guide text.
+Links: never invent URLs. Only use URLs that appear in the source material. Create "youtube_video" (YouTube Video), "google_drive_link" (Google Drive Resource) or "notebook_link" (Gemini Notebook) blocks only for such URLs, one block per link (a unit may have several of each); otherwise suggest videos or resources inside the teacher_guide text.
 
 You MUST respond with pure JSON only (no markdown quotes, no triple backticks, no preamble).
 The JSON MUST follow this exact structure:
@@ -74,32 +74,27 @@ The JSON MUST follow this exact structure:
       "nominalHours": 40,
       "description": "Unit scope and performance criteria overview",
       "learningOutcomes": ["Measurable unit outcome..."],
-      "lessons": [
+      "content": "The unit's teaching text: clear paragraphs covering every performance criterion and outcome, with examples...",
+      "blocks": [
         {
-          "title": "Lesson 1: Topic Title",
-          "estimatedMinutes": 45,
-          "blocks": [
-            {
-              "type": "text_description",
-              "title": "Theoretical Foundations & Concepts",
-              "content": "Rich instructional text explaining the concept in detail..."
-            },
-            {
-              "type": "teacher_guide",
-              "title": "Educator Facilitation & Pedagogy Tips",
-              "content": "Pedagogical guidance, recommended discussion prompts, suggested video search terms, and classroom safety notices..."
-            },
-            {
-              "type": "quiz",
-              "title": "Unit quiz",
-              "content": "Answer every question.",
-              "questions": [
-                { "type": "multiple_choice", "prompt": "Question text", "options": ["Option A", "Option B", "Option C"], "correct": [1], "points": 1 },
-                { "type": "true_false", "prompt": "Statement", "correctAnswer": true, "points": 1 },
-                { "type": "short_answer", "prompt": "Question", "acceptedAnswers": ["Expected answer"], "points": 1 },
-                { "type": "open", "prompt": "Question", "modelAnswer": "What a good answer includes", "points": 5 }
-              ]
-            }
+          "type": "text_description",
+          "title": "",
+          "content": "Unit Description (shown at the top of the unit, above the performance criteria): 2-4 sentences on what the unit covers, who it is for and why it matters."
+        },
+        {
+          "type": "teacher_guide",
+          "title": "Educator Facilitation & Pedagogy Tips",
+          "content": "Pedagogical guidance, recommended discussion prompts, suggested video search terms, and classroom safety notices..."
+        },
+        {
+          "type": "quiz",
+          "title": "Unit quiz",
+          "content": "Answer every question.",
+          "questions": [
+            { "type": "multiple_choice", "prompt": "Question text", "options": ["Option A", "Option B", "Option C"], "correct": [1], "points": 1 },
+            { "type": "true_false", "prompt": "Statement", "correctAnswer": true, "points": 1 },
+            { "type": "short_answer", "prompt": "Question", "acceptedAnswers": ["Expected answer"], "points": 1 },
+            { "type": "open", "prompt": "Question", "modelAnswer": "What a good answer includes", "points": 5 }
           ]
         }
       ]
@@ -173,30 +168,25 @@ function generateFallbackAqfCourse(syllabusText, targetAqfLevel) {
         unitTitle: 'Unit 1: Fundamental Principles & Practice',
         nominalHours: 45,
         description: 'Examines foundational theoretical knowledge and standard operating procedures.',
-        lessons: [
+        content: `This unit introduces the primary concepts outlined in the syllabus. Students analyse baseline principles aligned with ${aqfMeta.credential} expectations, then apply them to realistic workplace scenarios.`,
+        blocks: [
           {
-            title: 'Lesson 1: Introduction to Framework Principles',
-            estimatedMinutes: 50,
-            blocks: [
-              {
-                type: 'text_description',
-                title: 'Core Concepts & Analytical Definitions',
-                content: `This lesson introduces the primary concepts outlined in the syllabus. Students analyze baseline principles aligned with ${aqfMeta.credential} expectations.`
-              },
-              {
-                type: 'teacher_guide',
-                title: 'Instructor Pedagogy & Timing Recommendations',
-                content: 'Dedicate the first 15 minutes to class discussion. Scaffold technical terminology using real-world case studies.'
-              },
-              {
-                type: 'quiz',
-                title: 'Unit quiz',
-                content: 'Answer every question. Your teacher releases the results.',
-                questions: [
-                  { type: 'true_false', prompt: 'This unit introduces the foundational principles of the course.', correctAnswer: true, points: 1 },
-                  { type: 'open', prompt: 'Explain one principle from this lesson and how you would apply it at work.', modelAnswer: 'Names a principle from the lesson, explains it accurately and gives a realistic workplace application.', points: 5 }
-                ]
-              }
+            type: 'text_description',
+            title: '',
+            content: `This unit builds the foundational knowledge and standard practices of the field, aligned with ${aqfMeta.credential} expectations.`
+          },
+          {
+            type: 'teacher_guide',
+            title: 'Instructor Pedagogy & Timing Recommendations',
+            content: 'Dedicate the first 15 minutes to class discussion. Scaffold technical terminology using real-world case studies.'
+          },
+          {
+            type: 'quiz',
+            title: 'Unit quiz',
+            content: 'Answer every question. Your teacher releases the results.',
+            questions: [
+              { type: 'true_false', prompt: 'This unit introduces the foundational principles of the course.', correctAnswer: true, points: 1 },
+              { type: 'open', prompt: 'Explain one principle from this unit and how you would apply it at work.', modelAnswer: 'Names a principle from the unit, explains it accurately and gives a realistic workplace application.', points: 5 }
             ]
           }
         ]
@@ -209,7 +199,7 @@ function generateFallbackAqfCourse(syllabusText, targetAqfLevel) {
         type: 'summative',
         description: 'Learners apply core principles in a realistic simulation and submit evidence of competency.',
         nominalWeight: 100,
-        rubric: createDefaultRubric()
+        rubric: createDefaultRubric('summative')
       }
     ]
   };

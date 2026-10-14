@@ -46,18 +46,15 @@ function comparable(course) {
   return stripIds({
     units: units.map(u => ({
       ...u,
-      lessons: (u.lessons || []).map(l => ({
-        ...l,
-        blocks: (l.blocks || []).map(b => (b.type !== 'quiz' ? b : {
-          ...b,
-          quiz: {
-            ...b.quiz,
-            questions: (b.quiz?.questions || []).map(q => (q.type !== 'multiple_choice' ? q : {
-              ...q,
-              correctOptionIds: (q.correctOptionIds || []).map(id => (q.options || []).findIndex(o => o.id === id))
-            }))
-          }
-        }))
+      blocks: (u.blocks || []).map(b => (b.type !== 'quiz' ? b : {
+        ...b,
+        quiz: {
+          ...b.quiz,
+          questions: (b.quiz?.questions || []).map(q => (q.type !== 'multiple_choice' ? q : {
+            ...q,
+            correctOptionIds: (q.correctOptionIds || []).map(id => (q.options || []).findIndex(o => o.id === id))
+          }))
+        }
       }))
     })),
     assessments: (course.assessments || []).map(a => ({ ...a, unitId: a.unitId ? unitIndex.get(a.unitId) ?? 'missing' : '' }))
@@ -110,14 +107,17 @@ async function run() {
   for (const field of ['title', 'code', 'aqfLevel', 'category', 'year', 'startDate', 'description', 'knowledge', 'curriculumStandards', 'aqfEquivalenceNotes', 'learningOutcomes']) {
     assert.deepStrictEqual(b[field], a[field], `round trip changed ${field}`);
   }
-  assert.deepStrictEqual(comparable(rebuilt), comparable(example), 'units, lessons, blocks, quizzes and the course assessments survive');
-  assert(rebuilt.units.every(u => !('assessments' in u)), 'units hold lessons & blocks only');
+  assert.deepStrictEqual(comparable(rebuilt), comparable(example), 'units (Unit Content included), blocks, quizzes and the course assessments survive');
+  assert(rebuilt.units.every(u => !('assessments' in u) && !('lessons' in u)), 'units hold their content & blocks only');
+  assert(!roundSheets.some(sh => sh.name === 'Lessons'), 'no Lessons tab');
+  assert(roundSheets.find(sh => sh.name === 'Units').rows[0].includes('Unit Content'), 'Units tab has Unit Content');
+  assert(rebuilt.units[0].content.startsWith('What is sustainability?'), 'Unit Content round-trips');
   assert.deepStrictEqual(rebuilt.assessments.map(x => [x.title, x.nominalWeight]), [['Concepts Check', 10], ['Workplace Sustainability Audit', 40], ['ESG Impact Report', 50]], 'one course-level Assessments & Rubrics list');
   const bands = rebuilt.assessments[2].rubric[0].levels.map(l => l.label);
   assert.strictEqual(bands.length, 5, '5-level rubric survives (repeated header row)');
   assert.strictEqual(rebuilt.assessments[2].unitId, rebuilt.units[1].id, 'Covers Unit links the task to its unit');
-  assert(rebuilt.units[0].lessons[0].blocks.some(blk => blk.type === 'notebook_link' && blk.metadata.notebookUrl.startsWith('https://notebooklm.google.com/')));
-  const quiz = rebuilt.units[0].lessons[0].blocks.find(blk => blk.type === 'quiz');
+  assert(rebuilt.units[0].blocks.some(blk => blk.type === 'notebook_link' && blk.metadata.notebookUrl.startsWith('https://notebooklm.google.com/')));
+  const quiz = rebuilt.units[0].blocks.find(blk => blk.type === 'quiz');
   assert.deepStrictEqual(quiz.quiz.questions.map(q => q.type), ['multiple_choice', 'true_false', 'short_answer', 'open'], 'every question type round-trips');
   assert.strictEqual(parsed.stats.questions, 6);
   console.log('✅ Test 2 Passed: worked example round-trips every course category A to Z (quizzes and course assessments included).');
@@ -196,14 +196,19 @@ async function run() {
   assert(warnText.includes('Nominal Hours "lots"'), 'bad hours warned');
   assert(warnText.includes('Unit "B9" is not on the Units tab'), 'missing unit auto-created');
   assert(warnText.includes('unsafe scheme'), 'javascript: link removed');
+  // An older workbook (Lessons tab, Lesson # columns): each unit keeps every block in order and the
+  // lesson titles become the unit's topics.
   const b1 = custom.draft.units.find(u => u.unitCode === 'B1');
-  assert.deepStrictEqual(b1.lessons.map(l => l.title), ['Cell walls', 'Membranes'], 'blank unit reference fills down');
-  assert.strictEqual(b1.lessons[0].blocks[1].content, 'https://www.youtube.com/watch?v=xyz123', 'hyperlink target used for link blocks; lesson # fills down');
-  assert.strictEqual(b1.lessons[1].blocks[0].content, '', 'unsafe link stripped');
+  assert(!('lessons' in b1), 'units hold blocks, not lessons');
+  assert.deepStrictEqual(b1.topics, ['Cell walls', 'Membranes'], 'blank unit reference fills down; lesson titles become topics');
+  assert.deepStrictEqual(b1.blocks.map(x => [x.type, x.title]), [['text_description', 'Intro'], ['youtube_video', 'Watch'], ['google_drive_link', 'Bad'], ['notebook_link', 'Notes']], 'lesson blocks flattened in order');
+  assert.strictEqual(b1.blocks[1].content, 'https://www.youtube.com/watch?v=xyz123', 'hyperlink target used for link blocks; lesson # fills down');
+  assert.strictEqual(b1.blocks[2].content, '', 'unsafe link stripped');
   const finalCustom = finalizeCourseDraft(custom.draft, { title: 'Old', units: [{ id: 'keep' }], authorId: 'me' });
   assert.strictEqual(finalCustom.authorId, 'me', 'identity of the base course is kept');
   assert.strictEqual(finalCustom.units.length, 3);
-  assert.strictEqual(finalCustom.units[0].lessons[0].blocks[1].metadata.youtubeUrl, 'https://www.youtube.com/watch?v=xyz123');
+  assert.strictEqual(finalCustom.units[0].blocks[1].metadata.youtubeUrl, 'https://www.youtube.com/watch?v=xyz123');
+  assert.strictEqual(finalCustom.units[0].content, 'Cell walls\nMembranes', 'topics fill a blank Unit Content');
   console.log('✅ Test 7 Passed: fill-down, auto-created units, warnings, unsafe-link removal, hyperlinks, AU dates.');
 
   // 8. Value parsers & header detection
@@ -237,8 +242,8 @@ async function run() {
   // 10. Merge rules: teacher values win, blanks are filled, invented links never survive
   const policy = createUrlPolicy(['https://youtu.be/teacher']);
   const teacherUnit = {
-    unitCode: 'B1', unitTitle: 'Cells', nominalHours: null, description: '', learningOutcomes: [],
-    lessons: [{ title: 'Cell walls', estimatedMinutes: null, blocks: [{ type: 'youtube_video', title: '', content: 'https://youtu.be/teacher' }] }]
+    unitCode: 'B1', unitTitle: 'Cells', nominalHours: null, description: '', learningOutcomes: [], content: '',
+    blocks: [{ type: 'youtube_video', title: '', content: 'https://youtu.be/teacher' }]
   };
   const teacherTasks = [{ title: 'Quiz', type: '', description: '', dueDate: '', nominalWeight: 40, externalSubmissionLinks: [], unitIndex: 0, rubric: [
     { criterionTitle: 'Accuracy', weightPercentage: 60, levels: [{ label: 'Low', descriptor: 'Teacher low' }, { label: 'High', descriptor: '' }] }
@@ -246,21 +251,21 @@ async function run() {
   const aiUnit = sanitizeAiUnit({
     unitCode: 'CHANGED', unitTitle: 'Changed title', nominalHours: 30, description: 'AI description',
     learningOutcomes: ['Explain cells'],
-    lessons: [
-      { title: 'AI renamed', estimatedMinutes: 50, blocks: [
-        { type: 'youtube_video', title: 'AI video', content: 'https://youtu.be/teacher' },
-        { type: 'youtube_video', title: 'Invented', content: 'https://youtube.com/watch?v=invented' },
-        { type: 'text_description', title: 'Reading', content: 'Read https://made-up.example.com/deep/link today.' },
-        { type: 'teacher_guide', title: 'Guide', content: 'Discuss.' },
-        { type: 'quiz', title: 'AI quiz', content: '', questions: [
-          { type: 'multiple_choice', prompt: 'Cells are…', options: ['tiny', 'huge'], correct: [0] },
-          { type: 'multiple_choice', prompt: 'Broken (one option)', options: ['only'], correct: [0] },
-          { type: 'open', prompt: 'Explain a cell wall.', modelAnswer: 'Rigid outer layer… https://made-up.example.com/x' }
-        ] }
-      ] },
-      { title: 'Extra AI lesson', estimatedMinutes: 30, blocks: [] }
+    content: 'Cells are the building blocks of life. See https://made-up.example.com/cells for more.',
+    blocks: [
+      { type: 'youtube_video', title: 'AI video', content: 'https://youtu.be/teacher' },
+      { type: 'youtube_video', title: 'Invented', content: 'https://youtube.com/watch?v=invented' },
+      { type: 'text_description', title: 'Reading', content: 'Read https://made-up.example.com/deep/link today.' },
+      { type: 'teacher_guide', title: 'Guide', content: 'Discuss.' },
+      { type: 'quiz', title: 'AI quiz', content: '', questions: [
+        { type: 'multiple_choice', prompt: 'Cells are…', options: ['tiny', 'huge'], correct: [0] },
+        { type: 'multiple_choice', prompt: 'Broken (one option)', options: ['only'], correct: [0] },
+        { type: 'open', prompt: 'Explain a cell wall.', modelAnswer: 'Rigid outer layer… https://made-up.example.com/x' }
+      ] }
     ]
   }, { isUrlAllowed: policy });
+  // A reply that still uses lessons is flattened into unit blocks.
+  assert.deepStrictEqual(sanitizeAiUnit({ unitTitle: 'Old', lessons: [{ title: 'L1', blocks: [{ type: 'teacher_guide', title: 'G', content: 'x' }] }] }).blocks.map(x => x.type), ['teacher_guide']);
   const aiTasks = sanitizeAiAssessments([{ title: 'Quiz', unitCode: 'B1', type: 'formative', description: 'AI brief', dueDate: '2026-13-01', nominalWeight: 99, rubric: [
     { criterionTitle: 'Accuracy', weightPercentage: 10, levels: [{ label: 'Low', descriptor: 'AI low' }, { label: 'High', descriptor: 'AI high' }] }
   ] }], { isUrlAllowed: policy });
@@ -269,20 +274,21 @@ async function run() {
   assert.strictEqual(merged.unitTitle, 'Cells');
   assert.strictEqual(merged.nominalHours, 30);
   assert.strictEqual(merged.description, 'AI description');
-  assert.strictEqual(merged.lessons.length, 1, 'teacher lesson structure kept (no extra AI lessons)');
-  assert.strictEqual(merged.lessons[0].title, 'Cell walls');
-  assert.strictEqual(merged.lessons[0].blocks[0].title, 'AI video', 'blank block title filled');
+  assert(!('lessons' in merged), 'a unit has no lessons');
+  assert(merged.content.startsWith('Cells are the building blocks of life.') && !merged.content.includes('https://made-up'), 'blank Unit Content written by Gemini (no invented links)');
+  assert.strictEqual(mergeUnit({ ...teacherUnit, content: 'My paragraphs.' }, aiUnit).content, 'My paragraphs.', 'the teacher\'s Unit Content is kept');
+  assert.strictEqual(merged.blocks[0].title, 'AI video', 'blank block title filled');
   assert(!JSON.stringify(merged).includes('invented'), 'invented YouTube link dropped');
   assert(!JSON.stringify(merged).includes('https://made-up.example.com'), 'invented deep link removed from text');
-  assert.deepStrictEqual(merged.lessons[0].blocks.map(x => x.type), ['youtube_video', 'text_description', 'teacher_guide', 'quiz'], 'missing block types added once (one AI quiz for a unit without one)');
-  const aiQuiz = merged.lessons[0].blocks[3].quiz.questions;
+  assert.deepStrictEqual(merged.blocks.map(x => x.type), ['youtube_video', 'text_description', 'teacher_guide', 'quiz'], 'missing block types added once (one AI quiz for a unit without one)');
+  const aiQuiz = merged.blocks[3].quiz.questions;
   assert.deepStrictEqual(aiQuiz.map(q => q.type), ['multiple_choice', 'open'], 'malformed AI questions are dropped');
   assert.deepStrictEqual(aiQuiz[0].correctOptionIds, [aiQuiz[0].options[0].id], 'AI correct indexes become answer keys');
   assert(!aiQuiz[1].modelAnswer.includes('made-up.example.com/x'), 'no invented links in model answers');
   // A teacher's quiz is never replaced, and Gemini adds no second quiz to a unit that has one.
-  const teacherQuizUnit = { ...teacherUnit, lessons: [{ ...teacherUnit.lessons[0], blocks: [...teacherUnit.lessons[0].blocks, { type: 'quiz', title: 'My quiz', content: '', quiz: { questions: [{ id: 'q1', type: 'open', prompt: 'Mine' }] } }] }] };
+  const teacherQuizUnit = { ...teacherUnit, blocks: [...teacherUnit.blocks, { type: 'quiz', title: 'My quiz', content: '', quiz: { questions: [{ id: 'q1', type: 'open', prompt: 'Mine' }] } }] };
   const keptQuiz = mergeUnit(teacherQuizUnit, aiUnit);
-  const quizzesAfter = keptQuiz.lessons.flatMap(l => l.blocks).filter(x => x.type === 'quiz');
+  const quizzesAfter = keptQuiz.blocks.filter(x => x.type === 'quiz');
   assert.strictEqual(quizzesAfter.length, 1);
   assert.deepStrictEqual(quizzesAfter[0].quiz.questions.map(q => q.prompt), ['Mine'], 'teacher quiz kept as written');
   const mergedTasks = mergeCourseAssessments(teacherTasks, aiTasks.map(({ unitCode: _code, ...t }) => ({ ...t, unitIndex: 0 })));
@@ -349,9 +355,11 @@ async function run() {
     assert(prompt.includes('Build out ONE unit'));
     assert(!prompt.includes('"assessments"'), 'units are built without assessments');
     assert(prompt.includes('Week 1: Ocean Chemistry'), 'unmapped weekly rows reach the unit prompt');
+    assert(prompt.includes('"content"') && prompt.includes('(no lessons)') && !prompt.includes('"lessons"'), 'units are built as Unit Content + blocks');
     return {
       unitCode: 'MAR1', unitTitle: 'Ocean Systems', nominalHours: 40, description: 'Ocean chemistry, reefs and deep sea.', learningOutcomes: ['Explain ocean chemistry'],
-      lessons: [{ title: 'Week 1: Ocean Chemistry & Currents', estimatedMinutes: 60, blocks: [
+      content: 'Week 1: Ocean Chemistry & Currents\nSeawater averages 3.5% salinity; currents move heat around the planet.',
+      blocks: [
         { type: 'text_description', title: 'Salinity', content: 'Seawater averages 3.5% salinity.' },
         { type: 'google_drive_link', title: 'Slides', content: 'https://slides.example.com/week1' },
         { type: 'youtube_video', title: 'Made up', content: 'https://www.youtube.com/watch?v=fake' },
@@ -360,7 +368,7 @@ async function run() {
           { type: 'true_false', prompt: 'Corals are animals.', correctAnswer: true },
           { type: 'open', prompt: 'Why do reefs bleach?', modelAnswer: 'Heat stress expels algae.', points: 5 }
         ] }
-      ] }]
+      ]
     };
   });
   const built = await buildCourseFromSpreadsheetWithAI({
@@ -383,10 +391,11 @@ async function run() {
   assert.strictEqual(built.course.units.length, 1);
   const builtUnit = built.course.units[0];
   assert.strictEqual(builtUnit.unitTitle, 'Ocean Systems', 'auto-created unit filled by AI');
-  assert(builtUnit.lessons[0].blocks.some(x => x.type === 'google_drive_link' && x.metadata.driveUrl === 'https://slides.example.com/week1'), 'link from the spreadsheet allowed');
+  assert(builtUnit.content.startsWith('Week 1: Ocean Chemistry & Currents'), 'Gemini writes the Unit Content');
+  assert(builtUnit.blocks.some(x => x.type === 'google_drive_link' && x.metadata.driveUrl === 'https://slides.example.com/week1'), 'link from the spreadsheet allowed');
   assert(!JSON.stringify(built.course).includes('watch?v=fake'), 'invented video dropped');
-  assert(!('assessments' in builtUnit), 'units hold lessons & blocks only');
-  const builtQuiz = builtUnit.lessons[0].blocks.find(x => x.type === 'quiz');
+  assert(!('assessments' in builtUnit) && !('lessons' in builtUnit), 'units hold their content & blocks only');
+  const builtQuiz = builtUnit.blocks.find(x => x.type === 'quiz');
   assert.deepStrictEqual(builtQuiz.quiz.questions.map(q => q.type), ['multiple_choice', 'true_false', 'open'], 'Gemini adds a unit quiz with answer keys');
   assert.strictEqual(builtQuiz.quiz.questions[0].correctOptionIds[0], builtQuiz.quiz.questions[0].options[0].id);
   assert.deepStrictEqual(built.course.assessments.map(x => x.title), ['Field Investigation Report', 'Mid-Semester Marine Quiz', 'Policy Brief Short Answers'], 'one course-level list, teacher order kept');
@@ -418,7 +427,7 @@ async function run() {
   assert.strictEqual(parseRubricSpreadsheet(rubricBook).rubric.length, 3, 'downloaded rubric re-uploads');
   console.log('✅ Test 14 Passed: reader validation, encodings, and rubric download/upload round trip.');
 
-  // 15. Lessons tab: any number of YouTube / Google Drive / Gemini Notebook links per lesson
+  // 15. Older Lessons tab: any number of YouTube / Google Drive / Gemini Notebook links (flattened into the unit)
   const linkSheets = [
     { name: 'Units', rows: [['Unit Code', 'Unit Title', 'Nominal Hours'], ['L1', 'Links unit', '10']] },
     {
@@ -449,8 +458,10 @@ async function run() {
     }
   ];
   const linked = parseCourseSpreadsheet(linkSheets);
-  const [first, second] = linked.draft.units[0].lessons;
-  assert.strictEqual(linked.draft.units[0].lessons.length, 2, 'continuation rows do not create lessons');
+  const linkedUnit = linked.draft.units[0];
+  assert.deepStrictEqual(linkedUnit.topics, ['First', 'Second'], 'continuation rows do not create lessons');
+  const first = { blocks: linkedUnit.blocks.slice(0, 10) };
+  const second = { blocks: linkedUnit.blocks.slice(10) };
   assert.deepStrictEqual(first.blocks.map(x => [x.type, x.title, x.content]), [
     ['text_description', 'Overview', 'Read this first.'],
     ['youtube_video', 'Welcome', 'https://youtu.be/ddddddddddd'],
@@ -476,49 +487,81 @@ async function run() {
   const linkWarnings = linked.warnings.map(formatImportWarning).join('\n');
   assert(linkWarnings.includes('Lessons row 5: "not a link" in YouTube Video Links has no https:// link'), linkWarnings);
   assert(linkWarnings.includes('does not look like a Gemini Notebook link'), linkWarnings);
-  assert(linkWarnings.includes('was added as a Content Description block above it'), linkWarnings);
-  assert(linkWarnings.includes('Content Description blocks do not use Link URL'), linkWarnings);
+  assert(linkWarnings.includes('was added as a Unit Description block above it'), linkWarnings);
+  assert(linkWarnings.includes('Unit Description blocks do not use Link URL'), linkWarnings);
   assert(!linkWarnings.includes('appears twice'), 'repeating a Lesson # to add links is not a duplicate');
   const linkedCourse = finalizeCourseDraft(linked.draft, {});
-  const finalFirst = linkedCourse.units[0].lessons[0].blocks;
+  const finalFirst = linkedCourse.units[0].blocks.slice(0, 10);
   assert.strictEqual(finalFirst.filter(x => x.type === 'youtube_video').length, 4);
   assert.strictEqual(finalFirst[3].metadata.youtubeUrl, 'https://youtu.be/bbbbbbbbbbb', 'each link block keeps its own URL');
-  assert.strictEqual(new Set(linkedCourse.units[0].lessons.flatMap(l => l.blocks.map(x => x.id))).size, 18, 'every imported block has a unique id');
+  assert.strictEqual(new Set(linkedCourse.units[0].blocks.map(x => x.id)).size, 18, 'every imported block has a unique id');
   assert(['https://youtu.be/ccccccccccc', 'https://drive.google.com/drive/folders/f2'].every(u => linked.sourceUrls.includes(u)), 'lesson links reach the ✨ AI link allow-list');
-  // Limit: 40 blocks per lesson, extra links are reported
-  const manyLinks = Array.from({ length: 45 }, (_, i) => `https://youtu.be/v${String(i).padStart(10, '0')}`).join('\n');
+  // Limit: 150 blocks per unit, extra links are reported (older Lessons tab and the Units tab alike)
+  const manyLinks = Array.from({ length: 160 }, (_, i) => `https://youtu.be/v${String(i).padStart(10, '0')}`).join('\n');
   const capped = parseCourseSpreadsheet([{ name: 'Lessons', rows: [linkSheets[1].rows[0], ['L1', '1', 'Many', '30', manyLinks, '', '']] }]);
-  assert.strictEqual(capped.draft.units[0].lessons[0].blocks.length, 40);
-  assert(capped.warnings.some(w => /link\(s\) were not added/.test(w.message)), 'over-limit links are reported');
-  console.log('✅ Test 15 Passed: several YouTube / Google Drive / Gemini Notebook links per lesson, each its own block.');
+  assert.strictEqual(capped.draft.units[0].blocks.length, 150);
+  assert(capped.warnings.some(w => /150 blocks per unit.*link\(s\) were not added/.test(w.message)), 'over-limit links are reported');
+  const cappedUnits = parseCourseSpreadsheet([{ name: 'Units', rows: [['Unit Code', 'Unit Title', 'YouTube Video Links'], ['U1', 'Many', manyLinks]] }]);
+  assert.strictEqual(cappedUnits.draft.units[0].blocks.length, 150);
+
+  // The current layout: Units tab with Unit Content and link columns; Content Blocks without Lesson #.
+  const v4 = parseCourseSpreadsheet([
+    { name: 'Units', rows: [
+      ['Unit Code', 'Unit Title', 'Nominal Hours', 'Performance Criteria', 'Unit Learning Outcomes', 'Unit Content', 'YouTube Video Links', 'Google Drive Resource Links', 'Gemini Notebook Links'],
+      ['V1', 'Reefs', '12', 'Explains reef ecology.', 'Explain symbiosis\nMap a reef', 'Coral reefs are built by tiny animals.\n\nThey host algae.', 'Intro | https://youtu.be/aaaaaaaaaaa', 'https://drive.google.com/file/d/r1/view', ''],
+      ['', '', '', '', '', '', 'Second video | https://youtu.be/bbbbbbbbbbb', '', 'https://notebooklm.google.com/notebook/r2']
+    ] },
+    { name: 'Content Blocks', rows: [
+      ['Unit Code', 'Block #', 'Block Type', 'Block Title', 'Text', 'Link URL'],
+      ['V1', '2', 'Teacher Guide', 'Notes', 'Discuss bleaching.', ''],
+      ['V1', '1', 'Unit Description', '', 'Key terms: polyp, zooxanthellae.', ''],
+      ['V1', '3', 'Quiz & Questions', 'Reef quiz', 'Answer both.', '']
+    ] },
+    { name: 'Quiz Questions', rows: [
+      ['Unit Code', 'Quiz Title', 'Question #', 'Question Type', 'Question', 'Options', 'Correct Answer', 'Points', 'Model Answer / Marking Guide'],
+      ['V1', 'Reef quiz', '1', 'True / False', 'Corals are animals.', '', 'True', '', '']
+    ] }
+  ]);
+  assert.strictEqual(v4.warnings.length, 0, v4.warnings.map(formatImportWarning).join('\n'));
+  const v4Unit = v4.draft.units[0];
+  assert.deepStrictEqual([v4Unit.description, v4Unit.learningOutcomes, v4Unit.content], ['Explains reef ecology.', ['Explain symbiosis', 'Map a reef'], 'Coral reefs are built by tiny animals.\n\nThey host algae.']);
+  assert(!('topics' in v4Unit) && !('lessons' in v4Unit));
+  assert.deepStrictEqual(v4Unit.blocks.map(x => [x.type, x.title || x.content]), [
+    ['text_description', 'Key terms: polyp, zooxanthellae.'], ['teacher_guide', 'Notes'], ['quiz', 'Reef quiz'],
+    ['youtube_video', 'Intro'], ['youtube_video', 'Second video'], ['google_drive_link', 'https://drive.google.com/file/d/r1/view'], ['notebook_link', 'https://notebooklm.google.com/notebook/r2']
+  ], 'Block # order, then the Units-tab links (videos, Drive, notebooks); a links-only row adds to the unit above');
+  const v4Course = finalizeCourseDraft(v4.draft, {});
+  assert.strictEqual(v4Course.units[0].blocks[2].quiz.questions[0].correctAnswer, true, 'Quiz Questions match the quiz by Unit Code + Quiz Title');
+  assert.strictEqual(v4.stats.blocks, 7);
+  console.log('✅ Test 15 Passed: links per unit (Units tab) and per older lesson, each its own block; Unit Content imports.');
 
   // 16. Exports keep every link and its position; CSV uploads with multi-line link cells work
   const tricky = finalizeCourseDraft({
     course: { title: 'Links', learningOutcomes: [] },
     units: [{
       unitCode: 'X1', unitTitle: 'Unit', nominalHours: 5, description: '', learningOutcomes: [], assessments: [],
-      lessons: [{
-        title: 'Mixed', estimatedMinutes: 30, blocks: [
-          { type: 'youtube_video', title: 'A | B', content: 'https://youtu.be/aaaaaaaaaaa' },
-          { type: 'text_description', title: 'Between', content: 'https://example.com/plain-text-url' },
-          { type: 'google_drive_link', title: '', content: 'https://drive.google.com/file/d/1/view' },
-          { type: 'youtube_video', title: '1. Numbered', content: 'https://youtu.be/bbbbbbbbbbb' },
-          { type: 'notebook_link', title: 'Notebook', content: 'https://notebooklm.google.com/notebook/1' },
-          { type: 'youtube_video', title: 'Tail video', content: 'https://en.wikipedia.org/wiki/Coral_(film)' },
-          { type: 'google_drive_link', title: 'Tail drive', content: 'https://docs.google.com/document/d/2/edit.' },
-          { type: 'notebook_link', title: '', content: 'https://notebooklm.google.com/notebook/2' },
-          { type: 'notebook_link', title: 'Last', content: 'https://notebooklm.google.com/notebook/3' }
-        ]
-      }]
+      content: 'Paragraph one.\n\nParagraph two with https://example.com/in-text',
+      blocks: [
+        { type: 'youtube_video', title: 'A | B', content: 'https://youtu.be/aaaaaaaaaaa' },
+        { type: 'text_description', title: 'Between', content: 'https://example.com/plain-text-url' },
+        { type: 'google_drive_link', title: '', content: 'https://drive.google.com/file/d/1/view' },
+        { type: 'youtube_video', title: '1. Numbered', content: 'https://youtu.be/bbbbbbbbbbb' },
+        { type: 'notebook_link', title: 'Notebook', content: 'https://notebooklm.google.com/notebook/1' },
+        { type: 'youtube_video', title: 'Tail video', content: 'https://en.wikipedia.org/wiki/Coral_(film)' },
+        { type: 'google_drive_link', title: 'Tail drive', content: 'https://docs.google.com/document/d/2/edit.' },
+        { type: 'notebook_link', title: '', content: 'https://notebooklm.google.com/notebook/2' },
+        { type: 'notebook_link', title: 'Last', content: 'https://notebooklm.google.com/notebook/3' }
+      ]
     }]
   });
   const trickyBook = buildCourseWorkbookSheets(tricky);
-  const lessonCells = trickyBook.find(s => s.name === 'Lessons').rows[1];
-  assert.deepStrictEqual(lessonCells.slice(4), [
+  const unitCells = trickyBook.find(s => s.name === 'Units').rows[1];
+  assert.strictEqual(unitCells[6], 'Paragraph one.\n\nParagraph two with https://example.com/in-text', 'Unit Content exported');
+  assert.deepStrictEqual(unitCells.slice(7), [
     'Tail video | https://en.wikipedia.org/wiki/Coral_(film)',
     'Tail drive | https://docs.google.com/document/d/2/edit.',
     'https://notebooklm.google.com/notebook/2\nLast | https://notebooklm.google.com/notebook/3'
-  ], 'trailing links go to the Lessons link columns, exactly as typed');
+  ], 'trailing links go to the Units link columns, exactly as typed');
   assert.strictEqual(trickyBook.find(s => s.name === 'Content Blocks').rows.length, 6, 'the other 5 blocks stay on Content Blocks');
   const trickyBack = finalizeCourseDraft(parseCourseSpreadsheet(workbookSheets(trickyBook)).draft, {});
   assert.deepStrictEqual(stripIds(trickyBack.units), stripIds(tricky.units), 'export -> upload keeps every block, title, link and position');
@@ -528,7 +571,7 @@ async function run() {
     'Part 2 | https://youtu.be/bbbbbbbbbbb",https://drive.google.com/file/d/c/view,"https://notebooklm.google.com/notebook/c1',
     'https://notebooklm.google.com/notebook/c2"'
   ].join('\r\n'), 'Lessons.csv'));
-  assert.deepStrictEqual(csvUpload.draft.units[0].lessons[0].blocks.map(x => x.title || x.type), ['Part 1', 'Part 2', 'google_drive_link', 'notebook_link', 'notebook_link']);
+  assert.deepStrictEqual(csvUpload.draft.units[0].blocks.map(x => x.title || x.type), ['Part 1', 'Part 2', 'google_drive_link', 'notebook_link', 'notebook_link'], 'an older Lessons.csv still imports');
   console.log('✅ Test 16 Passed: exports keep every link in place; CSV multi-line link cells import.');
 
   // 17. ✨ AI merge with several links of one type: each teacher link keeps its own URL and only its own title
@@ -572,10 +615,10 @@ async function run() {
     { name: 'Rubrics', rows: [['Unit Code', 'Assessment #', 'Criterion', 'Weight %', 'Low', 'High'], ['Q2', '1', 'Structure', '100', 'weak', 'strong']] }
   ]);
   const quizCourse = finalizeCourseDraft(quizParsed.draft, {});
-  const lessonOne = quizCourse.units[0].lessons[0];
+  const lessonOne = quizCourse.units[0];
   assert.deepStrictEqual(lessonOne.blocks.map(x => [x.type, x.title]), [
     ['text_description', 'Intro'], ['quiz', 'Mid-lesson check'], ['teacher_guide', 'Notes'], ['quiz', 'End of lesson quiz']
-  ], 'a Content Blocks row places a quiz; a new Quiz Title adds one at the end of the lesson');
+  ], 'a Content Blocks row places a quiz; a new Quiz Title adds one at the end of the unit');
   const midQuiz = lessonOne.blocks[1].quiz;
   assert.strictEqual(midQuiz.instructions, 'Try these.');
   assert.deepStrictEqual(midQuiz.questions.map(q => q.type), ['multiple_choice', 'true_false', 'short_answer', 'open', 'multiple_choice', 'open'], 'ordered by Question #; blank type inferred');
@@ -590,7 +633,7 @@ async function run() {
   assert.deepStrictEqual(bad.correctOptionIds, [], 'an unmatched answer leaves the question for the teacher');
   const endQuiz = lessonOne.blocks[3].quiz.questions[0];
   assert.deepStrictEqual(endQuiz.correctOptionIds, [endQuiz.options[1].id], 'correct answer by option text');
-  const q2Quiz = quizCourse.units[1].lessons[0].blocks.find(x => x.type === 'quiz');
+  const q2Quiz = quizCourse.units[1].blocks.find(x => x.type === 'quiz');
   assert.strictEqual(q2Quiz.quiz.questions[0].correctAnswer, undefined, 'unclear True/False has no key');
   const quizWarnings = quizParsed.warnings.map(formatImportWarning).join('\n');
   for (const part of ['Question Type "Dance" was not recognised', 'Correct Answer "Purple" does not match an option', '"Maybe" should be True or False']) {

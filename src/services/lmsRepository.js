@@ -10,7 +10,7 @@ import {
 import { ALL_GLOBAL_COURSES, LMS_CATEGORIES } from './globalCoursesData.js';
 import { sanitizeStandardIds } from './curriculumStandards.js';
 import { readEnv } from './env.js';
-import { moveUnitAssessmentsToCourse } from '../types/courseBuilderTypes.js';
+import { upgradeCourseStructure } from '../types/courseBuilderTypes.js';
 import { stripQuizAnswerKeys, extractQuizAnswerKeys, mergeQuizAnswerKeys, buildQuizKeysDoc } from './quizModel.js';
 import { QUIZ_KEYS_COLLECTION, loadQuizAnswerKeys } from './quizService.js';
 
@@ -33,7 +33,7 @@ async function readLegacy(name) {
   if (!LEGACY_READ_ENABLED) return [];
   try {
     const snap = await getDocs(collection(db, name));
-    return snap.docs.map(d => moveUnitAssessmentsToCourse({ id: d.id, ...d.data(), _legacy: true }));
+    return snap.docs.map(d => upgradeCourseStructure({ id: d.id, ...d.data(), _legacy: true }));
   } catch (err) {
     console.warn(`Legacy read of "${name}" skipped:`, err?.code || err);
     return [];
@@ -117,7 +117,7 @@ function sanitizeArrayOfObjects(arr, maxItems = 200) {
 export function courseFromDoc(id, data) {
   // Courses no longer have an enrolment cost; older documents may still carry the field.
   const { token_cost: _retiredEnrolmentCost, ...rest } = data || {};
-  return moveUnitAssessmentsToCourse({ id, ...rest });
+  return upgradeCourseStructure({ id, ...rest });
 }
 
 /**
@@ -125,7 +125,7 @@ export function courseFromDoc(id, data) {
  * no quiz answer keys (those are stored in the staff-only lms_quiz_keys collection).
  */
 export function normalizeCourse(rawInput = {}) {
-  const input = stripQuizAnswerKeys(moveUnitAssessmentsToCourse(rawInput || {})) || {};
+  const input = stripQuizAnswerKeys(upgradeCourseStructure(rawInput || {})) || {};
   const isPublished = Boolean(input.isPublished || input.status === 'published');
   const isDraft = !isPublished && (input.isDraft !== false);
 
@@ -617,6 +617,42 @@ export function subscribeToCourse(courseId, onCourse, onError) {
       doc(db, LMS_COLLECTIONS.courses, cid),
       snap => onCourse(snap.exists() ? { ...courseFromDoc(snap.id, snap.data()), tag: 'lms' } : null),
       err => onError?.(err)
+    );
+  } catch (err) {
+    onError?.(err);
+    return () => {};
+  }
+}
+
+/**
+ * Real-time listener for all active site courses tagged with 'lms'.
+ * Whenever any teacher creates or updates a course in lms_courses (including drafts),
+ * registered students and teachers receive the live course updates.
+ * @param {(courses: object[]) => void} onCourses
+ * @param {(err: Error) => void} [onError]
+ * @returns {() => void} unsubscribe
+ */
+export function subscribeToSiteCourses(onCourses, onError) {
+  if (!db) {
+    onError?.(Object.assign(new Error('Database unavailable (Firebase not configured).'), { code: 'DB_UNAVAILABLE' }));
+    return () => {};
+  }
+  try {
+    const q = query(
+      collection(db, LMS_COLLECTIONS.courses),
+      where('tag', '==', 'lms')
+    );
+    return onSnapshot(
+      q,
+      snap => {
+        const courses = snap.docs
+          .map(d => courseFromDoc(d.id, d.data()))
+          .filter(c => !c.archived);
+        onCourses(courses);
+      },
+      err => {
+        onError?.(err);
+      }
     );
   } catch (err) {
     onError?.(err);

@@ -36,11 +36,11 @@ import {
   onSnapshot
 } from 'firebase/firestore';
 import { auth, db, getOrInitAuth } from '../firebase.js';
-import { ALLOWED_ROLES, resolvePrivileges, isOwnerEmail } from './rolePrivileges.js';
+import { ALLOWED_ROLES, resolvePrivileges, isOwnerEmail, canEnrolInCourses } from './rolePrivileges.js';
 import { listMyEnrolments } from './courseEnrollmentService.js';
 import { readEnv } from './env.js';
 
-export { ALLOWED_ROLES, resolvePrivileges };
+export { ALLOWED_ROLES, resolvePrivileges, canEnrolInCourses };
 
 export const OAUTH_CLIENT_ID =
   readEnv(() => import.meta.env.VITE_GOOGLE_OAUTH_CLIENT_ID, 'VITE_GOOGLE_OAUTH_CLIENT_ID') ||
@@ -80,10 +80,7 @@ export async function syncUserToFirestore(user) {
       // Newly registered user: assign default classification and role "supporter"
       // If user is the Firebase project owner/admin (support@aifoundation.net.au), automatically grant superadmin
       const isFirebaseOwner = isOwnerEmail(user.email);
-      // Check if user was already enrolled in any course prior to registering
-      const priorEnrolments = user.email ? await listMyEnrolments(user.email).catch(() => []) : [];
-      const hasPriorEnrolments = priorEnrolments.length > 0;
-      const initialRole = isFirebaseOwner ? 'superadmin' : (hasPriorEnrolments ? 'student' : 'supporter');
+      const initialRole = isFirebaseOwner ? 'superadmin' : 'supporter';
       const newProfile = {
         uid: user.uid,
         email: user.email || '',
@@ -100,6 +97,21 @@ export async function syncUserToFirestore(user) {
         lms_tags: ['lms']
       };
       await setDoc(userRef, newProfile);
+
+      // If user was already added to a course prior to first login by an authorized educator/admin, upgrade to student
+      if (!isFirebaseOwner && user.email) {
+        const priorEnrolments = await listMyEnrolments(user.email).catch(() => []);
+        if (priorEnrolments.length > 0) {
+          await updateDoc(userRef, {
+            role: 'student',
+            classification: 'student',
+            role_updated_at: nowIso,
+            role_updated_by: 'system_enrolment'
+          }).catch(err => console.warn('First login enrolment promotion note:', err));
+          newProfile.role = 'student';
+          newProfile.classification = 'student';
+        }
+      }
       return newProfile;
     } else {
       // Existing user: increment login_count and update last_login_at without overwriting role unless supporter with enrolments

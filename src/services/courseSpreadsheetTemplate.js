@@ -10,7 +10,7 @@
 import {
   DEFAULT_RUBRIC_LEVEL_LABELS,
   LINK_BLOCK_METADATA_KEYS,
-  moveUnitAssessmentsToCourse,
+  upgradeCourseStructure,
   createQuizQuestion,
   generateEntityId
 } from '../types/courseBuilderTypes.js';
@@ -89,18 +89,17 @@ function instructionsSheet() {
   add('Template version', SPREADSHEET_TEMPLATE_VERSION, XLSX_STYLE.LABEL);
 
   section('How to use');
-  add('1. Fill in', 'Work through the tabs: Course → Learning Outcomes → Units → Lessons → Content Blocks → Quiz Questions → Assessments → Rubrics. Every tab is optional — leave out anything you do not need.', XLSX_STYLE.LABEL);
-  add('2. Link rows', 'Rows on the Lessons, Content Blocks and Quiz Questions tabs belong to a unit through its Unit Code (or unit number); Content Blocks and Quiz Questions also give their Lesson #. Assessments belong to the whole course (Covers Unit is optional), and Rubrics give their Assessment #. A blank Unit Code, Lesson #, Quiz Title or Assessment # repeats the value from the row above.', XLSX_STYLE.LABEL);
+  add('1. Fill in', 'Work through the tabs: Course → Learning Outcomes → Units → Content Blocks → Quiz Questions → Assessments → Rubrics. Every tab is optional — leave out anything you do not need.', XLSX_STYLE.LABEL);
+  add('2. Link rows', 'Rows on the Content Blocks and Quiz Questions tabs belong to a unit through its Unit Code (or unit number). Assessments belong to the whole course (Covers Unit is optional), and Rubrics give their Assessment #. A blank Unit Code, Quiz Title or Assessment # repeats the value from the row above.', XLSX_STYLE.LABEL);
   add('3. Upload', 'Course Builder → 📊 Spreadsheet → upload the file → Import into Course Builder (free), or ✨ Build out with Gemini AI. ✨ AI Assist → Spreadsheets accepts the same file.', XLSX_STYLE.LABEL);
   add('Google Sheets', 'Use File → Import to open this file in Google Sheets. To upload it back, use File → Download → Microsoft Excel (.xlsx), which keeps every tab — or download each tab as .csv and upload them all together.', XLSX_STYLE.LABEL);
 
   section('Tabs');
   add(SHEET.course, 'One value per row: title, code, level, category, dates, description, prerequisites, curriculum standards.', XLSX_STYLE.LABEL);
   add(SHEET.outcomes, 'One course learning outcome per row — add as many rows as you need.', XLSX_STYLE.LABEL);
-  add(SHEET.units, 'One row per unit of study / unit of competency.', XLSX_STYLE.LABEL);
-  add(SHEET.lessons, 'One row per lesson: Unit Code, Lesson #, title and duration, plus the lesson\'s links in the YouTube Video Links, Google Drive Resource Links and Gemini Notebook Links columns — as many as you need, one per line.', XLSX_STYLE.LABEL);
-  add(SHEET.blocks, 'One row per block inside a lesson. Types: Content Description, Teacher Guide (hidden from students), YouTube Video, Google Drive Resource, Gemini Notebook, Quiz & Questions. Text goes in the Text column and links in the Link URL column. A Quiz & Questions row places a quiz between blocks (its Text is the quiz instructions). Add as many rows of each type as you need.', XLSX_STYLE.LABEL);
-  add(SHEET.quizzes, 'Unit quizzes: one row per question. Rows with the same Unit Code, Lesson # and Quiz Title form one quiz. Multiple choice, True / False and Short answer questions are marked automatically; Open questions are marked by the teacher (in bulk, in 📥 Submissions → ❓ Unit quizzes). A quiz without a Content Blocks row is added at the end of its lesson.', XLSX_STYLE.LABEL);
+  add(SHEET.units, 'One row per unit of study / unit of competency: Unit Code, Unit Title, Nominal Hours, Performance Criteria, Unit Learning Outcomes (one per line), Unit Content (the lesson paragraphs students read) and the unit\'s links in the YouTube Video Links, Google Drive Resource Links and Gemini Notebook Links columns — as many as you need, one per line.', XLSX_STYLE.LABEL);
+  add(SHEET.blocks, 'One row per block in a unit, in order. Types: Unit Description, Teacher Guide (hidden from students), YouTube Video, Google Drive Resource, Gemini Notebook, Quiz & Questions. Text goes in the Text column and links in the Link URL column. A Quiz & Questions row places a quiz between blocks (its Text is the quiz instructions). Add as many rows of each type as you need.', XLSX_STYLE.LABEL);
+  add(SHEET.quizzes, 'Unit quizzes: one row per question. Rows with the same Unit Code and Quiz Title form one quiz. Multiple choice, True / False and Short answer questions are marked automatically; Open questions are marked by the teacher (in bulk, in 📥 Submissions → ❓ Unit quizzes). A quiz without a Content Blocks row is added at the end of its unit.', XLSX_STYLE.LABEL);
   add(SHEET.assessments, 'The course\'s one Assessments & Rubrics list: one row per task with its type, weighting (share of the course grade — all tasks should add up to 100), due date, task brief, an optional external submission link and, optionally, the unit it covers.', XLSX_STYLE.LABEL);
   add(SHEET.rubrics, 'The Assessment Rubric Matrix: one row per criterion with its Assessment #, Weight % and a descriptor for each performance level — add as many criteria as you need. The level headings (e.g. "Novice (0-49%)") become the level names: rename them, or add or remove level columns (2–10 levels).', XLSX_STYLE.LABEL);
 
@@ -108,14 +107,15 @@ function instructionsSheet() {
   add('Dates', 'YYYY-MM-DD, for example 2026-03-02.', XLSX_STYLE.LABEL);
   add('Weights', 'Type 40 or 40%. Criterion weights in each rubric should add up to 100.', XLSX_STYLE.LABEL);
   add('Links', 'Links must start with https://. Share Google Drive files as "Anyone with the link can view". Gemini Notebook blocks take a notebook share link, e.g. https://notebooklm.google.com/notebook/….', XLSX_STYLE.LABEL);
-  add('More than one link', 'Put as many links as you need in one cell, one per line (Alt+Enter in Excel, Ctrl+Enter in Google Sheets). Give a link a title with "Title | link", e.g. Intro video | https://www.youtube.com/watch?v=VIDEO_ID. Each link becomes its own block. You can also repeat the Lesson # on another row to list more links.', XLSX_STYLE.LABEL);
-  add('Link order', 'Links from the Lessons tab are added after the lesson\'s Content Blocks rows: YouTube videos first, then Google Drive resources, then Gemini Notebooks. To place a link between other blocks, add it as a row on the Content Blocks tab instead.', XLSX_STYLE.LABEL);
+  add('More than one link', 'Put as many links as you need in one cell, one per line (Alt+Enter in Excel, Ctrl+Enter in Google Sheets). Give a link a title with "Title | link", e.g. Intro video | https://www.youtube.com/watch?v=VIDEO_ID. Each link becomes its own block. A Units row with only links adds them to the unit above.', XLSX_STYLE.LABEL);
+  add('Link order', 'Links from the Units tab are added after the unit\'s Content Blocks rows: YouTube videos first, then Google Drive resources, then Gemini Notebooks. To place a link between other blocks, add it as a row on the Content Blocks tab instead.', XLSX_STYLE.LABEL);
+  add('Older workbooks', 'Workbooks from earlier versions (with a Lessons tab and Lesson # columns) still import: each unit keeps all its blocks in order, and the lesson titles become the unit\'s topics.', XLSX_STYLE.LABEL);
   add('Quiz answers', 'Multiple choice: put each option on its own line (A. …, B. …) and write the correct letter(s) in Correct Answer, e.g. B or A, C. True / False: True or False. Short answer: the accepted answers, one per line (not case-sensitive). Correct answers and model answers are kept for teachers only — students never see them.', XLSX_STYLE.LABEL);
   add('Different level names', 'To give one rubric its own level names, repeat the Rubrics header row (Assessment #, Criterion, Weight %, …) directly above that rubric with its own level headings.', XLSX_STYLE.LABEL);
   add('File attachments', 'Direct file attachments are coming soon. Use a Google Drive Resource block for files for now.', XLSX_STYLE.LABEL);
 
   section('✨ AI Assist (Gemini)');
-  add('Your values win', 'Gemini keeps every value you typed exactly as written and only fills blank cells: lesson content, teacher guides, assessment briefs, rubric descriptors and more.', XLSX_STYLE.LABEL);
+  add('Your values win', 'Gemini keeps every value you typed exactly as written and only fills blank cells: unit content, teacher guides, quizzes, assessment briefs, rubric descriptors and more.', XLSX_STYLE.LABEL);
   add('No invented links', 'Gemini never invents links. It only uses links that are already in your spreadsheet.', XLSX_STYLE.LABEL);
   add('Fee', 'Importing without AI is free. The AI Assist fee is charged only after Gemini returns content.', XLSX_STYLE.LABEL);
 
@@ -123,7 +123,7 @@ function instructionsSheet() {
   for (const field of COURSE_FIELDS.filter(f => f.inTemplate !== false)) {
     add(`${SHEET.course} › ${field.header}`, hintFor(field), XLSX_STYLE.LABEL);
   }
-  for (const key of ['outcomes', 'units', 'lessons', 'blocks', 'quizzes', 'assessments', 'rubrics']) {
+  for (const key of ['outcomes', 'units', 'blocks', 'quizzes', 'assessments', 'rubrics']) {
     const table = TABLES[key];
     for (const column of table.columns.filter(c => c.inTemplate !== false)) {
       add(`${table.sheet} › ${column.header}`, hintFor(column), XLSX_STYLE.LABEL);
@@ -196,8 +196,8 @@ function blockContent(block) {
   return (metaKey && block.metadata?.[metaKey]) || block.content || '';
 }
 
-const LESSON_LINK_COLUMNS = TABLES.lessons.columns.filter(c => c.linkType);
-const LINK_COLUMN_RANK = new Map(LESSON_LINK_COLUMNS.map((c, i) => [c.linkType, i]));
+const LINK_LIST_COLUMNS = TABLES.units.columns.filter(c => c.linkType);
+const LINK_COLUMN_RANK = new Map(LINK_LIST_COLUMNS.map((c, i) => [c.linkType, i]));
 
 /** True when a link block can be written as one "Title | link" line and reads back identically. */
 function fitsLinkColumn(block) {
@@ -209,11 +209,11 @@ function fitsLinkColumn(block) {
 }
 
 /**
- * Index where a lesson's trailing link blocks start: the tail that the Lessons-tab link columns can
+ * Index where a unit's trailing link blocks start: the tail that the Units-tab link columns can
  * hold (videos, then Drive resources, then notebooks — the order the importer adds them back in).
  * Blocks before it go on the Content Blocks tab, so an export re-imports with the same block order.
  */
-function lessonLinkTailStart(blocks) {
+function linkTailStart(blocks) {
   let start = blocks.length;
   let rank = Infinity;
   while (start > 0) {
@@ -226,11 +226,10 @@ function lessonLinkTailStart(blocks) {
   return start;
 }
 
-function contentBlockRow(ref, lessonNumber, blockNumber, block) {
+function contentBlockRow(ref, blockNumber, block) {
   const isLink = Boolean(LINK_BLOCK_METADATA_KEYS[block.type]);
   return [
     ref,
-    lessonNumber,
     blockNumber,
     blockTypeLabel(block.type),
     block.title || '',
@@ -266,7 +265,7 @@ function quizReferences(blocks) {
 }
 
 /** One Quiz Questions row per question (answer keys included: this is the teacher's workbook). */
-function quizQuestionRows(unitRef, lessonNumber, quizRef, block) {
+function quizQuestionRows(unitRef, quizRef, block) {
   const questions = Array.isArray(block.quiz?.questions) ? block.quiz.questions : [];
   return questions.filter(q => q && typeof q === 'object').map((q, i) => {
     const options = (Array.isArray(q.options) ? q.options : []).filter(o => String(o?.text || '').trim());
@@ -277,7 +276,6 @@ function quizQuestionRows(unitRef, lessonNumber, quizRef, block) {
     else if (q.type === 'short_answer') correct = (q.acceptedAnswers || []).join('\n');
     return [
       unitRef,
-      lessonNumber,
       quizRef,
       i + 1,
       QUESTION_TYPE_OPTIONS.find(t => t.type === q.type)?.label || 'Open question',
@@ -295,45 +293,38 @@ function quizQuestionRows(unitRef, lessonNumber, quizRef, block) {
  * without one, the tabs contain headers only.
  */
 export function buildCourseWorkbookSheets(course = null) {
-  const structured = course ? moveUnitAssessmentsToCourse(course) : null;
+  const structured = course ? upgradeCourseStructure(course) : null;
   const units = Array.isArray(structured?.units) ? structured.units : [];
   const refs = unitReferences(units);
   const unitRefById = new Map(units.map((u, i) => [u?.id, refs[i]]));
 
   const outcomeRows = (structured?.learningOutcomes || []).filter(Boolean).map((o, i) => [i + 1, o]);
-  const unitRows = units.map((u, i) => [
-    i + 1,
-    u.unitCode || '',
-    u.unitTitle || '',
-    Number(u.nominalHours) || '',
-    u.description || '',
-    (u.learningOutcomes || []).filter(Boolean).join('\n')
-  ]);
-  const lessonRows = [];
+  const unitRows = [];
   const blockRows = [];
   const quizRows = [];
   units.forEach((unit, uIdx) => {
-    (unit.lessons || []).forEach((lesson, lIdx) => {
-      const blocks = (Array.isArray(lesson.blocks) ? lesson.blocks : []).filter(b => b && typeof b === 'object');
-      const tailStart = lessonLinkTailStart(blocks);
-      const tail = blocks.slice(tailStart);
-      lessonRows.push([
-        refs[uIdx],
-        lIdx + 1,
-        lesson.title || '',
-        Number(lesson.estimatedMinutes) || '',
-        // One cell per link type, one "Title | link" per line.
-        ...LESSON_LINK_COLUMNS.map(column => tail
-          .filter(b => b.type === column.linkType)
-          .map(b => formatLinkLine(String(b.title || '').trim(), blockContent(b)))
-          .join('\n'))
-      ]);
-      blocks.slice(0, tailStart).forEach((block, bIdx) => {
-        blockRows.push(contentBlockRow(refs[uIdx], lIdx + 1, bIdx + 1, block));
-      });
-      const quizRefs = quizReferences(blocks);
-      for (const [block, ref] of quizRefs) quizRows.push(...quizQuestionRows(refs[uIdx], lIdx + 1, ref, block));
+    const blocks = (Array.isArray(unit.blocks) ? unit.blocks : []).filter(b => b && typeof b === 'object');
+    const tailStart = linkTailStart(blocks);
+    const tail = blocks.slice(tailStart);
+    unitRows.push([
+      uIdx + 1,
+      unit.unitCode || '',
+      unit.unitTitle || '',
+      Number(unit.nominalHours) || '',
+      unit.description || '',
+      (unit.learningOutcomes || []).filter(Boolean).join('\n'),
+      unit.content || '',
+      // One cell per link type, one "Title | link" per line.
+      ...LINK_LIST_COLUMNS.map(column => tail
+        .filter(b => b.type === column.linkType)
+        .map(b => formatLinkLine(String(b.title || '').trim(), blockContent(b)))
+        .join('\n'))
+    ]);
+    blocks.slice(0, tailStart).forEach((block, bIdx) => {
+      blockRows.push(contentBlockRow(refs[uIdx], bIdx + 1, block));
     });
+    const quizRefs = quizReferences(blocks);
+    for (const [block, ref] of quizRefs) quizRows.push(...quizQuestionRows(refs[uIdx], ref, block));
   });
 
   // One Assessments & Rubrics list for the course; "Covers Unit" links a task to a unit (optional).
@@ -381,7 +372,6 @@ export function buildCourseWorkbookSheets(course = null) {
     courseSheet(structured),
     tableSheet('outcomes', outcomeRows),
     tableSheet('units', unitRows),
-    tableSheet('lessons', lessonRows),
     tableSheet('blocks', blockRows),
     tableSheet('quizzes', quizRows),
     tableSheet('assessments', assessmentRows),
@@ -488,43 +478,31 @@ export function createExampleCourse() {
         nominalHours: 40,
         description: 'Introduces sustainability principles and uses systems thinking to analyse how workplace decisions affect people, planet and profit.',
         learningOutcomes: ['Explain the triple bottom line', 'Map a workplace system and its feedback loops'],
-        lessons: [
+        content: 'What is sustainability?\nSustainability means meeting today\'s needs without compromising the ability of future generations to meet theirs. Businesses apply it through the triple bottom line: environmental, social and economic performance.\n\nSystems thinking at work\nSystems thinking looks at how parts of an organisation interact. Map inputs, processes, outputs and feedback loops to find leverage points where small changes create large improvements.',
+        blocks: [
+          { type: 'teacher_guide', title: 'Facilitation notes', content: 'Open with a 10-minute discussion: "What does a sustainable business look like?" Capture answers under People / Planet / Profit. Common misconception: sustainability is only about the environment.' },
+          { type: 'text_description', title: '', content: 'Key terms\nTriple bottom line: measuring environmental, social and economic performance together.\nLeverage point: a place in a system where a small change makes a big difference.' },
           {
-            title: 'What is sustainability?',
-            estimatedMinutes: 60,
-            blocks: [
-              { type: 'text_description', title: 'Key ideas', content: 'Sustainability means meeting today\'s needs without compromising the ability of future generations to meet theirs. Businesses apply it through the triple bottom line: environmental, social and economic performance.' },
-              { type: 'teacher_guide', title: 'Facilitation notes', content: 'Open with a 10-minute discussion: "What does a sustainable business look like?" Capture answers under People / Planet / Profit. Common misconception: sustainability is only about the environment.' },
-              {
-                type: 'quiz',
-                title: 'Check your understanding',
-                content: 'Answer every question. You can resubmit until your teacher releases results.',
-                quiz: {
-                  questions: [
-                    choiceQuestion('Which of these is NOT part of the triple bottom line?', ['People', 'Planet', 'Profit', 'Politics'], [3]),
-                    trueFalseQuestion('Sustainability is only about the environment.', false),
-                    shortAnswerQuestion('What does TBL stand for?', ['Triple bottom line', 'The triple bottom line']),
-                    openQuestion('Describe one change your workplace could make to reduce its environmental impact.', 'Names a specific practice (e.g. switching to LED lighting), explains its environmental benefit and says how the result would be measured.')
-                  ]
-                }
-              },
-              { type: 'youtube_video', title: 'Introductory video', content: 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_1' },
-              { type: 'youtube_video', title: 'The triple bottom line explained', content: 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_2' },
-              { type: 'google_drive_link', title: 'Lesson slides', content: 'https://docs.google.com/presentation/d/REPLACE_WITH_SLIDES_ID/view' },
-              { type: 'notebook_link', title: 'Study notebook', content: 'https://notebooklm.google.com/notebook/REPLACE_WITH_NOTEBOOK_ID_1' }
-            ]
+            type: 'quiz',
+            title: 'Check your understanding',
+            content: 'Answer every question. You can resubmit until your teacher releases results.',
+            quiz: {
+              questions: [
+                choiceQuestion('Which of these is NOT part of the triple bottom line?', ['People', 'Planet', 'Profit', 'Politics'], [3]),
+                trueFalseQuestion('Sustainability is only about the environment.', false),
+                shortAnswerQuestion('What does TBL stand for?', ['Triple bottom line', 'The triple bottom line']),
+                openQuestion('Describe one change your workplace could make to reduce its environmental impact.', 'Names a specific practice (e.g. switching to LED lighting), explains its environmental benefit and says how the result would be measured.')
+              ]
+            }
           },
-          {
-            title: 'Systems thinking at work',
-            estimatedMinutes: 90,
-            blocks: [
-              { type: 'text_description', title: 'Seeing the whole system', content: 'Systems thinking looks at how parts of an organisation interact. Map inputs, processes, outputs and feedback loops to find leverage points where small changes create large improvements.' },
-              { type: 'google_drive_link', title: 'System mapping worksheet', content: 'https://drive.google.com/drive/folders/REPLACE_WITH_FOLDER_ID' },
-              { type: 'google_drive_link', title: 'Case study pack', content: 'https://drive.google.com/file/d/REPLACE_WITH_FILE_ID/view' },
-              { type: 'notebook_link', title: 'Systems thinking notebook', content: 'https://notebooklm.google.com/notebook/REPLACE_WITH_NOTEBOOK_ID_2' },
-              { type: 'notebook_link', title: 'Revision notebook', content: 'https://notebooklm.google.com/notebook/REPLACE_WITH_NOTEBOOK_ID_3' }
-            ]
-          }
+          { type: 'youtube_video', title: 'Introductory video', content: 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_1' },
+          { type: 'youtube_video', title: 'The triple bottom line explained', content: 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_2' },
+          { type: 'google_drive_link', title: 'Unit slides', content: 'https://docs.google.com/presentation/d/REPLACE_WITH_SLIDES_ID/view' },
+          { type: 'google_drive_link', title: 'System mapping worksheet', content: 'https://drive.google.com/drive/folders/REPLACE_WITH_FOLDER_ID' },
+          { type: 'google_drive_link', title: 'Case study pack', content: 'https://drive.google.com/file/d/REPLACE_WITH_FILE_ID/view' },
+          { type: 'notebook_link', title: 'Study notebook', content: 'https://notebooklm.google.com/notebook/REPLACE_WITH_NOTEBOOK_ID_1' },
+          { type: 'notebook_link', title: 'Systems thinking notebook', content: 'https://notebooklm.google.com/notebook/REPLACE_WITH_NOTEBOOK_ID_2' },
+          { type: 'notebook_link', title: 'Revision notebook', content: 'https://notebooklm.google.com/notebook/REPLACE_WITH_NOTEBOOK_ID_3' }
         ]
       },
       {
@@ -533,36 +511,23 @@ export function createExampleCourse() {
         nominalHours: 50,
         description: 'Measures carbon and resource footprints and reports performance using ESG frameworks.',
         learningOutcomes: ['Calculate a basic carbon footprint', 'Prepare an ESG summary report'],
-        lessons: [
+        content: 'Carbon footprint basics\nScope 1 covers direct emissions, Scope 2 purchased energy, and Scope 3 the wider value chain. Start with the data you can measure reliably, then expand.\n\nChoosing an ESG reporting framework\nCompare GRI, ISSB (IFRS S1/S2) and the Australian Sustainability Reporting Standards. Choose based on audience, mandatory requirements and data maturity.',
+        blocks: [
+          // A video between two blocks goes on the Content Blocks tab (Link URL column).
+          { type: 'youtube_video', title: 'Emission scopes in 5 minutes', content: 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_3' },
+          { type: 'teacher_guide', title: 'Activity', content: 'Give each group one month of utility bills and have them calculate Scope 2 emissions using the current emission factors.' },
           {
-            title: 'Carbon footprint basics',
-            estimatedMinutes: 60,
-            blocks: [
-              { type: 'text_description', title: 'Scopes 1, 2 and 3', content: 'Scope 1 covers direct emissions, Scope 2 purchased energy, and Scope 3 the wider value chain. Start with the data you can measure reliably, then expand.' },
-              // A video between two blocks goes on the Content Blocks tab (Link URL column).
-              { type: 'youtube_video', title: 'Emission scopes in 5 minutes', content: 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_3' },
-              { type: 'teacher_guide', title: 'Activity', content: 'Give each group one month of utility bills and have them calculate Scope 2 emissions using the current emission factors.' },
-              {
-                type: 'quiz',
-                title: 'Emission scopes quiz',
-                content: '',
-                quiz: {
-                  questions: [
-                    choiceQuestion('Which of these are Scope 1 emissions? Select all that apply.', ['Fuel used in company vehicles', 'Purchased electricity', 'Gas burned in on-site boilers', 'Employee commuting'], [0, 2], 2),
-                    trueFalseQuestion('Scope 3 covers the wider value chain.', true)
-                  ]
-                }
-              },
-              { type: 'google_drive_link', title: 'Utility bill dataset', content: 'https://docs.google.com/spreadsheets/d/REPLACE_WITH_SHEET_ID/view' }
-            ]
+            type: 'quiz',
+            title: 'Emission scopes quiz',
+            content: '',
+            quiz: {
+              questions: [
+                choiceQuestion('Which of these are Scope 1 emissions? Select all that apply.', ['Fuel used in company vehicles', 'Purchased electricity', 'Gas burned in on-site boilers', 'Employee commuting'], [0, 2], 2),
+                trueFalseQuestion('Scope 3 covers the wider value chain.', true)
+              ]
+            }
           },
-          {
-            title: 'ESG reporting frameworks',
-            estimatedMinutes: 60,
-            blocks: [
-              { type: 'text_description', title: 'Choosing a framework', content: 'Compare GRI, ISSB (IFRS S1/S2) and the Australian Sustainability Reporting Standards. Choose based on audience, mandatory requirements and data maturity.' }
-            ]
-          }
+          { type: 'google_drive_link', title: 'Utility bill dataset', content: 'https://docs.google.com/spreadsheets/d/REPLACE_WITH_SHEET_ID/view' }
         ]
       }
     ],

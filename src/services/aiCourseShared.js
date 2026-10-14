@@ -19,7 +19,8 @@ import {
   MAX_RUBRIC_LEVELS,
   QUIZ_LIMITS,
   createQuizQuestion,
-  generateEntityId
+  generateEntityId,
+  UNIT_LIMITS
 } from '../types/courseBuilderTypes.js';
 import { isHttpUrl, extractUrls } from './courseSpreadsheetSchema.js';
 
@@ -33,11 +34,11 @@ const MAX_SKILL_CHARS = 12000;
 export function buildStandardsGuidance(curriculumStandards, targetAqfLevel, skillTexts) {
   const routing = resolveActiveStandards(curriculumStandards, targetAqfLevel);
   if (routing.useBloomsFallback) {
-    return "Curriculum Standards: none apply at this level. Design outcomes, lessons, and rubrics using standard Bloom's Taxonomy aligned to the target level.";
+    return "Curriculum Standards: none apply at this level. Design outcomes, unit content, and rubrics using standard Bloom's Taxonomy aligned to the target level.";
   }
 
   const sections = [
-    `Curriculum Standards: the teacher selected ${routing.active.map(s => s.label).join(', ')}. Apply every rule in the following skill specification(s) to the course description, unit outcomes, all lesson blocks, assessment briefs, and rubrics. Where specifications overlap, satisfy all of them; where they conflict, prefer the first listed.`
+    `Curriculum Standards: the teacher selected ${routing.active.map(s => s.label).join(', ')}. Apply every rule in the following skill specification(s) to the course description, unit outcomes, unit content and blocks, assessment briefs, and rubrics. Where specifications overlap, satisfy all of them; where they conflict, prefer the first listed.`
   ];
   for (const std of routing.active) {
     const text = String(skillTexts?.[std.id] || '').slice(0, MAX_SKILL_CHARS);
@@ -258,22 +259,21 @@ export function sanitizeAiAssessments(raw, { isUrlAllowed = () => false } = {}) 
   return list(raw).slice(0, 12).map(a => sanitizeAiAssessment(a, isUrlAllowed)).filter(Boolean);
 }
 
-/** Gemini unit JSON -> importer unit draft (lessons & blocks only; blanks stay blank). */
+/**
+ * Gemini unit JSON -> importer unit draft: unit fields, Unit Content and blocks (blanks stay blank).
+ * A reply that still nests blocks in lessons is flattened (blocks kept in order).
+ */
 export function sanitizeAiUnit(raw, { isUrlAllowed = () => false } = {}) {
   if (!raw || typeof raw !== 'object') return null;
+  const fromLessons = list(raw.lessons).slice(0, 40).flatMap(lesson => (lesson && typeof lesson === 'object' ? list(lesson.blocks) : []));
   return {
     unitCode: str(raw.unitCode, 100),
     unitTitle: str(raw.unitTitle, 300),
     nominalHours: int(raw.nominalHours, 1, 2000),
     description: stripUnapprovedUrls(str(raw.description), isUrlAllowed),
     learningOutcomes: stringList(raw.learningOutcomes, 20, 2000),
-    lessons: list(raw.lessons).slice(0, 40).map(lesson => {
-      if (!lesson || typeof lesson !== 'object') return null;
-      const blocks = list(lesson.blocks).slice(0, 25).map(b => sanitizeAiBlock(b, isUrlAllowed)).filter(Boolean);
-      const title = str(lesson.title, 300);
-      if (!title && !blocks.length) return null;
-      return { title, estimatedMinutes: int(lesson.estimatedMinutes, 1, 1440), blocks };
-    }).filter(Boolean)
+    content: stripUnapprovedUrls(str(raw.content, UNIT_LIMITS.content), isUrlAllowed),
+    blocks: [...list(raw.blocks), ...fromLessons].slice(0, 60).map(b => sanitizeAiBlock(b, isUrlAllowed)).filter(Boolean)
   };
 }
 
@@ -321,11 +321,6 @@ const BLOCK_SCHEMA = {
   properties: { type: { type: 'string', enum: Array.from(BLOCK_TYPES) }, title: STRING, content: STRING, questions: { type: 'array', items: QUESTION_SCHEMA } },
   required: ['type', 'title', 'content']
 };
-const LESSON_SCHEMA = {
-  type: 'object',
-  properties: { title: STRING, estimatedMinutes: { type: 'integer' }, blocks: { type: 'array', items: BLOCK_SCHEMA } },
-  required: ['title', 'estimatedMinutes', 'blocks']
-};
 const ASSESSMENT_SCHEMA = {
   type: 'object',
   properties: {
@@ -349,9 +344,10 @@ export const UNIT_RESPONSE_SCHEMA = {
     nominalHours: { type: 'integer' },
     description: STRING,
     learningOutcomes: STRING_LIST,
-    lessons: { type: 'array', items: LESSON_SCHEMA }
+    content: STRING,
+    blocks: { type: 'array', items: BLOCK_SCHEMA }
   },
-  required: ['unitCode', 'unitTitle', 'nominalHours', 'description', 'learningOutcomes', 'lessons']
+  required: ['unitCode', 'unitTitle', 'nominalHours', 'description', 'learningOutcomes', 'content', 'blocks']
 };
 
 export const ASSESSMENTS_RESPONSE_SCHEMA = {

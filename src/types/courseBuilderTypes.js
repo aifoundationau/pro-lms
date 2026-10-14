@@ -89,9 +89,9 @@ export const AQF_LEVELS = [
 export const CONTENT_BLOCK_TYPES = [
   {
     type: 'text_description',
-    label: 'Content Description',
+    label: 'Unit Description',
     icon: '📝',
-    description: 'Rich explanatory text, lesson overview, and markdown instructional notes.'
+    description: 'Unit description, markdown instructional content, core theory, or student notes.'
   },
   {
     type: 'teacher_guide',
@@ -220,10 +220,51 @@ export function defaultLevelPoints(count) {
   return Array.from({ length: n }, (_, i) => Math.round(((i + 1) / n) * 100));
 }
 
+/** Sample rubric for formative (practice, feedback-first) tasks. */
+function formativeSampleRubric() {
+  return [
+    {
+      id: generateEntityId('rubric'),
+      criterionTitle: 'Understanding of Key Concepts',
+      weightPercentage: 40,
+      levels: [
+        { label: 'Novice (0-49%)', points: 40, descriptor: 'Identifies few key concepts; needs guidance to explain them.' },
+        { label: 'Competent (50-74%)', points: 70, descriptor: 'Explains the main concepts accurately in their own words.' },
+        { label: 'Proficient (75-89%)', points: 85, descriptor: 'Explains concepts clearly and links them to relevant examples.' },
+        { label: 'Advanced (90-100%)', points: 100, descriptor: 'Explains concepts insightfully and connects them across topics.' }
+      ]
+    },
+    {
+      id: generateEntityId('rubric'),
+      criterionTitle: 'Application in Practice Activities',
+      weightPercentage: 40,
+      levels: [
+        { label: 'Novice (0-49%)', points: 40, descriptor: 'Attempts the activity, but key steps are missing or incorrect.' },
+        { label: 'Competent (50-74%)', points: 70, descriptor: 'Completes the activity with mostly correct steps.' },
+        { label: 'Proficient (75-89%)', points: 85, descriptor: 'Completes the activity accurately and explains the approach taken.' },
+        { label: 'Advanced (90-100%)', points: 100, descriptor: 'Completes the activity independently and suggests improvements.' }
+      ]
+    },
+    {
+      id: generateEntityId('rubric'),
+      criterionTitle: 'Reflection & Next Steps',
+      weightPercentage: 20,
+      levels: [
+        { label: 'Novice (0-49%)', points: 40, descriptor: 'Little reflection on strengths or areas to improve.' },
+        { label: 'Competent (50-74%)', points: 70, descriptor: 'Identifies one strength and one area to improve.' },
+        { label: 'Proficient (75-89%)', points: 85, descriptor: 'Reflects clearly and sets specific improvement goals.' },
+        { label: 'Advanced (90-100%)', points: 100, descriptor: 'Reflects critically and plans targeted next steps from feedback.' }
+      ]
+    }
+  ];
+}
+
 /**
- * Default Rubric Matrix Criteria structure
+ * Sample Rubric Matrix for a new task: the formative sample (practice & feedback) for formative
+ * tasks, the summative sample (graded evidence) otherwise. Teachers edit it freely.
  */
-export function createDefaultRubric() {
+export function createDefaultRubric(type = 'summative') {
+  if (type === 'formative') return formativeSampleRubric();
   return [
     {
       id: generateEntityId('rubric'),
@@ -261,6 +302,19 @@ export function createDefaultRubric() {
   ];
 }
 
+function rubricShape(rubric) {
+  return JSON.stringify((Array.isArray(rubric) ? rubric : []).map(c => ({
+    criterionTitle: c?.criterionTitle,
+    weightPercentage: c?.weightPercentage,
+    levels: (Array.isArray(c?.levels) ? c.levels : []).map(l => [l?.label, l?.points, l?.descriptor])
+  })));
+}
+
+/** True when the rubric is still the untouched sample for that task type (ids ignored). */
+export function isSampleRubric(rubric, type = 'summative') {
+  return Array.isArray(rubric) && rubric.length > 0 && rubricShape(rubric) === rubricShape(createDefaultRubric(type));
+}
+
 /**
  * Creates a blank ContentBlock
  */
@@ -291,22 +345,6 @@ export function createBlankContentBlock(type = 'text_description', order = 0) {
 }
 
 /**
- * Creates a blank Lesson
- */
-export function createBlankLesson(order = 0, title = 'Lesson 1: Introduction') {
-  return {
-    id: generateEntityId('lesson'),
-    title,
-    order,
-    estimatedMinutes: 45,
-    tag: 'lms',
-    blocks: [
-      createBlankContentBlock('text_description', 0)
-    ]
-  };
-}
-
-/**
  * Creates a blank Assessment
  */
 export function createBlankAssessment(type = 'formative', title = 'Assessment Task 1') {
@@ -319,25 +357,79 @@ export function createBlankAssessment(type = 'formative', title = 'Assessment Ta
     nominalWeight: type === 'summative' ? 50 : 20,
     externalSubmissionLinks: [],
     tag: 'lms',
-    rubric: createDefaultRubric()
+    // Every new task starts with the sample rubric for its type.
+    rubric: createDefaultRubric(type === 'summative' ? 'summative' : 'formative')
   };
 }
 
+/** Size limits for one unit (a course is stored as one Firestore document, max 1 MiB). */
+export const UNIT_LIMITS = Object.freeze({
+  content: 50000, // Unit Content: the lesson paragraphs the teacher writes
+  blocks: 150
+});
+
 /**
- * Creates a blank Unit of Competency / Study Unit
+ * Creates a blank Unit of Competency / Study Unit.
+ * A unit is: Unit Code, Unit Title, Nominal Hours, Performance Criteria (description), Unit Learning
+ * Outcomes, Unit Content (the teacher's lesson paragraphs) and its blocks. There are no lessons;
+ * assessments live once, at course level (course.assessments).
  */
-export function createBlankUnit(unitCode = 'UNIT-101', unitTitle = 'Unit 1: Fundamentals') {
+export function createBlankUnit(unitCode = '', unitTitle = '') {
   return {
     id: generateEntityId('unit'),
     unitCode,
     unitTitle,
-    nominalHours: 40,
+    nominalHours: '',
     description: '',
     learningOutcomes: [],
+    content: '',
     tag: 'lms',
-    // Units hold lessons & blocks only; assessments live once, at course level (course.assessments).
-    lessons: [createBlankLesson(0, 'Lesson 1: Core Concepts')]
+    blocks: []
   };
+}
+
+// Lesson titles that carry no information (the app's old defaults); they are not kept on flattening.
+const PLACEHOLDER_LESSON_TITLE = /^(lesson\s*\d*(\s*:\s*(introduction|core concepts|topic\s*\d+))?|new lesson|modular lesson stack)$/i;
+
+/**
+ * Upgrades a unit from the older shape (unit -> lessons -> blocks) to unit -> blocks: every lesson's
+ * blocks are kept, in order (ids unchanged, so quiz answer keys and attempts stay linked). Lesson
+ * titles the teacher wrote are kept as lines of Unit Content when that is still empty.
+ * Pure and idempotent; never mutates the input.
+ */
+export function flattenUnitLessons(unit) {
+  if (!unit || typeof unit !== 'object' || !('lessons' in unit)) return unit;
+  const { lessons, ...rest } = unit;
+  const lessonList = Array.isArray(lessons) ? lessons.filter(l => l && typeof l === 'object') : [];
+  const existing = Array.isArray(rest.blocks) ? rest.blocks : [];
+  const fromLessons = lessonList.flatMap(l => (Array.isArray(l.blocks) ? l.blocks : []));
+  const blocks = [...existing, ...fromLessons]
+    .filter(b => b && typeof b === 'object')
+    .map((b, i) => (b.order === i ? b : { ...b, order: i }));
+  const titles = lessonTopicTitles(rest.unitTitle, lessonList);
+  const content = String(rest.content || '').trim() ? rest.content : titles.join('\n');
+  return { ...rest, content, blocks };
+}
+
+/** The lesson titles worth keeping as topics (not blank, not an old default, not the unit title). */
+export function lessonTopicTitles(unitTitle, lessons) {
+  const unitKey = String(unitTitle || '').trim().toLowerCase();
+  return (Array.isArray(lessons) ? lessons : [])
+    .map(l => String(l?.title || '').trim())
+    .filter(t => t && !PLACEHOLDER_LESSON_TITLE.test(t) && t.toLowerCase() !== unitKey);
+}
+
+/**
+ * Brings any course (stored, imported, copied or AI-built) to the current structure: units hold
+ * their content and blocks (no lessons) and the course has one Assessments & Rubrics list.
+ * Pure and idempotent: returns the same object when nothing needs to change.
+ */
+export function upgradeCourseStructure(course) {
+  if (!course || typeof course !== 'object') return course;
+  const units = Array.isArray(course.units) ? course.units : null;
+  const needsFlatten = Boolean(units && units.some(u => u && typeof u === 'object' && 'lessons' in u));
+  const flat = needsFlatten ? { ...course, units: units.map(flattenUnitLessons) } : course;
+  return moveUnitAssessmentsToCourse(flat);
 }
 
 /**
@@ -400,9 +492,9 @@ export function createBlankCourse(authorId = 'anonymous', authorName = 'Educator
     ],
     tag: 'lms',
     tags: ['lms', 'Draft', 'OzEdu', 'AQF'],
-    units: [createBlankUnit('UNIT-101', 'Unit 1: Foundation Knowledge')],
-    // The course's one Assessments & Rubrics section.
-    assessments: [createBlankAssessment('formative', 'Knowledge Check 1')],
+    units: [], // no default units: the teacher clicks + Add Unit to start
+    // The course's one Assessments & Rubrics section: empty — the teacher adds every task.
+    assessments: [],
     createdAt: Date.now(),
     updatedAt: Date.now()
   };

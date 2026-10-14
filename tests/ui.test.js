@@ -126,7 +126,7 @@ const buttons = (scope) => Array.from(scope.querySelectorAll('button'));
 const buttonWith = (scope, text) => buttons(scope).find(b => b.textContent.includes(text));
 const textOf = (scope) => scope.textContent.replace(/\s+/g, ' ');
 
-/** Clicks every "Expand …" toggle until none are left (opening a unit reveals its lessons' toggles). */
+/** Clicks every "Expand …" toggle until none are left (opening a section reveals its units' toggles). */
 async function expandAll(scope) {
   for (let round = 0; round < 10; round++) {
     const closed = Array.from(scope.querySelectorAll('button[aria-label^="Expand "]'));
@@ -163,7 +163,7 @@ async function run() {
     // On entry every panel is collapsed and the Quick Navigator is hidden.
     assert.deepStrictEqual(Array.from(view.container.querySelectorAll('button[aria-label^="Expand "]')).map(b => b.getAttribute('aria-label')),
       ['Expand Course Specifications', 'Expand Course Assessments', 'Expand Units of Study']);
-    assert(!view.container.querySelector('#spec-title') && !view.container.querySelector('.assessment-card') && !view.container.querySelector('.lesson-card'), 'nothing open on entry');
+    assert(!view.container.querySelector('#spec-title') && !view.container.querySelector('.assessment-card') && !view.container.querySelector('.unit-editor-header'), 'nothing open on entry');
     assert(!view.container.querySelector('.builder-sidebar') && !textOf(view.container).includes('Quick Navigator'), 'Quick Navigator hidden');
     assert(view.container.querySelector('.builder-workspace-grid.no-sidebar'), 'full-width layout');
     // Collapsed panels sit tight: the page box ends just below the Units of Study panel.
@@ -193,10 +193,28 @@ async function run() {
     assert(!view.container.querySelector('#spec-title') && textOf(specs).includes('Marine Science'), 'collapsed panel shows a summary');
     await click(specs.querySelector('button[aria-label="Expand Course Specifications"]'));
     assert(view.container.querySelector('#spec-title'));
+    // Units of Study starts with no units: click "+ Add Unit" to start.
+    assert(textOf(view.container).includes('No units added yet'), 'starts with no default units');
+    await click(buttonWith(view.container.querySelector('#builder-units-panel'), '+ Add Unit'));
+    assert(textOf(view.container).includes('CRS-100-1'), 'unit code automated as Course Code + 1');
     const pcLabel = Array.from(view.container.querySelectorAll('.unit-editor-header label')).find(l => l.textContent.trim() === 'Performance Criteria');
     assert(pcLabel, 'unit box below Unit Code / Title / Nominal Hours is titled Performance Criteria');
     assert.strictEqual(document.getElementById(pcLabel.htmlFor)?.tagName, 'TEXTAREA', 'label is linked to its box');
+    // A unit: Unit Code, Unit Title, Nominal Hours, 📝 Unit Description (above Performance Criteria),
+    // Performance Criteria, Unit Learning Outcomes, Unit Content — then its blocks. No lessons.
+    const unitHeader = view.container.querySelector('.unit-editor-header');
+    assert.deepStrictEqual(Array.from(unitHeader.querySelectorAll('label')).map(l => l.textContent.trim()), [
+      'Unit Code', 'Unit Title', 'Nominal Hours', 'Unit Description', 'Performance Criteria', 'Unit Learning Outcomes (one per line)', 'Unit Content'
+    ], 'unit fields in order');
+    assert(Array.from(unitHeader.querySelectorAll('label')).every(l => l.classList.contains('unit-field-label') && !l.style.color), 'every unit label uses one style (the Unit Description colour)');
+    assert(/\.unit-field-label\s*\{[^}]*color:\s*var\(--text-secondary\)[^}]*text-transform:\s*none/.test(builderCss), 'shared colour, not capitalised');
+    for (const label of unitHeader.querySelectorAll('label[for]')) assert(document.getElementById(label.htmlFor), `${label.textContent.trim()} is linked to its box`);
+    assert(!view.container.querySelector('.lesson-card, .lessons-container, .unit-tabs-row'), 'no lesson cards or tabs');
+    assert(!/Modular Lesson Stack|Lessons & Blocks|Add Lesson/.test(textOf(view.container)), 'no lessons anywhere');
     const toolbar = view.container.querySelector('.add-block-toolbar');
+    assert.deepStrictEqual(Array.from(toolbar.querySelectorAll('.add-block-btn')).map(b => b.textContent.replace('Soon', '').trim()), [
+      '📝Unit Description', '🧑‍🏫Teacher Guide', '▶️YouTube Video', '📁Google Drive Resource', '📎Direct File Attachment', '📓Gemini Notebook', '❓Quiz & Questions'
+    ], 'Add Block offers every block type');
     const fileBtn = buttonWith(toolbar, 'Direct File Attachment');
     assert.strictEqual(fileBtn.disabled, true, 'Direct File Attachment cannot be clicked');
     const before = view.container.querySelectorAll('.content-block-item').length;
@@ -235,9 +253,24 @@ async function run() {
     const course = { ...types.createBlankCourse('t1', 'Ms T'), id: 'course_ui_quiz' };
     const view = await render(React.createElement(AQFCourseBuilder, { course, onSaveCourse: async (c) => { saved.push(c); }, onBack: () => {}, currentUser: teacher, userProfile: teacherProfile, userTokenBalance: 25 }));
     await expandAll(view.container);
-    // Units: lessons & blocks only.
-    assert.deepStrictEqual(Array.from(view.container.querySelectorAll('.unit-tabs-row .tab-btn')).map(t => t.textContent.trim()), ['📚 Lessons & Blocks (1)']);
+    // Click "+ Add Unit" to start and automate Unit Code as CRS-100-1
+    await click(buttonWith(view.container.querySelector('#builder-units-panel'), '+ Add Unit'));
+    assert(textOf(view.container).includes('CRS-100-1'), 'unit code automated as Course Code + 1');
+    // A unit holds its Unit Description, Performance Criteria, outcomes, Unit Content and blocks.
+    assert(!view.container.querySelector('.unit-tabs-row, .lesson-card'), 'no lessons');
+    const unitPanel = view.container.querySelector('[id^="unit-panel-"]');
+    const descriptionBoxes = () => Array.from(unitPanel.querySelectorAll('.unit-description-field textarea'));
+    assert.strictEqual(descriptionBoxes().length, 1, 'every unit shows a Unit Description box');
+    await type(descriptionBoxes()[0], 'Coral reefs, from polyp to ecosystem.');
+    await type(unitPanel.querySelector('textarea[id^="unit-content-"]'), 'Polyps are tiny animals.\n\nThey host algae.');
     const toolbar = view.container.querySelector('.add-block-toolbar');
+    await click(buttonWith(toolbar, 'Unit Description'));
+    assert.strictEqual(descriptionBoxes().length, 2, 'Add Block → Unit Description adds a box above Performance Criteria');
+    const pcBox = unitPanel.querySelector('textarea[id^="unit-performance-criteria-"]');
+    assert(descriptionBoxes().every(box => box.compareDocumentPosition(pcBox) & window.Node.DOCUMENT_POSITION_FOLLOWING), 'Unit Description sits above Performance Criteria');
+    assert(!unitPanel.querySelector('.blocks-stack .type-text_description'), 'not repeated in the blocks below');
+    await click(unitPanel.querySelectorAll('button[aria-label="Remove Unit Description"]')[1]);
+    assert.strictEqual(descriptionBoxes().length, 1);
     await click(buttonWith(toolbar, 'Quiz & Questions'));
     const quiz = () => view.container.querySelector('.content-block-item.type-quiz');
     assert(quiz(), 'quiz block added');
@@ -254,13 +287,31 @@ async function run() {
     await click(buttonWith(quiz(), '+ Open question'));
     await type(quiz().querySelector('textarea[aria-label="Question 4 model answer"]'), 'Mentions evidence.');
     assert(textOf(quiz()).includes('4 questions • 8 points • 3 marked automatically'), textOf(quiz()).slice(0, 200));
-    // Course-level assessments: one section reached from the sidebar.
-    assert.strictEqual(view.container.querySelectorAll('.assessment-card').length, 1, 'the blank course starts with one task');
+    // Course assessments: no default task — the teacher adds each one, and it starts with the sample
+    // rubric for its type (formative or summative).
+    assert.strictEqual(view.container.querySelectorAll('.assessment-card').length, 0, 'no default assessment (no "Knowledge Check 1")');
+    assert(textOf(view.container).includes('No assessment tasks yet'));
+    const criteriaOf = card => Array.from(card.querySelectorAll('.matrix-crit-input')).map(i => i.value);
+    await click(buttonWith(view.container.querySelector('.assessments-container'), '+ Formative Task'));
     await click(buttonWith(view.container.querySelector('.assessments-container'), '+ Summative Task'));
-    assert.strictEqual(view.container.querySelectorAll('.assessment-card').length, 2);
+    const taskCards = () => view.container.querySelectorAll('.assessment-card');
+    assert.strictEqual(taskCards().length, 2);
+    assert.deepStrictEqual(criteriaOf(taskCards()[0]), ['Understanding of Key Concepts', 'Application in Practice Activities', 'Reflection & Next Steps'], 'formative sample rubric preloaded');
+    assert.deepStrictEqual(criteriaOf(taskCards()[1]), ['Knowledge Application & Conceptual Understanding', 'Practical Execution & Evidence of Skills', 'Communication & Documentation'], 'summative sample rubric preloaded');
+    // Switching an untouched task's type swaps in the other sample; a rubric the teacher edited is kept.
+    await type(taskCards()[0].querySelector('select[aria-label="Assessment type"]'), 'summative');
+    assert.deepStrictEqual(criteriaOf(taskCards()[0]), ['Knowledge Application & Conceptual Understanding', 'Practical Execution & Evidence of Skills', 'Communication & Documentation'], 'sample follows the type');
+    await type(taskCards()[0].querySelectorAll('.matrix-crit-input')[0], 'My own criterion');
+    await type(taskCards()[0].querySelector('select[aria-label="Assessment type"]'), 'formative');
+    assert.strictEqual(criteriaOf(taskCards()[0])[0], 'My own criterion', 'an edited rubric is never replaced');
     assert(textOf(view.container).includes('should add up to 100%'), 'weighting total is checked across the course');
     await click(buttonWith(view.container, 'Save Draft'));
-    const savedQuiz = saved[0].units[0].lessons[0].blocks.find(b => b.type === 'quiz').quiz;
+    const savedUnit = saved[0].units[0];
+    assert(!('lessons' in savedUnit), 'saved without lessons');
+    assert.strictEqual(savedUnit.content, 'Polyps are tiny animals.\n\nThey host algae.', 'Unit Content saved');
+    assert.deepStrictEqual(savedUnit.blocks.map(b => b.type), ['text_description', 'quiz'], 'Unit Description first, then the quiz');
+    assert.strictEqual(savedUnit.blocks[0].content, 'Coral reefs, from polyp to ecosystem.');
+    const savedQuiz = savedUnit.blocks.find(b => b.type === 'quiz').quiz;
     const [mc, tf, sa, open] = savedQuiz.questions;
     assert.deepStrictEqual(mc.options.map(o => o.text), ['4', '6', '7', '9']);
     assert.deepStrictEqual(mc.correctOptionIds, [mc.options[2].id], 'correct option saved for the answer key');
@@ -295,7 +346,7 @@ async function run() {
     await waitFor(() => textOf(view.container).includes('3. Check and build'), 'parsed summary');
     const summary = textOf(view.container.querySelector('.ssp-summary'));
     assert(summary.includes('Diploma of Sustainable Business Practice'));
-    assert(summary.includes('2 units') && summary.includes('4 lessons') && summary.includes('10 rubric criteria'), summary);
+    assert(summary.includes('2 units') && summary.includes('15 content blocks') && summary.includes('10 rubric criteria') && !summary.includes('lessons'), summary);
     await click(buttonWith(view.container, 'Import into Course Builder (free)'));
     assert(!view.container.querySelector('.ssp'), 'window closes after import');
     assert(textOf(view.container).includes('Course Builder: Diploma of Sustainable Business Practice'));
@@ -303,24 +354,25 @@ async function run() {
     await expandAll(view.container);
     const unitCodes = Array.from(view.container.querySelectorAll('[id^="unit-panel-"] .sl-code')).map(n => n.textContent.trim());
     assert.deepStrictEqual(unitCodes, ['SBP501', 'SBP502']);
-    // Lessons-tab link columns: several YouTube / Google Drive / Gemini Notebook links per lesson.
-    const lessonCards = view.container.querySelectorAll('.lesson-card');
+    // Units tab: Unit Description, Unit Content and several YouTube / Google Drive / Gemini Notebook links per unit.
+    const unitPanels = view.container.querySelectorAll('[id^="unit-panel-"]');
     const linksIn = (card, blockType) => Array.from(card.querySelectorAll(`.content-block-item.type-${blockType} input.form-input:not(.block-title-input)`)).map(i => i.value);
-    assert.deepStrictEqual(linksIn(lessonCards[0], 'youtube_video'), ['https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_1', 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_2']);
-    assert.deepStrictEqual(linksIn(lessonCards[0], 'google_drive_link'), ['https://docs.google.com/presentation/d/REPLACE_WITH_SLIDES_ID/view']);
-    assert.deepStrictEqual(linksIn(lessonCards[0], 'notebook_link'), ['https://notebooklm.google.com/notebook/REPLACE_WITH_NOTEBOOK_ID_1']);
-    assert.strictEqual(linksIn(lessonCards[1], 'google_drive_link').length, 2, 'two Drive resources');
-    assert.strictEqual(linksIn(lessonCards[1], 'notebook_link').length, 2, 'two Gemini Notebooks');
-    const lessonOneTitles = Array.from(lessonCards[0].querySelectorAll('.content-block-item .block-title-input')).map(i => i.value);
-    assert.deepStrictEqual(lessonOneTitles, ['Key ideas', 'Facilitation notes', 'Check your understanding', 'Introductory video', 'The triple bottom line explained', 'Lesson slides', 'Study notebook']);
+    assert.deepStrictEqual(linksIn(unitPanels[0], 'youtube_video'), ['https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_1', 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_2']);
+    assert.strictEqual(linksIn(unitPanels[0], 'google_drive_link').length, 3, 'three Drive resources');
+    assert.strictEqual(linksIn(unitPanels[0], 'notebook_link').length, 3, 'three Gemini Notebooks');
+    assert.deepStrictEqual(linksIn(unitPanels[1], 'youtube_video'), ['https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_3']);
+    const unitOneTitles = Array.from(unitPanels[0].querySelectorAll('.content-block-item .block-title-input')).map(i => i.value);
+    assert.deepStrictEqual(unitOneTitles, ['Facilitation notes', 'Check your understanding', 'Introductory video', 'The triple bottom line explained', 'Unit slides', 'System mapping worksheet', 'Case study pack', 'Study notebook', 'Systems thinking notebook', 'Revision notebook']);
+    assert(unitPanels[0].querySelector('.unit-description-field textarea').value.startsWith('Key terms'), 'Unit Description shown above Performance Criteria');
+    assert(unitPanels[0].querySelector('textarea[id^="unit-content-"]').value.startsWith('What is sustainability?'), 'Unit Content imported');
     // Unit quiz imported from the Quiz Questions tab, answer keys included (teacher view).
-    const quizEditor = lessonCards[0].querySelector('.content-block-item.type-quiz');
+    const quizEditor = unitPanels[0].querySelector('.content-block-item.type-quiz');
     assert.strictEqual(quizEditor.querySelectorAll('.qb-question').length, 4);
     assert.deepStrictEqual(Array.from(quizEditor.querySelectorAll('.qb-type')).map(s => s.value), ['multiple_choice', 'true_false', 'short_answer', 'open']);
     const firstOptions = quizEditor.querySelectorAll('.qb-question')[0].querySelectorAll('.qb-option');
     assert.deepStrictEqual(Array.from(firstOptions).map(o => o.querySelector('input[type=radio]').checked), [false, false, false, true], 'correct answer D is ticked');
-    // Units have lessons & blocks only; the course has one Assessments & Rubrics section.
-    assert(!textOf(view.container.querySelector('.unit-tabs-row')).includes('Assessments'), 'no per-unit assessments tab');
+    // Units hold their content & blocks only; the course has one Assessments & Rubrics section.
+    assert(!view.container.querySelector('.unit-tabs-row'), 'no per-unit tabs');
     const cards = view.container.querySelectorAll('.assessment-card');
     assert.strictEqual(cards.length, 3);
     assert(textOf(view.container).includes('Σ 100%'), 'course weightings add up to 100%');
@@ -344,6 +396,8 @@ async function run() {
     const course = { ...types.createBlankCourse('t1', 'Ms T'), id: 'course_ui_3' };
     const view = await render(React.createElement(AQFCourseBuilder, { course, onSaveCourse: async () => {}, onBack: () => {}, currentUser: teacher, userProfile: teacherProfile, userTokenBalance: 25 }));
     await expandAll(view.container);
+    await click(buttonWith(view.container, 'Add Formative Task'));
+    assert.strictEqual(view.container.querySelectorAll('.rubric-matrix-table tbody tr').length, 3, 'the new task starts with the 3-criterion formative sample');
     const csv = ['Criterion,Weight %,Fail,Pass,Credit,Distinction,High Distinction', ...Array.from({ length: 7 }, (_, i) => `Criterion ${i + 1},${i < 2 ? 20 : 12},f${i},p${i},c${i},d${i},hd${i}`)].join('\n');
     const input = view.container.querySelector('.rsi-actions input[type=file]');
     await upload(input, [new File([csv], 'rubric.csv', { type: 'text/csv' })]);
@@ -427,6 +481,18 @@ async function run() {
     assert(buttonWith(modal, 'Register with Google'), 'register button');
     assert(modal.querySelector('a[href="mailto:support@aifoundation.net.au"]'), 'support email link');
     assert(!view.container.querySelector('.contact-form, .math-verification'), 'the old anonymous form is gone');
+    await click(view.container.querySelector('.close-btn'));
+
+    // About David: button in footer opens centered modal with image and bio
+    const aboutBtn = buttonWith(view.container.querySelector('footer.footer'), 'About David');
+    assert(aboutBtn, 'About David button exists in footer');
+    await click(aboutBtn);
+    await waitFor(() => textOf(view.container).includes('Griffith University'), 'About David modal opens');
+    assert(textOf(view.container).includes('doctoral studies at Griffith University'));
+    assert(textOf(view.container).includes('AI Foundation Australia'));
+    assert(view.container.querySelector('img[src="/david-photo.jpg"]'), 'David image is rendered');
+    await click(view.container.querySelector('.close-btn'));
+
     await view.unmount();
   });
 
@@ -564,7 +630,16 @@ async function run() {
     await type(view.container.querySelector('textarea#ans-a1'), 'Coral polyps host algae.');
     await submit(view.container.querySelector('.sl-submit form'));
     await waitFor(() => textOf(view.container).includes('Submissions are unavailable right now'), 'offline submission error');
-    // Unit quiz inside the lesson
+    // Older course (lessons): every block shows in its unit; the Unit Description opens the unit, above Performance Criteria.
+    const unitCard = view.container.querySelector('.sl-unit-dropdown');
+    assert(!unitCard.querySelector('.sl-lesson-box'), 'no lesson boxes');
+    const descriptionCard = unitCard.querySelector('.sl-unit-description');
+    assert(descriptionCard && textOf(descriptionCard).includes('Corals are animals.'), 'Unit Description card');
+    const pcCard = Array.from(unitCard.querySelectorAll('.sl-unit-desc-card')).find(c => textOf(c).includes('Performance Criteria'));
+    assert(descriptionCard.compareDocumentPosition(pcCard) & window.Node.DOCUMENT_POSITION_FOLLOWING, 'Unit Description above Performance Criteria');
+    assert.strictEqual(textOf(unitCard.querySelector('.sl-unit-content')), 'Polyps', 'the old lesson title is kept as Unit Content');
+    assert.strictEqual(unitCard.querySelectorAll('.sl-unit-blocks .sl-block').length, unitCard.querySelectorAll('.sl-unit-blocks > *').length, 'blocks follow Unit Content');
+    // Unit quiz inside the unit
     const quizForm = await waitFor(() => view.container.querySelector('form.sq-quiz'), 'quiz form');
     assert(textOf(quizForm).includes('Answer both.') && textOf(quizForm).includes('0/2 answered'));
     assert.strictEqual(buttonWith(quizForm, 'Submit quiz').disabled, true, 'nothing answered yet');
@@ -580,6 +655,90 @@ async function run() {
     assert(updatedText.includes('Reef Ecology (2027)') && updatedText.includes('Polyps (updated)'), 'edited course shown without reopening');
     assert(!updatedText.includes('Student Admin Panel'), 'the student stays on the course page');
     assert(view.container.querySelector('button[aria-label="Collapse Units of Study"]'), 'open panels stay open');
+    await view.unmount();
+  });
+
+  await test('Student panel: draft courses visible in preview mode, submissions locked, live updates propagate', async () => {
+    const { default: StudentLearningPanel } = await load('/src/components/student/StudentLearningPanel.jsx');
+    const draftCourse = {
+      id: 'draft_c1',
+      title: 'Introduction to Quantum AI',
+      authorName: 'Dr Quantum',
+      authorEmail: 'dr.quantum@school.edu',
+      category: 'Technology',
+      code: 'QAI-101',
+      aqfLevel: 6,
+      isDraft: true,
+      status: 'draft',
+      tags: ['lms', 'Draft', 'OzEdu'],
+      units: [{
+        id: 'u1',
+        unitCode: 'QAI-101-1',
+        unitTitle: 'Qubits and Superposition',
+        description: 'Core concepts of quantum computing and superposition.',
+        content: 'Lecture notes on quantum states.',
+        blocks: [
+          { id: 'b1', type: 'text_description', title: 'Theory', content: 'Quantum theory and mathematical foundation.' }
+        ]
+      }],
+      assessments: [
+        { id: 'a1', title: 'Quantum Circuit Simulator Analysis', type: 'summative', nominalWeight: 100, description: 'Analyze circuit fidelity.' }
+      ]
+    };
+
+    const view = await render(React.createElement(StudentLearningPanel, {
+      currentUser: { uid: 's1', email: 'stu@school.edu', displayName: 'Stu' },
+      courses: [draftCourse]
+    }));
+
+    // Postcard overview: shows Draft badge and title
+    const overview = textOf(view.container);
+    assert(overview.includes('Introduction to Quantum AI'), 'draft course card visible to registered student');
+    assert(overview.includes('Draft'), 'draft pill on course card');
+
+    // Student opens the draft course
+    await click(buttonWith(view.container, 'Open course'));
+    const courseViewText = textOf(view.container);
+    assert(courseViewText.includes('Draft Course Mode'), 'draft mode notice visible to student');
+    assert(courseViewText.includes('You have permission as an enrolled student to view and study this course'), 'draft explanation present');
+    assert(courseViewText.includes('DRAFT COURSE'), 'draft badge pill in header');
+
+    // Expand all panels to inspect content
+    await expandAll(view.container);
+    const expandedText = textOf(view.container);
+    assert(expandedText.includes('Qubits and Superposition'), 'unit title visible');
+    assert(expandedText.includes('Core concepts of quantum computing'), 'unit description visible');
+
+    // Verify submission button is locked in draft mode
+    const submitBtn = buttonWith(view.container, 'Locked in Draft');
+    assert(submitBtn, 'submission button is disabled and indicates Locked in Draft');
+    assert.strictEqual(submitBtn.disabled, true, 'student cannot submit while in draft');
+
+    // Real-time teacher update propagates (e.g. teacher updates the draft course title and adds a unit)
+    const updatedDraft = {
+      ...draftCourse,
+      title: 'Introduction to Quantum AI (Advanced)',
+      units: [
+        ...draftCourse.units,
+        {
+          id: 'u2',
+          unitCode: 'QAI-101-2',
+          unitTitle: 'Quantum Entanglement & Teleportation',
+          description: 'Entanglement protocols.',
+          blocks: []
+        }
+      ]
+    };
+
+    await view.rerender(React.createElement(StudentLearningPanel, {
+      currentUser: { uid: 's1', email: 'stu@school.edu', displayName: 'Stu' },
+      courses: [updatedDraft]
+    }));
+
+    const liveUpdatedText = textOf(view.container);
+    assert(liveUpdatedText.includes('Introduction to Quantum AI (Advanced)'), 'course title update shows live');
+    assert(liveUpdatedText.includes('Quantum Entanglement & Teleportation'), 'newly added unit shows live without reload');
+
     await view.unmount();
   });
 
@@ -759,7 +918,7 @@ async function run() {
     await click(view.container.querySelector('[aria-labelledby="token-fund-title"] .close-btn'));
     await click(buttonWith(nav, 'Global Search'));
     await waitFor(() => textOf(view.container).includes('Published OzEdu courses could not be loaded'), 'offline published-courses notice');
-    assert(textOf(view.container).includes('Curated course catalog'));
+    assert(/Curated Course Catalog/i.test(textOf(view.container)));
     assert(buttonWith(view.container, '+ Copy to My Courses'), 'catalog courses can be copied');
     await view.unmount();
   });
@@ -773,7 +932,7 @@ async function run() {
     assert(textOf(view.container).includes('stu@school.edu'));
     // Student can view Global Search, but cannot enrol or copy
     await click(buttonWith(nav, 'Global Search'));
-    await waitFor(() => textOf(view.container).includes('Curated course catalog'), 'global courses visible to student');
+    await waitFor(() => /Curated Course Catalog/i.test(textOf(view.container)), 'global courses visible to student');
     assert(textOf(view.container).includes('Enrolment by Teacher Only'), 'enrolment by teacher only notice shown to student');
     assert(!buttonWith(view.container, '+ Copy to My Courses'), 'student cannot copy or enrol directly');
     // Front page -> Contact -> "Message the Super Admin" opens the admin panel with a message to the Super Admin ready.

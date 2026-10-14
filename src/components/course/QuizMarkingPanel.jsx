@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { moveUnitAssessmentsToCourse } from '../../types/courseBuilderTypes';
+import { upgradeCourseStructure } from '../../types/courseBuilderTypes';
 import {
   listCourseQuizzes,
   mergeQuizAnswerKeys,
@@ -70,7 +70,7 @@ export default function QuizMarkingPanel({ course, currentUser }) {
     };
   }, [courseId, reloadKey]);
 
-  const teacherCourse = mergeQuizAnswerKeys(moveUnitAssessmentsToCourse(course), data.keys);
+  const teacherCourse = mergeQuizAnswerKeys(upgradeCourseStructure(course), data.keys);
   const quizzes = listCourseQuizzes(teacherCourse);
   const selected = quizzes.find(q => q.block.id === selectedQuizId) || quizzes[0] || null;
   const quiz = selected ? normalizeQuiz(selected.block.quiz) : null;
@@ -136,7 +136,7 @@ export default function QuizMarkingPanel({ course, currentUser }) {
 
   if (loading) return <p className="qm-muted">Loading quiz attempts…</p>;
   if (!quizzes.length) {
-    return <p className="qm-muted">This course has no unit quizzes yet. Add a ❓ Quiz & Questions block to a lesson in Course Builder.</p>;
+    return <p className="qm-muted">This course has no unit quizzes yet. Add a ❓ Quiz & Questions block to a unit in Course Builder.</p>;
   }
 
   return (
@@ -150,11 +150,11 @@ export default function QuizMarkingPanel({ course, currentUser }) {
       <div className="qm-row">
         <label className="qm-label" htmlFor="qm-quiz">Quiz</label>
         <select id="qm-quiz" className="form-input qm-select" value={selected?.block.id || ''} onChange={e => { setSelectedQuizId(e.target.value); setNotice(null); }}>
-          {quizzes.map(({ unit, lesson, block }) => {
+          {quizzes.map(({ unit, block }) => {
             const count = data.attempts.filter(a => a.quizId === block.id).length;
             return (
               <option key={block.id} value={block.id}>
-                {unit.unitCode ? `${unit.unitCode} • ` : ''}{lesson.title || 'Lesson'} • {block.title || 'Quiz'} ({count} submitted)
+                {unit.unitCode ? `${unit.unitCode} • ` : ''}{unit.unitTitle || 'Unit'} • {block.title || 'Quiz'} ({count} submitted)
               </option>
             );
           })}

@@ -207,8 +207,9 @@ async function run() {
     await lms.saveCourse(courseId, { ...course, authorId: user.uid, authorName: 'Tess Teacher', authorEmail: user.email, isPublished: true, status: 'published', visibility: 'network' }, { isNew: true });
     const stored = (await getDoc(doc(db, 'lms_courses', courseId))).data();
     assert(!JSON.stringify(stored).includes('correctOptionIds') && !JSON.stringify(stored).includes('modelAnswer'), 'answer keys never stored in the course document');
-    assert.strictEqual(stored.units[0].lessons[0].blocks[0].quiz.questions.length, 3);
-    assert(!('assessments' in stored.units[0]), 'units hold lessons & blocks only');
+    assert.strictEqual(stored.units[0].blocks[0].quiz.questions.length, 3, 'a lesson-shaped course is saved with its blocks on the unit');
+    assert(!('assessments' in stored.units[0]) && !('lessons' in stored.units[0]), 'units hold their content & blocks only');
+    assert.strictEqual(stored.units[0].content, 'Polyps', 'the old lesson title is kept as Unit Content');
     assert.deepStrictEqual(stored.assessments.map(a => [a.id, a.unitId]), [['a1', 'u1']], 'the unit task moved up to the course (same id)');
     const keys = (await getDoc(doc(db, 'lms_quiz_keys', courseId))).data();
     assert.deepStrictEqual(keys.quizzes.quiz1.q1.correctOptionIds, ['o2'], 'keys saved in the same batch');
@@ -317,10 +318,9 @@ async function run() {
     const user = await signInAs('student');
     await assert.rejects(getDoc(doc(db, 'lms_quiz_keys', courseId)), err => err.code === 'permission-denied');
     const loaded = await lms.getLmsCourseById(courseId);
-    const lesson = loaded.units[0].lessons[0];
-    const block = lesson.blocks[0];
+    const block = loaded.units[0].blocks[0];
     assert(!JSON.stringify(block).includes('correctOptionIds'), 'students receive questions without answers');
-    const saved = await quizzes.submitQuizAttempt({ course: loaded, unit: loaded.units[0], lesson, block, user, answers: { q1: ['o2'], q2: false, q3: 'Warm water stresses them.' } });
+    const saved = await quizzes.submitQuizAttempt({ course: loaded, unit: loaded.units[0], block, user, answers: { q1: ['o2'], q2: false, q3: 'Warm water stresses them.' } });
     assert.strictEqual(saved.status, 'submitted');
     const mine = await quizzes.listMyQuizAttempts(courseId, user.uid);
     assert.deepStrictEqual(mine.quiz1.answers, { q1: ['o2'], q2: false, q3: 'Warm water stresses them.' });
@@ -333,7 +333,7 @@ async function run() {
     const { keys, ok } = await quizzes.loadQuizAnswerKeys(courseId);
     assert(ok);
     const teacherCourse = quizModel.mergeQuizAnswerKeys(await lms.getLmsCourseById(courseId), keys);
-    const quiz = teacherCourse.units[0].lessons[0].blocks[0].quiz;
+    const quiz = teacherCourse.units[0].blocks[0].quiz;
     assert.strictEqual(quizModel.scoreQuizAttempt(quiz, attempts[0].answers).pending, 1, 'open answer waits for the teacher');
     const result = await quizzes.releaseQuizResults({ quiz, attempts, manualScoresByAttempt: { [attempts[0].id]: { q3: 4 } }, feedbackByAttempt: { [attempts[0].id]: 'Good thinking' }, grader: user });
     assert.deepStrictEqual([result.released.length, result.skipped.length, result.failed.length], [1, 0, 0]);
@@ -341,7 +341,7 @@ async function run() {
     const mine = await quizzes.listMyQuizAttempts(courseId, student.uid);
     assert.deepStrictEqual([mine.quiz1.status, mine.quiz1.score, mine.quiz1.maxScore, mine.quiz1.percent, mine.quiz1.feedback], ['graded', 5, 7, 71, 'Good thinking']);
     const loaded = await lms.getLmsCourseById(courseId);
-    await expectCode(quizzes.submitQuizAttempt({ course: loaded, unit: loaded.units[0], lesson: loaded.units[0].lessons[0], block: loaded.units[0].lessons[0].blocks[0], user: student, answers: { q1: ['o1'] } }), 'ALREADY_GRADED');
+    await expectCode(quizzes.submitQuizAttempt({ course: loaded, unit: loaded.units[0], block: loaded.units[0].blocks[0], user: student, answers: { q1: ['o1'] } }), 'ALREADY_GRADED');
   });
 
   await step('Super Admin gives tokens by email (limits, unknown email, double-credit guard)', async () => {
@@ -417,10 +417,10 @@ async function run() {
 
       // The teacher edits and saves the course: the open Student Panel gets the new version.
       const current = (await getDoc(doc(teacher.db, 'lms_courses', courseId))).data();
-      const units = current.units.map((u, i) => (i === 0 ? { ...u, lessons: u.lessons.map((l, j) => (j === 0 ? { ...l, title: 'Reef zones (updated)' } : l)) } : u));
+      const units = current.units.map((u, i) => (i === 0 ? { ...u, content: 'Reef zones (updated)' } : u));
       await updateDoc(doc(teacher.db, 'lms_courses', courseId), { title: 'Reef Ecology (2027)', units, updatedAt: serverTimestamp() });
       await until(() => latest().find(c => c.id === courseId)?.title === 'Reef Ecology (2027)', 'course edit arrives live');
-      assert.strictEqual(latest().find(c => c.id === courseId).units[0].lessons[0].title, 'Reef zones (updated)', 'lesson content updated too');
+      assert.strictEqual(latest().find(c => c.id === courseId).units[0].content, 'Reef zones (updated)', 'Unit Content updated too');
       assert(!updates.some(u => u instanceof Error), 'no listener errors');
     } finally {
       stop();

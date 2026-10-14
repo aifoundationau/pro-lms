@@ -9,7 +9,7 @@ import {
 } from '../../services/submissionService';
 import { isHttpUrl } from '../../services/courseSpreadsheetSchema';
 import { formatLocalizedDate } from '../../services/geminiCourseService';
-import { LINK_BLOCK_METADATA_KEYS, moveUnitAssessmentsToCourse, getAqfLevelMeta } from '../../types/courseBuilderTypes';
+import { LINK_BLOCK_METADATA_KEYS, upgradeCourseStructure, getAqfLevelMeta } from '../../types/courseBuilderTypes';
 import { listMyQuizAttempts } from '../../services/quizService';
 import StudentQuiz from './StudentQuiz.jsx';
 import { youtubeVideoId, isGoogleDocsUrl } from '../../services/mediaLinks';
@@ -50,7 +50,7 @@ function StudentBlock({ block, renderQuiz }) {
         <div className="sl-video">
           <iframe
             src={`https://www.youtube-nocookie.com/embed/${youtubeVideoId(link)}`}
-            title={block.title || 'Lesson video'}
+            title={block.title || 'Unit video'}
             loading="lazy"
             allow="accelerometer; encrypted-media; gyroscope; picture-in-picture; fullscreen"
             referrerPolicy="strict-origin-when-cross-origin"
@@ -293,27 +293,30 @@ function SubmissionBox({ course, unit, assessment, currentUser, submission, onSu
   );
 }
 
-/** Unit Card with interactive Dropdown on the right displaying all description, content, and links. */
+/** Unit card: Performance Criteria, Unit Learning Outcomes, Unit Content and the unit's blocks. */
 function StudentUnitCard({ unit, defaultOpen = false, renderQuiz }) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
-  const lessons = Array.isArray(unit.lessons) ? unit.lessons : [];
-  const quizCount = lessons.reduce((n, lesson) => n + (lesson.blocks || []).filter(b => b?.type === 'quiz').length, 0);
+  const blocks = Array.isArray(unit.blocks) ? unit.blocks.filter(b => b && typeof b === 'object') : [];
+  const outcomes = Array.isArray(unit.learningOutcomes) ? unit.learningOutcomes.filter(o => typeof o === 'string' && o.trim()) : [];
+  const content = typeof unit.content === 'string' ? unit.content.trim() : '';
+  const quizCount = blocks.filter(b => b.type === 'quiz').length;
 
-  // Extract all external and learning links within this unit
+  // Every link in this unit (Teacher Guides stay hidden)
   const unitLinks = [];
-  lessons.forEach(lesson => {
-    (lesson.blocks || []).forEach(block => {
-      if (block.type === 'teacher_guide') return;
-      const url = blockLink(block);
-      if (url) {
-        unitLinks.push({
-          title: block.title || lesson.title,
-          url,
-          type: block.type
-        });
-      }
-    });
+  blocks.forEach(block => {
+    if (block.type === 'teacher_guide') return;
+    const url = blockLink(block);
+    if (url) unitLinks.push({ title: block.title || unit.unitTitle, url, type: block.type });
   });
+  // 📝 Unit Description blocks open the unit (above Performance Criteria); the other blocks follow Unit Content.
+  const descriptions = blocks.filter(b => b.type === 'text_description' && String(b.content || '').trim());
+  const bodyBlocks = blocks.filter(b => b.type !== 'text_description');
+  const visibleBlocks = bodyBlocks.filter(b => b.type !== 'teacher_guide');
+  const summary = [
+    unit.nominalHours ? `${unit.nominalHours} hrs` : '',
+    quizCount ? `${quizCount} quiz${quizCount === 1 ? '' : 'zes'}` : '',
+    unitLinks.length ? `${unitLinks.length} link${unitLinks.length === 1 ? '' : 's'}` : ''
+  ].filter(Boolean);
 
   return (
     <details
@@ -325,11 +328,7 @@ function StudentUnitCard({ unit, defaultOpen = false, renderQuiz }) {
         <div className="sl-unit-summary-left">
           <span className="sl-code">{unit.unitCode}</span>
           <strong className="sl-unit-title">{unit.unitTitle}</strong>
-          <span className="sl-muted">
-            • {unit.nominalHours || 0} hrs • {lessons.length} lessons
-            {quizCount > 0 ? ` • ${quizCount} quiz${quizCount === 1 ? '' : 'zes'}` : ''}
-            {unitLinks.length > 0 ? ` • ${unitLinks.length} links` : ''}
-          </span>
+          {summary.length > 0 && <span className="sl-muted">• {summary.join(' • ')}</span>}
         </div>
         <div className="sl-unit-summary-right">
           <span className={`sl-unit-dropdown-btn ${isOpen ? 'open' : ''}`}>
@@ -340,12 +339,36 @@ function StudentUnitCard({ unit, defaultOpen = false, renderQuiz }) {
 
       <div className="sl-unit-dropdown-box">
         {/* Unit Description */}
+        {descriptions.length > 0 && (
+          <div className="sl-unit-desc-card sl-unit-description">
+            <h5 style={{ margin: '0 0 6px', color: '#c4b5fd' }}>📝 Unit Description</h5>
+            {descriptions.map((block, i) => (
+              <div key={block.id || i} className="sl-text" style={{ marginTop: i ? '8px' : 0 }}>
+                {block.title && <strong>{block.title}</strong>}
+                {block.title && '\n'}
+                {block.content}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Performance Criteria */}
         <div className="sl-unit-desc-card">
-          <h5 style={{ margin: '0 0 6px', color: '#93c5fd' }}>📋 Performance Criteria</h5>
+          <h5 style={{ margin: '0 0 6px', color: '#c4b5fd' }}>📋 Performance Criteria</h5>
           <p className="sl-text" style={{ margin: 0 }}>
-            {unit.description || 'Welcome to this unit of study. Review the lessons, learning activities, and links below.'}
+            {unit.description || 'Welcome to this unit of study. Read the unit content and work through the activities and links below.'}
           </p>
         </div>
+
+        {/* Unit Learning Outcomes */}
+        {outcomes.length > 0 && (
+          <div className="sl-unit-desc-card sl-unit-outcomes">
+            <h5 style={{ margin: '0 0 6px', color: '#86efac' }}>🎯 Unit Learning Outcomes</h5>
+            <ul className="sl-spec-list">
+              {outcomes.map((outcome, i) => <li key={i}>{outcome}</li>)}
+            </ul>
+          </div>
+        )}
 
         {/* Quick Links & Resources in this Unit */}
         {unitLinks.length > 0 && (
@@ -365,32 +388,28 @@ function StudentUnitCard({ unit, defaultOpen = false, renderQuiz }) {
           </div>
         )}
 
-        {/* Lessons & Content */}
-        <h5 style={{ margin: '14px 0 8px', color: '#cbd5e1' }}>📘 Lessons & Course Content</h5>
-        {lessons.length === 0 && (
-          <p className="sl-muted">No lessons have been added to this unit yet.</p>
+        {/* Unit Content (the teacher's lesson paragraphs), then the unit's blocks in order */}
+        <h5 style={{ margin: '14px 0 8px', color: '#cbd5e1' }}>📘 Unit Content</h5>
+        {!content && visibleBlocks.length === 0 && (
+          <p className="sl-muted">Your teacher has not added content to this unit yet.</p>
         )}
-        {lessons.map((lesson, lIdx) => (
-          <div key={lesson.id || lIdx} className="sl-lesson-box glass">
-            <div className="sl-lesson-header">
-              <span className="sl-lesson-name">📘 {lesson.title}</span>
-              <span className="sl-muted">({lesson.estimatedMinutes || 45} min)</span>
-            </div>
-            <div className="sl-lesson-content">
-              {(lesson.blocks || []).map((block, bIdx) => (
-                <StudentBlock key={block.id || bIdx} block={block} renderQuiz={renderQuiz ? quizBlock => renderQuiz(unit, lesson, quizBlock) : null} />
-              ))}
-            </div>
+        {content && <div className="sl-text sl-unit-content">{unit.content}</div>}
+        {bodyBlocks.length > 0 && (
+          <div className="sl-unit-blocks">
+            {bodyBlocks.map((block, bIdx) => (
+              <StudentBlock key={block.id || bIdx} block={block} renderQuiz={renderQuiz ? quizBlock => renderQuiz(unit, quizBlock) : null} />
+            ))}
           </div>
-        ))}
+        )}
       </div>
     </details>
   );
 }
 
 function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher, enrolledCourses = [], onSelectCourse, showQuickNavigator = false }) {
-  // One Assessments & Rubrics list per course (older courses keep their tasks, moved up from units).
-  const course = moveUnitAssessmentsToCourse(rawCourse);
+  // Units hold their content and blocks; one Assessments & Rubrics list per course (older courses
+  // are upgraded: lesson blocks move into their unit, unit tasks move up to the course).
+  const course = upgradeCourseStructure(rawCourse);
   // Submissions and quiz attempts for this course; "loading" until they arrive for the open course.
   const [submissionState, setSubmissionState] = useState({ courseId: null, byAssessment: {} });
   const [quizState, setQuizState] = useState({ courseId: null, byQuiz: {} });
@@ -427,14 +446,13 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
     };
   }, [course.id, currentUser?.uid]);
 
-  const renderQuiz = (unit, lesson, block) => (quizzesLoading ? (
+  const renderQuiz = (unit, block) => (quizzesLoading ? (
     <p className="sl-muted">Loading your quiz…</p>
   ) : (
     <StudentQuiz
       key={block.id}
       course={course}
       unit={unit}
-      lesson={lesson}
       block={block}
       currentUser={currentUser}
       attempt={quizState.byQuiz[block.id]}
@@ -1090,11 +1108,9 @@ export default function StudentLearningPanel({
         .sl-chip-icon { font-size: 0.95rem; }
         .sl-chip-arrow { opacity: 0.75; font-size: 0.85rem; }
 
-        /* Lesson content */
-        .sl-lesson-box { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: rgba(0,0,0,0.18); }
-        .sl-lesson-header { display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 0.95rem; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-        .sl-lesson-name { color: #e2e8f0; }
-        .sl-lesson-content { margin-top: 6px; }
+        /* Unit content & blocks */
+        .sl-unit-content { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: rgba(0,0,0,0.18); }
+        .sl-unit-blocks { margin-top: 6px; }
 
         .sl-code { color: #34d399; font-weight: 800; margin-right: 4px; }
         .sl-muted { color: #94a3b8; font-size: 0.85rem; }

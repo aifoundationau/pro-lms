@@ -1,6 +1,6 @@
 // Test stand-in for src/services/authService.js: the signed-in user comes from
 // globalThis.__TEST_AUTH__ = { user, profile }. Role logic is the real one.
-export { ALLOWED_ROLES, resolvePrivileges } from '../../src/services/rolePrivileges.js';
+export { ALLOWED_ROLES, resolvePrivileges, canEnrolInCourses } from '../../src/services/rolePrivileges.js';
 
 export const OAUTH_CLIENT_ID = 'test-client-id';
 

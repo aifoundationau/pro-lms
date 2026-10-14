@@ -42,12 +42,18 @@ export function resolvePrivileges(profile, enrolledCoursesCount = 0) {
 
   const role = rawRole || (isFirebaseAdmin ? 'superadmin' : 'supporter');
   const isSuperadmin = role === 'superadmin' || isFirebaseAdmin;
-  const isAdminStaff = isSuperadmin || role === 'ceo' || role === 'coo' || role === 'admin staff';
+  const isAdminStaff = isSuperadmin || role === 'ceo' || role === 'coo' || role === 'admin staff' || role === 'admin';
   const isFinancial = isSuperadmin || role === 'cfo' || role === 'financial team';
   const isTeacher = isSuperadmin || role === 'teacher';
+  const isCOO = isSuperadmin || role === 'coo';
+  const isCFO = isSuperadmin || role === 'cfo';
   const isStaff = isSuperadmin || isAdminStaff || isFinancial || isTeacher;
   const isStudent = role === 'student';
   const isSupporter = role === 'supporter' && !isSuperadmin;
+
+  // Course enrolment authority:
+  // "When someone logs in for the first time, they are a supporter. they can only be added to courses by teachers, admin, superadmin, coo, cfo."
+  const canEnrolStudents = isSuperadmin || isTeacher || isAdminStaff || isCOO || isCFO;
 
   return {
     role: isSuperadmin ? 'superadmin' : role,
@@ -58,6 +64,8 @@ export function resolvePrivileges(profile, enrolledCoursesCount = 0) {
     isAdminStaff,
     isFinancial,
     isTeacher,
+    isCOO,
+    isCFO,
     isStaff,
     isStudent,
     isSupporter,
@@ -67,11 +75,22 @@ export function resolvePrivileges(profile, enrolledCoursesCount = 0) {
     canCreateCourse: isStaff,
     canEditCourse: isStaff,
     canArchiveCourse: isStaff,
-    canEnrolStudents: isStaff,
-    canViewAllStudents: isStaff,
+    canEnrolStudents,
+    canViewAllStudents: canEnrolStudents,
     canViewDraftCourses: isStudent || isStaff,
     canViewGlobalCourses: isStaff || isStudent || isSupporter
   };
+}
+
+/**
+ * Evaluates whether a user or role is permitted to add/enrol members to courses.
+ * Permitted: teachers, admin, superadmin, coo, cfo.
+ * Denied: supporters, students, and general financial team members.
+ */
+export function canEnrolInCourses(roleOrProfile) {
+  if (!roleOrProfile) return false;
+  const profile = typeof roleOrProfile === 'string' ? { role: roleOrProfile } : roleOrProfile;
+  return resolvePrivileges(profile).canEnrolStudents;
 }
 
 export function hasUnlimitedTokens(profile) {

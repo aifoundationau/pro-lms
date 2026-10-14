@@ -15,7 +15,6 @@ import { getAqfLevelMeta } from '../../types/courseBuilderTypes';
 const STAT_LABELS = [
   ['outcomes', 'learning outcomes'],
   ['units', 'units'],
-  ['lessons', 'lessons'],
   ['blocks', 'content blocks'],
   ['quizzes', 'unit quizzes'],
   ['questions', 'quiz questions'],
@@ -106,7 +105,7 @@ export default function CourseSpreadsheetPanel({
     const { stats } = parsed;
     onApplyCourse?.(parsed.preview, {
       source: 'spreadsheet',
-      message: `📊 Imported "${parsed.preview.title}" from your spreadsheet: ${stats.units} units, ${stats.lessons} lessons, ${stats.blocks} blocks, ${stats.quizzes || 0} quizzes, ${stats.assessments} course assessments, ${stats.criteria} rubric criteria. Review it, then Save Draft.`,
+      message: `📊 Imported "${parsed.preview.title}" from your spreadsheet: ${stats.units} units, ${stats.blocks} blocks, ${stats.quizzes || 0} quizzes, ${stats.assessments} course assessments, ${stats.criteria} rubric criteria. Review it, then Save Draft.`,
       warnings: parsed.warnings.map(formatImportWarning)
     });
   };
@@ -174,8 +173,8 @@ export default function CourseSpreadsheetPanel({
     <div className="ssp">
       <section className="ssp-step">
         <h4>1. Get the spreadsheet</h4>
-        <p className="ssp-muted">Every part of a course, A to Z: Course details, Learning Outcomes, Units, Lessons, Content Blocks, unit Quiz Questions, the course's Assessments and the Assessment Rubric Matrix (any number of criteria).</p>
-        <p className="ssp-muted">Links: the Lessons tab has YouTube Video, Google Drive Resource and Gemini Notebook columns. Put as many links as you need in each cell, one per line, optionally as “Title | link”. Each link becomes its own block.</p>
+        <p className="ssp-muted">Every part of a course, A to Z: Course details, Learning Outcomes, Units (with Unit Content), Content Blocks, unit Quiz Questions, the course's Assessments and the Assessment Rubric Matrix (any number of criteria).</p>
+        <p className="ssp-muted">Links: the Units tab has YouTube Video, Google Drive Resource and Gemini Notebook columns. Put as many links as you need in each cell, one per line, optionally as “Title | link”. Each link becomes its own block.</p>
         <div className="ssp-row">
           <button type="button" className="nav-btn secondary ssp-small" onClick={() => download(downloadCourseTemplate, 'The template')} disabled={busy}>⬇ Blank template (.xlsx)</button>
           <button type="button" className="nav-btn secondary ssp-small" onClick={() => download(downloadCourseExample, 'The example')} disabled={busy}>⬇ Worked example</button>

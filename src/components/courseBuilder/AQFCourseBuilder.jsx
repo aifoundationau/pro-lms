@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   AQF_LEVELS,
   CONTENT_BLOCK_TYPES,
@@ -6,13 +6,15 @@ import {
   getAqfLevelMeta,
   generateEntityId,
   createBlankUnit,
-  createBlankLesson,
   createBlankContentBlock,
   createBlankAssessment,
   defaultLevelPoints,
   isGoogleNotebookUrl,
   createDefaultRubric,
-  moveUnitAssessmentsToCourse
+  isSampleRubric,
+  upgradeCourseStructure,
+  flattenUnitLessons,
+  UNIT_LIMITS
 } from '../../types/courseBuilderTypes';
 import QuizBlockEditor from './QuizBlockEditor.jsx';
 import { mergeQuizAnswerKeys, remapQuizAnswerKeys, listCourseQuizzes } from '../../services/quizModel';
@@ -139,8 +141,9 @@ function AQFCourseBuilderInner({
   showQuickNavigator = false // hidden for now; set true to bring the sidebar navigator back
 }) {
   // Course State
-  // Assessments live once, at course level (older courses keep their tasks, moved up from units).
-  const [currentCourse, setCurrentCourse] = useState(() => moveUnitAssessmentsToCourse(course));
+  // Units hold their content and blocks; assessments live once, at course level (older courses are
+  // upgraded: lesson blocks move up into their unit, unit tasks move up to the course).
+  const [currentCourse, setCurrentCourse] = useState(() => upgradeCourseStructure(course));
   const [activeUnitId, setActiveUnitId] = useState(course.units?.[0]?.id || null);
   const [activeTab, setActiveTab] = useState(initialPanel === 'assessments' ? 'assessments' : 'curriculum');
   // Every panel starts collapsed; panels open when clicked, and newly added items open.
@@ -148,7 +151,6 @@ function AQFCourseBuilderInner({
   const [isAssessmentsExpanded, setIsAssessmentsExpanded] = useState(initialPanel === 'assessments');
   const [isUnitsSectionExpanded, setIsUnitsSectionExpanded] = useState(false);
   const [expandedUnits, setExpandedUnits] = useState({});
-  const [expandedLessons, setExpandedLessons] = useState({});
   const [expandedAssessments, setExpandedAssessments] = useState({});
 
   const toggleUnitExpand = (unitId) => {
@@ -254,8 +256,25 @@ function AQFCourseBuilderInner({
 
   // Unit Operations
   const handleAddUnit = () => {
-    const nextIdx = (currentCourse.units?.length || 0) + 1;
-    const newUnit = createBlankUnit(`UNIT-${nextIdx}01`, `Unit ${nextIdx}: Advanced Practice`);
+    const courseCode = (currentCourse.code || '').trim() || 'CRS-100';
+    const existingUnits = Array.isArray(currentCourse.units) ? currentCourse.units : [];
+
+    // Find highest index for this course code (e.g. CRS-100-1, CRS-100-2)
+    let maxNum = 0;
+    const escapedCode = courseCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const codeRegex = new RegExp(`^${escapedCode}-(\\d+)$`, 'i');
+    existingUnits.forEach(u => {
+      const match = String(u.unitCode || '').trim().match(codeRegex);
+      if (match) {
+        const n = parseInt(match[1], 10);
+        if (!Number.isNaN(n) && n > maxNum) maxNum = n;
+      }
+    });
+
+    const nextNum = maxNum > 0 ? maxNum + 1 : existingUnits.length + 1;
+    const newUnitCode = `${courseCode}-${nextNum}`;
+    const newUnit = createBlankUnit(newUnitCode, '');
+
     setCurrentCourse(prev => ({
       ...prev,
       units: [...(prev.units || []), newUnit]
@@ -273,13 +292,9 @@ function AQFCourseBuilderInner({
   };
 
   const handleDeleteUnit = (unitId) => {
-    if ((currentCourse.units || []).length <= 1) {
-      alert('A course must contain at least one unit.');
-      return;
-    }
-    if (confirm('Are you sure you want to delete this unit and all its lessons?')) {
+    if (confirm('Are you sure you want to delete this unit, its content and all its blocks?')) {
       setCurrentCourse(prev => {
-        const nextUnits = prev.units.filter(u => u.id !== unitId);
+        const nextUnits = (prev.units || []).filter(u => u.id !== unitId);
         if (activeUnitId === unitId) {
           const nextActive = nextUnits[0]?.id || null;
           setActiveUnitId(nextActive);
@@ -291,96 +306,38 @@ function AQFCourseBuilderInner({
     }
   };
 
-  // Lesson Operations
-  const handleAddLesson = (unitId) => {
-    const unit = currentCourse.units?.find(u => u.id === unitId);
-    const order = unit?.lessons?.length || 0;
-    const newLesson = createBlankLesson(order, `Lesson ${order + 1}: Topic ${order + 1}`);
+  // Unit blocks (a unit holds its blocks directly; there are no lessons)
+  const updateUnitBlocks = (unitId, updater) => {
     setCurrentCourse(prev => ({
       ...prev,
-      units: prev.units.map(u => u.id === unitId ? { ...u, lessons: [...(u.lessons || []), newLesson] } : u)
-    }));
-    setExpandedLessons(prev => ({ ...prev, [newLesson.id]: true }));
-  };
-
-  const handleUpdateLesson = (unitId, lessonId, field, value) => {
-    setCurrentCourse(prev => ({
-      ...prev,
-      units: prev.units.map(u => {
-        if (u.id !== unitId) return u;
-        return {
-          ...u,
-          lessons: u.lessons.map(l => l.id === lessonId ? { ...l, [field]: value } : l)
-        };
-      })
+      units: (prev.units || []).map(u => (u.id === unitId ? { ...u, blocks: updater(Array.isArray(u.blocks) ? u.blocks : []) } : u))
     }));
   };
 
-  const handleDeleteLesson = (unitId, lessonId) => {
-    setCurrentCourse(prev => ({
-      ...prev,
-      units: prev.units.map(u => {
-        if (u.id !== unitId) return u;
-        return { ...u, lessons: u.lessons.filter(l => l.id !== lessonId) };
-      })
-    }));
+  const handleAddBlock = (unitId, type) => {
+    const unit = (currentCourse.units || []).find(u => u.id === unitId);
+    if ((Array.isArray(unit?.blocks) ? unit.blocks.length : 0) >= UNIT_LIMITS.blocks) {
+      alert(`A unit can hold up to ${UNIT_LIMITS.blocks} blocks.`);
+      return;
+    }
+    const newBlock = createBlankContentBlock(type, Array.isArray(unit?.blocks) ? unit.blocks.length : 0);
+    updateUnitBlocks(unitId, blocks => [...blocks, { ...newBlock, order: blocks.length }]);
   };
 
-  // Content Block Operations
-  const handleAddBlock = (unitId, lessonId, type) => {
-    const unit = currentCourse.units?.find(u => u.id === unitId);
-    const lesson = unit?.lessons?.find(l => l.id === lessonId);
-    const order = lesson?.blocks?.length || 0;
-    const newBlock = createBlankContentBlock(type, order);
-
-    setCurrentCourse(prev => ({
-      ...prev,
-      units: prev.units.map(u => {
-        if (u.id !== unitId) return u;
-        return {
-          ...u,
-          lessons: u.lessons.map(l => {
-            if (l.id !== lessonId) return l;
-            return { ...l, blocks: [...(l.blocks || []), newBlock] };
-          })
-        };
-      })
-    }));
+  const handleUpdateBlock = (unitId, blockId, patch) => {
+    updateUnitBlocks(unitId, blocks => blocks.map(b => (b.id === blockId ? { ...b, ...patch, metadata: { ...b.metadata, ...(patch.metadata || {}) } } : b)));
   };
 
-  const handleUpdateBlock = (unitId, lessonId, blockId, patch) => {
-    setCurrentCourse(prev => ({
-      ...prev,
-      units: prev.units.map(u => {
-        if (u.id !== unitId) return u;
-        return {
-          ...u,
-          lessons: u.lessons.map(l => {
-            if (l.id !== lessonId) return l;
-            return {
-              ...l,
-              blocks: l.blocks.map(b => b.id === blockId ? { ...b, ...patch, metadata: { ...b.metadata, ...(patch.metadata || {}) } } : b)
-            };
-          })
-        };
-      })
-    }));
+  const handleDeleteBlock = (unitId, blockId) => {
+    updateUnitBlocks(unitId, blocks => blocks.filter(b => b.id !== blockId).map((b, i) => (b.order === i ? b : { ...b, order: i })));
   };
 
-  const handleDeleteBlock = (unitId, lessonId, blockId) => {
-    setCurrentCourse(prev => ({
-      ...prev,
-      units: prev.units.map(u => {
-        if (u.id !== unitId) return u;
-        return {
-          ...u,
-          lessons: u.lessons.map(l => {
-            if (l.id !== lessonId) return l;
-            return { ...l, blocks: l.blocks.filter(b => b.id !== blockId) };
-          })
-        };
-      })
-    }));
+  // A unit with no 📝 Unit Description yet still shows the box; typing in it creates the block (first).
+  const handleStartUnitDescription = (unitId, content) => {
+    const newBlock = { ...createBlankContentBlock('text_description', 0), content };
+    updateUnitBlocks(unitId, blocks => (blocks.some(b => b?.type === 'text_description')
+      ? blocks
+      : [newBlock, ...blocks].map((b, i) => (b.order === i ? b : { ...b, order: i }))));
   };
 
   // Assessment Operations (one Assessments & Rubrics section for the whole course)
@@ -442,7 +399,7 @@ function AQFCourseBuilderInner({
   // 📊 Spreadsheet import / ✨ AI build result -> builder (keeps this course's identity)
   const handleApplyImportedCourse = (importedCourse, { message, warnings = [] } = {}) => {
     setCurrentCourse(prev => ({
-      ...moveUnitAssessmentsToCourse(importedCourse),
+      ...upgradeCourseStructure(importedCourse),
       id: prev.id ?? importedCourse.id,
       authorId: prev.authorId || importedCourse.authorId,
       authorName: prev.authorName || importedCourse.authorName,
@@ -483,7 +440,7 @@ function AQFCourseBuilderInner({
       // Keep the existing course identity/ownership and standards selection so saves
       // still target the course being edited.
       setCurrentCourse(prev => ({
-        ...moveUnitAssessmentsToCourse(res.course),
+        ...upgradeCourseStructure(res.course),
         id: prev.id ?? res.course.id,
         authorId: prev.authorId ?? res.course.authorId,
         authorName: prev.authorName ?? res.course.authorName,
@@ -533,22 +490,18 @@ function AQFCourseBuilderInner({
         entityTitle: unitToImport.unitTitle
       });
 
-      // Clone unit with fresh IDs (units hold lessons & blocks only)
+      // Clone unit with fresh IDs (a unit holds its content and blocks; older units are flattened)
       const blockIdMap = {};
-      const { assessments: legacyUnitTasks = [], ...unitContent } = unitToImport;
+      const { assessments: legacyUnitTasks = [], ...unitFields } = flattenUnitLessons(unitToImport);
       let clonedUnit = {
-        ...unitContent,
+        ...unitFields,
         id: generateEntityId('unit'),
         unitTitle: `${unitToImport.unitTitle} (Imported)`,
-        lessons: (unitToImport.lessons || []).map(l => ({
-          ...l,
-          id: generateEntityId('lesson'),
-          blocks: (l.blocks || []).map(b => {
-            const id = generateEntityId('block');
-            blockIdMap[b.id] = id;
-            return { ...b, id };
-          })
-        }))
+        blocks: (Array.isArray(unitFields.blocks) ? unitFields.blocks : []).map(b => {
+          const id = generateEntityId('block');
+          blockIdMap[b.id] = id;
+          return { ...b, id };
+        })
       };
 
       // Quiz answer keys are stored with the source course; bring them along for the new quiz ids.
@@ -604,8 +557,83 @@ function AQFCourseBuilderInner({
     }
   };
 
-  // Save Course as Draft
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [lastSavedTime, setLastSavedTime] = useState(null);
+  const [autoSaveIntervalSec, setAutoSaveIntervalSec] = useState(() => {
+    try {
+      const stored = localStorage.getItem('ozedu_builder_autosave_interval');
+      return stored !== null ? Number(stored) : 60; // 60s recommended default
+    } catch (_) {
+      return 60;
+    }
+  });
+  const [showUnsavedModal, setShowUnsavedModal] = useState(false);
+
+  // Track unsaved changes relative to last saved snapshot
+  const lastSavedJsonRef = useRef(JSON.stringify(currentCourse));
+  const currentCourseRef = useRef(currentCourse);
+  const hasUnsavedChangesRef = useRef(false);
+  const isSavingDraftRef = useRef(false);
+
+  const hasUnsavedChanges = JSON.stringify(currentCourse) !== lastSavedJsonRef.current;
+
+  useEffect(() => {
+    currentCourseRef.current = currentCourse;
+    hasUnsavedChangesRef.current = JSON.stringify(currentCourse) !== lastSavedJsonRef.current;
+  }, [currentCourse]);
+
+  // Window beforeunload warning if there are unsaved edits
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (hasUnsavedChangesRef.current) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
+
+  // Background Auto-Save
+  const performSilentAutoSave = async () => {
+    if (isSavingDraftRef.current || !hasUnsavedChangesRef.current) return;
+    isSavingDraftRef.current = true;
+    const draftCourseToSave = { ...currentCourseRef.current };
+    const draftTags = Array.from(new Set([...(Array.isArray(draftCourseToSave.tags) ? draftCourseToSave.tags : []), 'lms', 'Draft']));
+    const draftCourse = {
+      ...draftCourseToSave,
+      isDraft: true,
+      isPublished: false,
+      status: 'draft',
+      visibility: 'site',
+      tag: 'lms',
+      tags: draftTags,
+      updatedAt: Date.now()
+    };
+    lastSavedJsonRef.current = JSON.stringify(draftCourse);
+    try {
+      await onSaveCourse?.(draftCourse);
+      setLastSavedTime(new Date());
+    } catch (err) {
+      console.warn('Auto-save note:', err?.code || err?.message || err);
+    } finally {
+      isSavingDraftRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    if (!autoSaveIntervalSec || autoSaveIntervalSec <= 0) return undefined;
+    const intervalMs = autoSaveIntervalSec * 1000;
+    const timer = setInterval(() => {
+      performSilentAutoSave();
+    }, intervalMs);
+    return () => clearInterval(timer);
+  }, [autoSaveIntervalSec, onSaveCourse]);
+
+  // Save Course as Draft — invoked immediately as soon as "Save Draft" is pressed
   const handleSave = async () => {
+    if (isSavingDraft) return;
+    setIsSavingDraft(true);
     const draftTags = Array.from(new Set([...(Array.isArray(currentCourse.tags) ? currentCourse.tags : []), 'lms', 'Draft']));
     const draftCourse = {
       ...currentCourse,
@@ -618,13 +646,17 @@ function AQFCourseBuilderInner({
       updatedAt: Date.now()
     };
     setCurrentCourse(draftCourse);
+    lastSavedJsonRef.current = JSON.stringify(draftCourse);
     try {
       await onSaveCourse(draftCourse);
-      setSaveNotice({ type: 'success', message: '📝 Course saved as Draft (Tag "Draft" added. Hidden from other teachers & students).' });
+      setLastSavedTime(new Date());
+      setSaveNotice({ type: 'success', message: '📝 Course saved as Draft (Visible to registered students in preview mode).' });
       setTimeout(() => setSaveNotice(null), 3500);
     } catch (err) {
       console.error('Course save failed:', err);
       setSaveNotice({ type: 'error', message: `⚠️ The course was NOT saved to the cloud (${err?.code || err?.message || 'unknown error'}). Your edits are still here — check your connection and press Save Draft again.` });
+    } finally {
+      setIsSavingDraft(false);
     }
   };
 
@@ -647,14 +679,24 @@ function AQFCourseBuilderInner({
       updatedAt: Date.now()
     };
     setCurrentCourse(publishedCourse);
+    lastSavedJsonRef.current = JSON.stringify(publishedCourse);
     try {
       await publishCourseToMarketplace(publishedCourse);
       await onSaveCourse(publishedCourse);
+      setLastSavedTime(new Date());
       setSaveNotice({ type: 'success', message: '🚀 Published! The course now appears in Global Search for every OzEdu teacher.' });
       setTimeout(() => setSaveNotice(null), 4000);
     } catch (err) {
       console.error('Course publish failed:', err);
       setSaveNotice({ type: 'error', message: `⚠️ The course was NOT published (${err?.code || err?.message || 'unknown error'}). Check your connection and press Publish again.` });
+    }
+  };
+
+  const handleBack = () => {
+    if (hasUnsavedChanges) {
+      setShowUnsavedModal(true);
+    } else {
+      onBack();
     }
   };
 
@@ -668,7 +710,7 @@ function AQFCourseBuilderInner({
       {/* Top Banner Header */}
       <header className="builder-top-header glass">
         <div className="builder-header-left">
-          <button className="nav-btn secondary" onClick={onBack} title="Back to Courses">
+          <button className="nav-btn secondary" onClick={handleBack} title="Back to Courses">
             ← Back
           </button>
           <div>
@@ -686,6 +728,20 @@ function AQFCourseBuilderInner({
               ) : (
                 <span className="aqf-badge-pill" style={{ background: '#059669', color: '#fff' }}>
                   🌐 Published
+                </span>
+              )}
+              {hasUnsavedChanges ? (
+                <span
+                  className="aqf-save-status-pill unsaved"
+                  title="You have unsaved changes. Remember to press Save Draft."
+                  onClick={handleSave}
+                  style={{ cursor: 'pointer' }}
+                >
+                  ● Unsaved changes
+                </span>
+              ) : (
+                <span className="aqf-save-status-pill saved" title="All changes saved to cloud draft">
+                  ✓ {lastSavedTime ? `Saved ${lastSavedTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Saved to draft'}
                 </span>
               )}
             </div>
@@ -758,13 +814,45 @@ function AQFCourseBuilderInner({
             👥 Add People
           </button>
 
+          {/* Auto-Save Interval Selector */}
+          <div className="builder-autosave-wrap" title="Auto-save draft frequency (Recommended: 60s)">
+            <label htmlFor="builder-autosave-select" className="builder-autosave-label">
+              ⏱️ Auto-save:
+            </label>
+            <select
+              id="builder-autosave-select"
+              className="builder-autosave-select"
+              value={autoSaveIntervalSec}
+              onChange={e => {
+                const val = Number(e.target.value);
+                setAutoSaveIntervalSec(val);
+                try { localStorage.setItem('ozedu_builder_autosave_interval', String(val)); } catch (_) {}
+              }}
+              aria-label="Auto-save draft interval"
+            >
+              <option value="0">Off (Manual)</option>
+              <option value="30">Every 30s</option>
+              <option value="60">Every 60s (Recommended)</option>
+              <option value="120">Every 2m</option>
+            </select>
+          </div>
+
           <button
-            className="nav-btn secondary"
+            className={`nav-btn secondary ${hasUnsavedChanges ? 'unsaved-highlight' : ''}`}
             onClick={handleSave}
-            style={{ borderColor: 'rgba(245, 158, 11, 0.7)', color: '#fef08a', display: 'flex', alignItems: 'center', gap: '6px' }}
-            title="Save course as Draft (Tag: Draft • Private to you)"
+            disabled={isSavingDraft}
+            style={{
+              borderColor: hasUnsavedChanges ? '#f59e0b' : 'rgba(245, 158, 11, 0.7)',
+              color: '#fef08a',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              boxShadow: hasUnsavedChanges ? '0 0 10px rgba(245, 158, 11, 0.35)' : 'none'
+            }}
+            title={hasUnsavedChanges ? "You have unsaved changes! Press Save Draft to save to the cloud and update registered students." : "Save course as Draft (Visible to registered students in preview mode)"}
           >
-            <span>📝</span> Save Draft
+            <span>{isSavingDraft ? '💾' : '📝'}</span> {isSavingDraft ? 'Saving Draft…' : 'Save Draft'}
+            {hasUnsavedChanges && <span className="unsaved-dot-indicator" title="Unsaved changes">●</span>}
           </button>
 
           <button
@@ -1153,17 +1241,22 @@ function AQFCourseBuilderInner({
             </div>
 
             <p style={{ margin: '0 0 14px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-              One list for the whole course. Weightings are a share of the course grade. Unit quizzes are added as ❓ Quiz & Questions blocks inside lessons.
+              One list for the whole course — you add every task. Each new Formative or Summative task starts with the sample rubric for its type, ready to edit. Weightings are a share of the course grade. Unit quizzes are added as ❓ Quiz & Questions blocks inside units.
             </p>
 
             {isAssessmentsExpanded && (
               <div>
                 {courseAssessments.length === 0 ? (
                   <div className="empty-state-card">
-                    <p>No assessment tasks yet.</p>
-                    <button className="nav-btn primary" onClick={() => handleAddAssessment('summative')}>
-                      Add Summative Task
-                    </button>
+                    <p>No assessment tasks yet. Add each task yourself — it starts with a sample rubric for its type.</p>
+                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                      <button className="nav-btn secondary" onClick={() => handleAddAssessment('formative')}>
+                        Add Formative Task
+                      </button>
+                      <button className="nav-btn primary" onClick={() => handleAddAssessment('summative')}>
+                        Add Summative Task
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   courseAssessments.map((asmt) => {
@@ -1186,7 +1279,12 @@ function AQFCourseBuilderInner({
                             <select
                               className={`asmt-type-pill asmt-type-select ${asmt.type}`}
                               value={asmt.type === 'summative' ? 'summative' : 'formative'}
-                              onChange={e => handleUpdateAssessment(asmt.id, { type: e.target.value })}
+                              onChange={e => {
+                                const nextType = e.target.value === 'summative' ? 'summative' : 'formative';
+                                // A sample rubric the teacher has not changed follows the task type; an edited rubric is kept.
+                                const followsType = isSampleRubric(asmt.rubric, asmt.type === 'summative' ? 'summative' : 'formative');
+                                handleUpdateAssessment(asmt.id, followsType ? { type: nextType, rubric: createDefaultRubric(nextType) } : { type: nextType });
+                              }}
                               aria-label="Assessment type"
                             >
                               <option value="formative">FORMATIVE</option>
@@ -1295,7 +1393,7 @@ function AQFCourseBuilderInner({
                                     type="button"
                                     className="nav-btn secondary"
                                     style={{ fontSize: '0.78rem', padding: '4px 8px' }}
-                                    onClick={() => handleUpdateAssessment(asmt.id, { rubric: createDefaultRubric(), rubricNotes: legacyRubricText })}
+                                    onClick={() => handleUpdateAssessment(asmt.id, { rubric: createDefaultRubric(asmt.type === 'summative' ? 'summative' : 'formative'), rubricNotes: legacyRubricText })}
                                   >
                                     Convert to a rubric matrix
                                   </button>
@@ -1468,7 +1566,7 @@ function AQFCourseBuilderInner({
               <div>
                 {(currentCourse.units || []).length === 0 ? (
                   <div className="empty-state-card">
-                    <p>No units added yet. Add a unit to build out lessons and quizzes.</p>
+                    <p>No units added yet. Add a unit to write its content and add blocks and quizzes.</p>
                     <button className="nav-btn primary" onClick={handleAddUnit}>
                       + Add Unit
                     </button>
@@ -1476,8 +1574,11 @@ function AQFCourseBuilderInner({
                 ) : (
                   (currentCourse.units || []).map((unit, uIdx) => {
                     const isUnitOpen = expandedUnits[unit.id] === true;
-                    const lessons = Array.isArray(unit.lessons) ? unit.lessons : [];
-                    const unitQuizCount = lessons.reduce((acc, l) => acc + (l.blocks || []).filter(b => b.type === 'quiz').length, 0);
+                    const unitBlocks = Array.isArray(unit.blocks) ? unit.blocks : [];
+                    // 📝 Unit Description blocks show at the top (above Performance Criteria); the rest below Unit Content.
+                    const descriptionBlocks = unitBlocks.filter(b => b?.type === 'text_description');
+                    const otherBlocks = unitBlocks.filter(b => b?.type !== 'text_description');
+                    const unitQuizCount = unitBlocks.filter(b => b?.type === 'quiz').length;
 
                     return (
                       <div
@@ -1518,7 +1619,7 @@ function AQFCourseBuilderInner({
                               {unit.unitTitle || 'Untitled Unit'}
                             </strong>
                             <span className="sl-muted" style={{ fontSize: '0.8rem' }}>
-                              • {unit.nominalHours || 40} hrs • {lessons.length} lesson{lessons.length === 1 ? '' : 's'}
+                              {unit.nominalHours ? `• ${unit.nominalHours} hrs • ` : '• '}{otherBlocks.length} block{otherBlocks.length === 1 ? '' : 's'}
                               {unitQuizCount > 0 ? ` • ${unitQuizCount} quiz${unitQuizCount === 1 ? '' : 'zes'}` : ''}
                             </span>
                           </div>
@@ -1548,10 +1649,11 @@ function AQFCourseBuilderInner({
                             <div className="unit-editor-header">
                               <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr 120px', gap: '12px', alignItems: 'flex-start' }}>
                                 <div>
-                                  <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}>
+                                  <label className="unit-field-label" htmlFor={`unit-code-${unit.id}`}>
                                     Unit Code
                                   </label>
                                   <input
+                                    id={`unit-code-${unit.id}`}
                                     type="text"
                                     className="form-input"
                                     value={unit.unitCode || ''}
@@ -1560,10 +1662,11 @@ function AQFCourseBuilderInner({
                                   />
                                 </div>
                                 <div>
-                                  <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}>
+                                  <label className="unit-field-label" htmlFor={`unit-title-${unit.id}`}>
                                     Unit Title
                                   </label>
                                   <input
+                                    id={`unit-title-${unit.id}`}
                                     type="text"
                                     className="form-input"
                                     style={{ fontWeight: 700, fontSize: '1.05rem' }}
@@ -1574,20 +1677,25 @@ function AQFCourseBuilderInner({
                                 </div>
                                 <div>
                                   <label
-                                    style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}
+                                    className="unit-field-label"
+                                    htmlFor={`unit-hours-${unit.id}`}
                                     title="Nominal Guided Learning Hours: the estimated study and instructional hours allocated to complete this unit."
                                   >
                                     Nominal Hours
                                   </label>
                                   <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
                                     <input
+                                      id={`unit-hours-${unit.id}`}
                                       type="number"
                                       min="1"
                                       className="form-input"
                                       style={{ paddingRight: '36px' }}
-                                      value={unit.nominalHours || 40}
-                                      onChange={e => handleUpdateUnit(unit.id, 'nominalHours', Number(e.target.value) || 0)}
-                                      placeholder="40"
+                                      value={unit.nominalHours ?? ''}
+                                      onChange={e => {
+                                        const val = e.target.value;
+                                        handleUpdateUnit(unit.id, 'nominalHours', val === '' ? '' : (Number(val) || 0));
+                                      }}
+                                      placeholder="Hours"
                                       title="Nominal Guided Learning Hours (guided instructional and study time)"
                                     />
                                     <span style={{ position: 'absolute', right: '10px', fontSize: '0.78rem', color: '#94a3b8', pointerEvents: 'none', fontWeight: 600 }}>
@@ -1596,9 +1704,44 @@ function AQFCourseBuilderInner({
                                   </div>
                                 </div>
                               </div>
+                              {/* 📝 Unit Description (above Performance Criteria) */}
+                              {(descriptionBlocks.length ? descriptionBlocks : [null]).map((block, dIdx) => {
+                                const fieldId = `unit-description-${block ? block.id : unit.id}`;
+                                return (
+                                  <div key={block ? block.id : 'unit-description-new'} className="unit-description-field">
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '10px 0 4px' }}>
+                                      <label className="unit-field-label" htmlFor={fieldId} style={{ margin: 0 }}>
+                                        Unit Description{descriptionBlocks.length > 1 ? ` (${dIdx + 1})` : ''}
+                                      </label>
+                                      {block && (
+                                        <button
+                                          type="button"
+                                          className="delete-icon-btn"
+                                          onClick={() => handleDeleteBlock(unit.id, block.id)}
+                                          title="Remove this Unit Description"
+                                          aria-label="Remove Unit Description"
+                                        >
+                                          ×
+                                        </button>
+                                      )}
+                                    </div>
+                                    <textarea
+                                      id={fieldId}
+                                      rows="3"
+                                      className="form-input unit-description-textarea"
+                                      value={block ? block.content || '' : ''}
+                                      onChange={e => (block
+                                        ? handleUpdateBlock(unit.id, block.id, { content: e.target.value })
+                                        : handleStartUnitDescription(unit.id, e.target.value))}
+                                      placeholder="What this unit is about, who it is for and what learners will do…"
+                                    />
+                                  </div>
+                                );
+                              })}
                               <label
+                                className="unit-field-label"
                                 htmlFor={`unit-performance-criteria-${unit.id}`}
-                                style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', margin: '10px 0 4px' }}
+                                style={{ marginTop: '10px' }}
                               >
                                 Performance Criteria
                               </label>
@@ -1610,292 +1753,208 @@ function AQFCourseBuilderInner({
                                 onChange={e => handleUpdateUnit(unit.id, 'description', e.target.value)}
                                 placeholder="What a learner must demonstrate to be competent in this unit…"
                               />
-                              <label className="field-label" style={{ marginTop: '8px' }}>Unit Learning Outcomes (one per line)</label>
+                              <label className="unit-field-label" htmlFor={`unit-outcomes-${unit.id}`} style={{ marginTop: '10px' }}>Unit Learning Outcomes (one per line)</label>
                               <textarea
+                                id={`unit-outcomes-${unit.id}`}
                                 rows="2"
                                 className="form-input"
                                 value={listToLines(unit.learningOutcomes)}
                                 onChange={e => handleUpdateUnit(unit.id, 'learningOutcomes', linesToList(e.target.value))}
                                 placeholder="Explain…&#10;Apply…"
                               />
+                              <label className="unit-field-label" htmlFor={`unit-content-${unit.id}`} style={{ marginTop: '10px' }}>Unit Content</label>
+                              <textarea
+                                id={`unit-content-${unit.id}`}
+                                rows="8"
+                                className="form-input unit-content-textarea"
+                                maxLength={UNIT_LIMITS.content}
+                                value={unit.content || ''}
+                                onChange={e => handleUpdateUnit(unit.id, 'content', e.target.value)}
+                                placeholder="Write up the lesson paragraphs for this unit: explanations, examples and activities students work through…"
+                              />
                             </div>
 
-                            {/* A unit holds lessons & blocks only */}
-                            <div className="unit-tabs-row">
-                              <span className="tab-btn active" aria-current="true">
-                                📚 Lessons & Blocks ({(unit.lessons || []).length})
-                              </span>
-                            </div>
+                            {/* Unit blocks, in order: Unit Description, Teacher Guide, YouTube Video, Google Drive Resource, Gemini Notebook, Quiz & Questions */}
+                            <div className="unit-blocks-container">
+                              <div className="blocks-stack">
+                                {otherBlocks.map(block => (
+                                  <div key={block.id} className={`content-block-item type-${block.type}`}>
+                                    <div className="block-header">
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        <span className="block-type-icon">
+                                          {CONTENT_BLOCK_TYPES.find(t => t.type === block.type)?.icon || '📄'}
+                                        </span>
+                                        <span className="block-type-label">
+                                          {CONTENT_BLOCK_TYPES.find(t => t.type === block.type)?.label || block.type}
+                                        </span>
+                                      </div>
+                                      <button
+                                        className="delete-icon-btn"
+                                        onClick={() => handleDeleteBlock(unit.id, block.id)}
+                                        title="Remove Block"
+                                      >
+                                        ×
+                                      </button>
+                                    </div>
 
-                            {/* UNIT CURRICULUM (LESSONS & BLOCKS) */}
-                            <div className="lessons-container">
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-                                <h3 style={{ margin: 0, fontSize: '1.05rem' }}>Modular Lesson Stack</h3>
-                                <button className="nav-btn primary" onClick={() => handleAddLesson(unit.id)}>
-                                  + Add Lesson
-                                </button>
+                                    {/* Title (📝 Unit Description blocks are edited above Performance Criteria) */}
+                                    <input
+                                      type="text"
+                                      className="form-input block-title-input"
+                                      value={block.title || ''}
+                                      onChange={e => handleUpdateBlock(unit.id, block.id, { title: e.target.value })}
+                                      placeholder={
+                                        block.type === 'youtube_video' ? 'Video Title (e.g. Introductory Video)'
+                                        : block.type === 'google_drive_link' ? 'Resource Title (e.g. Unit Slides)'
+                                        : block.type === 'notebook_link' ? 'Notebook Title (e.g. Study Notebook)'
+                                        : block.type === 'quiz' ? 'Quiz Title (e.g. Unit Quiz)'
+                                        : block.type === 'teacher_guide' ? 'Teacher Guide Heading'
+                                        : 'Title'
+                                      }
+                                    />
+
+                                    {/* BLOCK TYPE: Teacher Guide */}
+                                    {block.type === 'teacher_guide' && (
+                                      <div className="teacher-guide-box">
+                                        <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#f59e0b', marginBottom: '4px' }}>
+                                          🧑‍🏫 Internal Pedagogy & Facilitation Guide (Invisible to students)
+                                        </div>
+                                        <textarea
+                                          rows="3"
+                                          className="form-input"
+                                          style={{ borderColor: '#f59e0b' }}
+                                          value={block.content || ''}
+                                          onChange={e => handleUpdateBlock(unit.id, block.id, { content: e.target.value })}
+                                          placeholder="Classroom timings, discussion scaffolding, common misconceptions..."
+                                        />
+                                      </div>
+                                    )}
+
+                                    {/* BLOCK TYPE: YouTube Video */}
+                                    {block.type === 'youtube_video' && (
+                                      <div>
+                                        <input
+                                          type="text"
+                                          className="form-input"
+                                          value={block.metadata?.youtubeUrl || block.content || ''}
+                                          onChange={e => {
+                                            const url = e.target.value;
+                                            handleUpdateBlock(unit.id, block.id, {
+                                              content: url,
+                                              metadata: { youtubeUrl: url }
+                                            });
+                                          }}
+                                          placeholder="Paste YouTube Video URL (e.g. https://www.youtube.com/watch?v=...)"
+                                        />
+                                        {youtubeVideoId(block.metadata?.youtubeUrl || block.content) && (
+                                          <div className="video-preview-badge">
+                                            <span>▶️ YouTube Streaming Embed Active</span>
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {/* BLOCK TYPE: Google Drive Resource */}
+                                    {block.type === 'google_drive_link' && (
+                                      <div>
+                                        <div className="drive-advisory-banner">
+                                          <span>⚠️</span>
+                                          <div>
+                                            <strong>Google Drive Link Advisory:</strong> Please ensure this file/folder is set to <strong>"Anyone with the link can view"</strong> in Google Drive before publishing.
+                                          </div>
+                                        </div>
+
+                                        <input
+                                          type="text"
+                                          className="form-input"
+                                          value={block.metadata?.driveUrl || block.content || ''}
+                                          onChange={e => {
+                                            const url = e.target.value;
+                                            handleUpdateBlock(unit.id, block.id, {
+                                              content: url,
+                                              metadata: { driveUrl: url }
+                                            });
+                                          }}
+                                          placeholder="Paste Google Drive shared link (Docs, Slides, Sheets, or Folders)"
+                                        />
+                                      </div>
+                                    )}
+
+                                    {/* BLOCK TYPE: Direct File Upload */}
+                                    {block.type === 'file_upload' && (
+                                      <div>
+                                        <input
+                                          type="text"
+                                          className="form-input"
+                                          value={block.metadata?.fileUrl || block.content || ''}
+                                          onChange={e => {
+                                            const url = e.target.value;
+                                            handleUpdateBlock(unit.id, block.id, {
+                                              content: url,
+                                              metadata: { fileUrl: url }
+                                            });
+                                          }}
+                                          placeholder="File Download URL or Cloud Storage Link..."
+                                        />
+                                      </div>
+                                    )}
+
+                                    {/* BLOCK TYPE: Gemini Notebook */}
+                                    {block.type === 'notebook_link' && (
+                                      <div>
+                                        <input
+                                          type="url"
+                                          className="form-input"
+                                          value={block.metadata?.notebookUrl || block.content || ''}
+                                          onChange={e => {
+                                            const url = e.target.value.trim();
+                                            handleUpdateBlock(unit.id, block.id, {
+                                              content: url,
+                                              metadata: { notebookUrl: url }
+                                            });
+                                          }}
+                                          placeholder="Paste the Gemini Notebook share link (e.g. https://notebooklm.google.com/notebook/...)"
+                                        />
+                                        {(block.metadata?.notebookUrl || block.content) && !isGoogleNotebookUrl(block.metadata?.notebookUrl || block.content) && (
+                                          <div className="notebook-hint">⚠️ This does not look like a Gemini Notebook link. Paste the notebook&apos;s https:// share link (e.g. https://notebooklm.google.com/notebook/…) and share the notebook so students can open it.</div>
+                                        )}
+                                        {isGoogleNotebookUrl(block.metadata?.notebookUrl || block.content) && (
+                                          <div className="video-preview-badge">📓 Gemini Notebook link ready</div>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {/* BLOCK TYPE: Quiz & Questions */}
+                                    {block.type === 'quiz' && (
+                                      <QuizBlockEditor
+                                        quiz={block.quiz}
+                                        keysStatus={quizKeysStatus}
+                                        onChange={nextQuiz => handleUpdateBlock(unit.id, block.id, { quiz: nextQuiz })}
+                                      />
+                                    )}
+                                  </div>
+                                ))}
                               </div>
 
-                              {(unit.lessons || []).length === 0 ? (
-                                <div className="empty-state-card">
-                                  <p>No lessons added yet.</p>
-                                  <button className="nav-btn primary" onClick={() => handleAddLesson(unit.id)}>
-                                    Create First Lesson
+                              {/* Add Block Toolbar */}
+                              <div className="add-block-toolbar">
+                                <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Add Block:</span>
+                                {CONTENT_BLOCK_TYPES.map(bt => (
+                                  <button
+                                    key={bt.type}
+                                    type="button"
+                                    className={`add-block-btn ${bt.disabled ? 'disabled' : ''}`}
+                                    onClick={() => !bt.disabled && handleAddBlock(unit.id, bt.type)}
+                                    disabled={Boolean(bt.disabled)}
+                                    aria-disabled={Boolean(bt.disabled)}
+                                    title={bt.disabled ? bt.disabledReason : bt.description}
+                                  >
+                                    <span>{bt.icon}</span>
+                                    <span>{bt.label}</span>
+                                    {bt.disabled && <span className="soon-badge">Soon</span>}
                                   </button>
-                                </div>
-                              ) : (
-                                (unit.lessons || []).map((lesson, lIdx) => {
-                                  const isLessonOpen = expandedLessons[lesson.id] === true;
-                                  const quizBlocks = (lesson.blocks || []).filter(b => b.type === 'quiz');
-
-                                  return (
-                                    <div key={lesson.id} className="lesson-card glass">
-                                      {/* Lesson Header */}
-                                      <div className="lesson-header-row">
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
-                                          <button
-                                            type="button"
-                                            className="collapse-toggle-btn"
-                                            onClick={() => setExpandedLessons(prev => ({ ...prev, [lesson.id]: !isLessonOpen }))}
-                                            aria-label={isLessonOpen ? "Collapse lesson" : "Expand lesson"}
-                                            style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '2px 4px' }}
-                                          >
-                                            {isLessonOpen ? '▼' : '►'}
-                                          </button>
-                                          <span className="lesson-index-badge">#{lIdx + 1}</span>
-                                          <input
-                                            type="text"
-                                            className="form-input lesson-title-input"
-                                            value={lesson.title || ''}
-                                            onChange={e => handleUpdateLesson(unit.id, lesson.id, 'title', e.target.value)}
-                                            placeholder="Lesson Title"
-                                          />
-                                          {quizBlocks.length > 0 && (
-                                            <span style={{ fontSize: '0.72rem', background: 'rgba(167, 139, 250, 0.2)', color: '#c4b5fd', padding: '2px 6px', borderRadius: '4px', fontWeight: 700 }}>
-                                              {quizBlocks.length} quiz{quizBlocks.length === 1 ? '' : 'zes'}
-                                            </span>
-                                          )}
-                                        </div>
-
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                          <input
-                                            type="number"
-                                            className="form-input"
-                                            style={{ width: '80px', margin: 0 }}
-                                            value={lesson.estimatedMinutes || 45}
-                                            onChange={e => handleUpdateLesson(unit.id, lesson.id, 'estimatedMinutes', Number(e.target.value))}
-                                            title="Estimated duration in minutes"
-                                          />
-                                          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>min</span>
-                                          <button
-                                            type="button"
-                                            className="collapse-toggle-btn"
-                                            style={{ fontSize: '0.75rem', color: '#94a3b8', background: 'transparent', border: 'none', cursor: 'pointer' }}
-                                            onClick={() => setExpandedLessons(prev => ({ ...prev, [lesson.id]: !isLessonOpen }))}
-                                          >
-                                            {isLessonOpen ? 'Collapse' : 'Expand'}
-                                          </button>
-                                          <button
-                                            className="delete-icon-btn"
-                                            onClick={() => handleDeleteLesson(unit.id, lesson.id)}
-                                            title="Delete Lesson"
-                                          >
-                                            🗑️
-                                          </button>
-                                        </div>
-                                      </div>
-
-                                      {/* Modular Content Blocks Stack */}
-                                      {isLessonOpen && (
-                                        <>
-                                          <div className="blocks-stack">
-                                            {(lesson.blocks || []).map((block, bIdx) => (
-                                              <div key={block.id} className={`content-block-item type-${block.type}`}>
-                                                <div className="block-header">
-                                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                    <span className="block-type-icon">
-                                                      {CONTENT_BLOCK_TYPES.find(t => t.type === block.type)?.icon || '📄'}
-                                                    </span>
-                                                    <span className="block-type-label">
-                                                      {CONTENT_BLOCK_TYPES.find(t => t.type === block.type)?.label || block.type}
-                                                    </span>
-                                                  </div>
-                                                  <button
-                                                    className="delete-icon-btn"
-                                                    onClick={() => handleDeleteBlock(unit.id, lesson.id, block.id)}
-                                                    title="Remove Block"
-                                                  >
-                                                    ×
-                                                  </button>
-                                                </div>
-
-                                                <input
-                                                  type="text"
-                                                  className="form-input block-title-input"
-                                                  value={block.title || ''}
-                                                  onChange={e => handleUpdateBlock(unit.id, lesson.id, block.id, { title: e.target.value })}
-                                                  placeholder="Block Title or Section Heading"
-                                                />
-
-                                                {/* BLOCK TYPE: Text Description */}
-                                                {block.type === 'text_description' && (
-                                                  <textarea
-                                                    rows="3"
-                                                    className="form-input"
-                                                    value={block.content || ''}
-                                                    onChange={e => handleUpdateBlock(unit.id, lesson.id, block.id, { content: e.target.value })}
-                                                    placeholder="Markdown instructional content, core theory, or student notes..."
-                                                  />
-                                                )}
-
-                                                {/* BLOCK TYPE: Teacher Guide */}
-                                                {block.type === 'teacher_guide' && (
-                                                  <div className="teacher-guide-box">
-                                                    <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#f59e0b', marginBottom: '4px' }}>
-                                                      🧑‍🏫 Internal Pedagogy & Facilitation Guide (Invisible to students)
-                                                    </div>
-                                                    <textarea
-                                                      rows="3"
-                                                      className="form-input"
-                                                      style={{ borderColor: '#f59e0b' }}
-                                                      value={block.content || ''}
-                                                      onChange={e => handleUpdateBlock(unit.id, lesson.id, block.id, { content: e.target.value })}
-                                                      placeholder="Classroom timings, discussion scaffolding, common misconceptions..."
-                                                    />
-                                                  </div>
-                                                )}
-
-                                                {/* BLOCK TYPE: YouTube Video */}
-                                                {block.type === 'youtube_video' && (
-                                                  <div>
-                                                    <input
-                                                      type="text"
-                                                      className="form-input"
-                                                      value={block.metadata?.youtubeUrl || block.content || ''}
-                                                      onChange={e => {
-                                                        const url = e.target.value;
-                                                        handleUpdateBlock(unit.id, lesson.id, block.id, {
-                                                          content: url,
-                                                          metadata: { youtubeUrl: url }
-                                                        });
-                                                      }}
-                                                      placeholder="Paste YouTube Video URL (e.g. https://www.youtube.com/watch?v=...)"
-                                                    />
-                                                    {youtubeVideoId(block.metadata?.youtubeUrl || block.content) && (
-                                                      <div className="video-preview-badge">
-                                                        <span>▶️ YouTube Streaming Embed Active</span>
-                                                      </div>
-                                                    )}
-                                                  </div>
-                                                )}
-
-                                                {/* BLOCK TYPE: Google Drive Resource */}
-                                                {block.type === 'google_drive_link' && (
-                                                  <div>
-                                                    <div className="drive-advisory-banner">
-                                                      <span>⚠️</span>
-                                                      <div>
-                                                        <strong>Google Drive Link Advisory:</strong> Please ensure this file/folder is set to <strong>"Anyone with the link can view"</strong> in Google Drive before publishing.
-                                                      </div>
-                                                    </div>
-
-                                                    <input
-                                                      type="text"
-                                                      className="form-input"
-                                                      value={block.metadata?.driveUrl || block.content || ''}
-                                                      onChange={e => {
-                                                        const url = e.target.value;
-                                                        handleUpdateBlock(unit.id, lesson.id, block.id, {
-                                                          content: url,
-                                                          metadata: { driveUrl: url }
-                                                        });
-                                                      }}
-                                                      placeholder="Paste Google Drive shared link (Docs, Slides, Sheets, or Folders)"
-                                                    />
-                                                  </div>
-                                                )}
-
-                                                {/* BLOCK TYPE: Direct File Upload */}
-                                                {block.type === 'file_upload' && (
-                                                  <div>
-                                                    <input
-                                                      type="text"
-                                                      className="form-input"
-                                                      value={block.metadata?.fileUrl || block.content || ''}
-                                                      onChange={e => {
-                                                        const url = e.target.value;
-                                                        handleUpdateBlock(unit.id, lesson.id, block.id, {
-                                                          content: url,
-                                                          metadata: { fileUrl: url }
-                                                        });
-                                                      }}
-                                                      placeholder="File Download URL or Cloud Storage Link..."
-                                                    />
-                                                  </div>
-                                                )}
-
-                                                {/* BLOCK TYPE: Gemini Notebook */}
-                                                {block.type === 'notebook_link' && (
-                                                  <div>
-                                                    <input
-                                                      type="url"
-                                                      className="form-input"
-                                                      value={block.metadata?.notebookUrl || block.content || ''}
-                                                      onChange={e => {
-                                                        const url = e.target.value.trim();
-                                                        handleUpdateBlock(unit.id, lesson.id, block.id, {
-                                                          content: url,
-                                                          metadata: { notebookUrl: url }
-                                                        });
-                                                      }}
-                                                      placeholder="Paste the Gemini Notebook share link (e.g. https://notebooklm.google.com/notebook/...)"
-                                                    />
-                                                    {(block.metadata?.notebookUrl || block.content) && !isGoogleNotebookUrl(block.metadata?.notebookUrl || block.content) && (
-                                                      <div className="notebook-hint">⚠️ This does not look like a Gemini Notebook link. Paste the notebook&apos;s https:// share link (e.g. https://notebooklm.google.com/notebook/…) and share the notebook so students can open it.</div>
-                                                    )}
-                                                    {isGoogleNotebookUrl(block.metadata?.notebookUrl || block.content) && (
-                                                      <div className="video-preview-badge">📓 Gemini Notebook link ready</div>
-                                                    )}
-                                                  </div>
-                                                )}
-
-                                                {/* BLOCK TYPE: Quiz & Questions */}
-                                                {block.type === 'quiz' && (
-                                                  <QuizBlockEditor
-                                                    quiz={block.quiz}
-                                                    keysStatus={quizKeysStatus}
-                                                    onChange={nextQuiz => handleUpdateBlock(unit.id, lesson.id, block.id, { quiz: nextQuiz })}
-                                                  />
-                                                )}
-                                              </div>
-                                            ))}
-                                          </div>
-
-                                          {/* Add Block Toolbar */}
-                                          <div className="add-block-toolbar">
-                                            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Add Block:</span>
-                                            {CONTENT_BLOCK_TYPES.map(bt => (
-                                              <button
-                                                key={bt.type}
-                                                type="button"
-                                                className={`add-block-btn ${bt.disabled ? 'disabled' : ''}`}
-                                                onClick={() => !bt.disabled && handleAddBlock(unit.id, lesson.id, bt.type)}
-                                                disabled={Boolean(bt.disabled)}
-                                                aria-disabled={Boolean(bt.disabled)}
-                                                title={bt.disabled ? bt.disabledReason : bt.description}
-                                              >
-                                                <span>{bt.icon}</span>
-                                                <span>{bt.label}</span>
-                                                {bt.disabled && <span className="soon-badge">Soon</span>}
-                                              </button>
-                                            ))}
-                                          </div>
-                                        </>
-                                      )}
-                                    </div>
-                                  );
-                                })
-                              )}
+                                ))}
+                              </div>
                             </div>
                           </div>
                         )}
@@ -1961,8 +2020,8 @@ function AQFCourseBuilderInner({
 
             <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', margin: '8px 0 14px 0' }}>
               {aiSourceMode === 'text'
-                ? 'Paste your raw course outline, syllabus file, or lesson notes below. Gemini will automatically structure units, lessons, modular content blocks, assessment tasks, and rubrics mapped to your target level.'
-                : 'Upload your completed course spreadsheet(s). Gemini keeps everything you entered exactly as written, builds out every blank lesson, block, assessment and rubric, and never invents links.'}
+                ? 'Paste your raw course outline, syllabus file, or lesson notes below. Gemini will automatically structure units, unit content, content blocks, quizzes, assessment tasks, and rubrics mapped to your target level.'
+                : 'Upload your completed course spreadsheet(s). Gemini keeps everything you entered exactly as written, builds out every blank unit, block, assessment and rubric, and never invents links.'}
             </p>
 
             <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: '10px' }}>
@@ -2468,31 +2527,21 @@ function AQFCourseBuilderInner({
           background: rgba(255, 255, 255, 0.12);
           color: #ffffff;
         }
-        .lesson-card {
-          padding: 16px;
-          border-radius: 12px;
-          margin-bottom: 16px;
-          border: 1px solid rgba(255, 255, 255, 0.14);
-        }
-        .lesson-header-row {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 12px;
-          gap: 10px;
-        }
-        .lesson-index-badge {
-          background: #3b82f6;
-          color: #fff;
-          font-size: 0.75rem;
-          font-weight: 800;
-          padding: 3px 8px;
-          border-radius: 6px;
-        }
-        .lesson-title-input {
-          font-size: 1.05rem;
+        /* Every unit field label: same colour as the Unit Description label, normal case */
+        .unit-field-label {
+          display: block;
+          font-size: 0.78rem;
           font-weight: 700;
-          flex: 1;
+          color: var(--text-secondary);
+          text-transform: none;
+          margin: 0 0 4px;
+        }
+        .unit-content-textarea {
+          min-height: 160px;
+          line-height: 1.5;
+        }
+        .unit-blocks-container {
+          margin-top: 14px;
         }
         .blocks-stack {
           display: flex;
@@ -2859,7 +2908,109 @@ function AQFCourseBuilderInner({
           background: linear-gradient(135deg, #a855f7, #6366f1);
           color: #ffffff;
         }
+
+        /* Save status pill & reminder styles */
+        .aqf-save-status-pill {
+          font-size: 0.75rem;
+          font-weight: 700;
+          padding: 3px 10px;
+          border-radius: 999px;
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          transition: all 0.2s ease;
+        }
+        .aqf-save-status-pill.saved {
+          background: rgba(34, 197, 94, 0.15);
+          color: #86efac;
+          border: 1px solid rgba(34, 197, 94, 0.4);
+        }
+        .aqf-save-status-pill.unsaved {
+          background: rgba(245, 158, 11, 0.2);
+          color: #fde047;
+          border: 1px solid rgba(245, 158, 11, 0.5);
+          cursor: pointer;
+        }
+        .aqf-save-status-pill.unsaved:hover {
+          background: rgba(245, 158, 11, 0.3);
+          transform: translateY(-1px);
+        }
+        .unsaved-dot-indicator {
+          color: #f59e0b;
+          font-size: 0.75rem;
+          margin-left: 2px;
+          animation: pulse 1.5s infinite;
+        }
+        .builder-autosave-wrap {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          background: rgba(0, 0, 0, 0.28);
+          padding: 4px 10px;
+          border-radius: 8px;
+          border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        .builder-autosave-label {
+          font-size: 0.78rem;
+          color: var(--text-secondary);
+          white-space: nowrap;
+          cursor: pointer;
+        }
+        .builder-autosave-select {
+          padding: 3px 6px;
+          font-size: 0.78rem;
+          border-radius: 6px;
+          background: rgba(15, 23, 42, 0.75);
+          color: #f8fafc;
+          border: 1px solid rgba(255, 255, 255, 0.15);
+          cursor: pointer;
+        }
       `}</style>
+
+      {/* Unsaved Changes Exit Confirmation Modal */}
+      {showUnsavedModal && (
+        <div className="builder-modal-overlay animate-fade-in" onClick={() => setShowUnsavedModal(false)}>
+          <div className="glass builder-modal-dialog" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', textAlign: 'center' }}>
+            <div style={{ fontSize: '2.5rem', marginBottom: '8px' }}>⚠️</div>
+            <h3 style={{ margin: '0 0 10px 0', color: '#fef08a' }}>Unsaved Changes</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', lineHeight: '1.5', margin: '0 0 20px 0' }}>
+              You have unsaved edits in <strong>{currentCourse.title || 'this course'}</strong>. Would you like to save your draft before leaving?
+            </p>
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="nav-btn primary"
+                style={{ background: 'linear-gradient(135deg, #f59e0b, #d97706)', border: 'none', fontWeight: 700 }}
+                onClick={async () => {
+                  await handleSave();
+                  setShowUnsavedModal(false);
+                  onBack();
+                }}
+              >
+                💾 Save Draft & Exit
+              </button>
+              <button
+                type="button"
+                className="nav-btn secondary"
+                style={{ borderColor: 'rgba(239, 68, 68, 0.5)', color: '#fca5a5' }}
+                onClick={() => {
+                  setShowUnsavedModal(false);
+                  onBack();
+                }}
+              >
+                Discard & Exit
+              </button>
+              <button
+                type="button"
+                className="nav-btn secondary"
+                onClick={() => setShowUnsavedModal(false)}
+              >
+                Keep Editing
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

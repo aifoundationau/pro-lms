@@ -13,6 +13,7 @@ import { listSiteStudents } from '../../services/lmsRepository.js';
 import { sendEnrolmentWelcomes } from '../../services/messageService.js';
 import { readSpreadsheetFiles, SPREADSHEET_FILE_ACCEPT } from '../../services/spreadsheetReader.js';
 import { buildXlsxWorkbook, downloadFile, safeFileStem, XLSX_STYLE } from '../../services/xlsxWriter.js';
+import { canEnrolInCourses } from '../../services/rolePrivileges.js';
 
 /** Combines pasted and uploaded lists, removing duplicates. */
 function mergeMemberLists(...lists) {
@@ -114,7 +115,8 @@ export default function CourseAddPeopleModal({
         memberEmail: email.trim(),
         memberRole: role,
         addedByUid: currentUser?.uid || 'teacher',
-        addedByName: currentUser?.displayName || currentUser?.email || 'Teacher'
+        addedByName: currentUser?.displayName || currentUser?.email || 'Teacher',
+        addedByProfile: userProfile
       });
 
       const welcome = !result.alreadyEnrolled
@@ -155,7 +157,8 @@ export default function CourseAddPeopleModal({
         memberEmail: studentEmail,
         memberRole: 'student',
         addedByUid: currentUser?.uid || 'teacher',
-        addedByName: currentUser?.displayName || currentUser?.email || 'Teacher'
+        addedByName: currentUser?.displayName || currentUser?.email || 'Teacher',
+        addedByProfile: userProfile
       });
 
       const welcome = !result.alreadyEnrolled
@@ -238,7 +241,8 @@ export default function CourseAddPeopleModal({
         members: bulkNew,
         memberRole: bulkRole,
         addedByUid: currentUser?.uid || 'teacher',
-        addedByName: currentUser?.displayName || currentUser?.email || 'Teacher'
+        addedByName: currentUser?.displayName || currentUser?.email || 'Teacher',
+        addedByProfile: userProfile
       });
       const noun = bulkRole === 'student' ? 'student' : bulkRole === 'teacher' ? 'co-teacher' : 'guest';
       const parts = [`✓ Enrolled ${result.added} ${noun}${result.added === 1 ? '' : 's'}.`];
@@ -319,10 +323,10 @@ export default function CourseAddPeopleModal({
           <span style={{ fontSize: '1.5rem' }}>🎓</span>
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 700, color: '#34d399', fontSize: '0.92rem' }}>
-              Teacher Privilege: 0 Tokens Required
+              Enrolment Privilege: 0 Tokens Required
             </div>
             <div style={{ fontSize: '0.82rem', color: '#cbd5e1' }}>
-              Teachers can add any student, co-teacher, or participant to any course free of charge. No tokens will be deducted.
+              Teachers, admins, superadmins, COOs, and CFOs can add any supporter or student to this course free of charge. No tokens will be deducted.
             </div>
           </div>
           <span style={{
@@ -337,6 +341,20 @@ export default function CourseAddPeopleModal({
             FREE • 0 🪙
           </span>
         </div>
+
+        {userProfile && !canEnrolInCourses(userProfile) && (
+          <div style={{
+            background: 'rgba(239, 68, 68, 0.15)',
+            border: '1px solid rgba(239, 68, 68, 0.4)',
+            borderRadius: '12px',
+            padding: '12px 16px',
+            color: '#fca5a5',
+            fontSize: '0.88rem',
+            marginBottom: '16px'
+          }}>
+            🔒 Enrolment Restricted: Only teachers, admin, superadmin, COO, and CFO can add members to courses.
+          </div>
+        )}
 
         {/* Notice alert */}
         {notice && (

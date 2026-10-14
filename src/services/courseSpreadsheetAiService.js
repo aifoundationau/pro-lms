@@ -3,8 +3,9 @@
  *
  * Guarantees (enforced in code after every Gemini response, not just requested in the prompt):
  * 1. Every value the teacher typed is kept exactly; Gemini only fills blanks and empty sections.
- * 2. The teacher's structure (units, lessons, quizzes, the course's assessments, rubric criteria)
- *    and order are kept. Units hold lessons & blocks; assessments are one course-level list.
+ * 2. The teacher's structure (units, their blocks and quizzes, the course's assessments, rubric
+ *    criteria) and order are kept. Units hold their content and blocks; assessments are one
+ *    course-level list.
  * 3. Gemini never adds links: link blocks need a URL that already appears in the spreadsheet.
  *
  * Reliability:
@@ -119,7 +120,7 @@ export function mergeBlocks(teacherBlocks, aiBlocks, quizBudget = { allowNewQuiz
     let index;
     if (link) {
       // A teacher link only takes details from Gemini's block for the same link, so with several
-      // videos, Drive files or notebooks in a lesson no link gets another link's title.
+      // videos, Drive files or notebooks in a unit no link gets another link's title.
       index = ai.findIndex((candidate, i) => !used.has(i) && candidate.type === block.type && linkKey(candidate) === link);
     } else {
       index = ai.findIndex((candidate, i) => !used.has(i) && candidate.type === block.type &&
@@ -134,7 +135,7 @@ export function mergeBlocks(teacherBlocks, aiBlocks, quizBudget = { allowNewQuiz
     if (block.type === 'quiz') merged.quiz = block.quiz?.questions?.length ? block.quiz : (match.quiz || block.quiz);
     return merged;
   });
-  // Add block types the teacher's lesson lacks (e.g. a teacher guide), one of each.
+  // Add block types the teacher's unit lacks (e.g. a teacher guide), one of each.
   const present = new Set(merged.map(b => b.type));
   ai.forEach((candidate, i) => {
     if (used.has(i) || present.has(candidate.type)) return;
@@ -185,21 +186,11 @@ function mergeAssessment(teacher, ai) {
   };
 }
 
-function mergeLesson(teacher, ai, quizBudget) {
-  if (!ai) return teacher;
-  return {
-    ...teacher,
-    title: pick(teacher.title, ai.title),
-    estimatedMinutes: teacher.estimatedMinutes ?? ai.estimatedMinutes ?? null,
-    blocks: mergeBlocks(teacher.blocks, ai.blocks, quizBudget)
-  };
-}
-
-/** Merges Gemini's unit into the teacher's unit (lessons & blocks): teacher values and structure win. */
+/** Merges Gemini's unit into the teacher's unit (content & blocks): teacher values and structure win. */
 export function mergeUnit(teacher, ai) {
   if (!ai) return teacher;
-  const lessonPairs = pairItems(teacher.lessons || [], ai.lessons || [], l => normalizeKey(l.title));
-  const teacherHasQuiz = (teacher.lessons || []).some(l => (l.blocks || []).some(b => b?.type === 'quiz'));
+  const teacherBlocks = Array.isArray(teacher.blocks) ? teacher.blocks : [];
+  const teacherHasQuiz = teacherBlocks.some(b => b?.type === 'quiz');
   const quizBudget = { allowNewQuiz: !teacherHasQuiz, quizAdded: false };
   return {
     ...teacher,
@@ -208,9 +199,8 @@ export function mergeUnit(teacher, ai) {
     nominalHours: teacher.nominalHours ?? ai.nominalHours ?? null,
     description: pick(teacher.description, ai.description),
     learningOutcomes: teacher.learningOutcomes?.length ? teacher.learningOutcomes : (ai.learningOutcomes || []),
-    lessons: teacher.lessons?.length
-      ? teacher.lessons.map((lesson, i) => mergeLesson(lesson, lessonPairs[i], quizBudget))
-      : (ai.lessons || []).map(lesson => ({ ...lesson, blocks: mergeBlocks([], lesson.blocks, quizBudget) }))
+    content: pick(teacher.content, ai.content),
+    blocks: mergeBlocks(teacherBlocks, ai.blocks, quizBudget)
   };
 }
 
@@ -237,15 +227,13 @@ function unitForPrompt(unit) {
     nominalHours: unit.nominalHours ?? null,
     description: unit.description || '',
     learningOutcomes: unit.learningOutcomes || [],
-    lessons: (unit.lessons || []).map(l => ({
-      title: l.title || '',
-      estimatedMinutes: l.estimatedMinutes ?? null,
-      blocks: (l.blocks || []).map(b => ({
-        type: b.type,
-        title: b.title || '',
-        content: b.content || '',
-        ...(b.type === 'quiz' ? { questions: (b.quiz?.questions || []).length } : {})
-      }))
+    ...(Array.isArray(unit.topics) && unit.topics.length ? { topics: unit.topics } : {}),
+    content: unit.content || '',
+    blocks: (unit.blocks || []).map(b => ({
+      type: b.type,
+      title: b.title || '',
+      content: b.content || '',
+      ...(b.type === 'quiz' ? { questions: (b.quiz?.questions || []).length } : {})
     }))
   };
 }
@@ -337,13 +325,13 @@ ${unstructured}
 """
 ` : ''}
 RULES
-1. Keep every lesson and content block in the teacher's draft, in the same order. Copy every non-blank value exactly (titles, text, links). Write content only for blank values. A unit has lessons and blocks only — the course's assessments are planned separately.
-2. If "lessons" is empty, design 3-6 lessons that cover the unit description and outcomes. Every lesson needs a "text_description" block with accurate, engaging instructional content (150-350 words; simple Markdown allowed) and a "teacher_guide" block (facilitation steps, timings, discussion prompts, common misconceptions). Add those two block types to any teacher lesson that lacks them.
-3. Links: never invent URLs. Only use URLs that already appear in the teacher's draft or the spreadsheet content. Link blocks are "youtube_video" (YouTube Video), "google_drive_link" (Google Drive Resource) and "notebook_link" (Gemini Notebook): one block per link, and a lesson may have several of each — keep every one of the teacher's link blocks with its own URL. Do not create link blocks (or "file_upload" blocks) without such a URL; suggest video or resource search terms inside the teacher_guide text instead.
-4. Unit quiz: never change the teacher's "quiz" blocks. If no lesson in this unit has a "quiz" block, add ONE "quiz" block at the end of the unit's last lesson: title (e.g. "Unit quiz"), content = one line of instructions, and "questions": 4-6 questions that check the unit's learning outcomes — mostly "multiple_choice" ("options": 3-5 answer texts, "correct": zero-based indexes of the right options), "true_false" ("correctAnswer": true or false) and "short_answer" ("acceptedAnswers": 1-3 short accepted answers), plus exactly one "open" question with a "modelAnswer" (seen by teachers only). Give each question "points" (1 for closed questions, 5 for the open one).
+1. Keep every content block in the teacher's draft, in the same order. Copy every non-blank value exactly (titles, text, links). Write content only for blank values. A unit has its "content" and "blocks" only (no lessons) — the course's assessments are planned separately.
+2. "content" is the unit's teaching text: the lesson paragraphs students read. If it is blank, write it: accurate, engaging instructional paragraphs (500-1,000 words; simple Markdown allowed) that cover the performance criteria (description) and outcomes. If "topics" are listed (the teacher's lesson titles), cover each one, in order, under its own short heading. A "text_description" block is the Unit Description, shown at the top of the unit above the performance criteria: if the unit has none, add one (2-4 sentences: what the unit covers, who it is for and why it matters). The unit also needs one "teacher_guide" block (facilitation steps, timings, discussion prompts, common misconceptions); add it if the teacher's unit lacks one.
+3. Links: never invent URLs. Only use URLs that already appear in the teacher's draft or the spreadsheet content. Link blocks are "youtube_video" (YouTube Video), "google_drive_link" (Google Drive Resource) and "notebook_link" (Gemini Notebook): one block per link, and a unit may have several of each — keep every one of the teacher's link blocks with its own URL. Do not create link blocks (or "file_upload" blocks) without such a URL; suggest video or resource search terms inside the teacher_guide text instead.
+4. Unit quiz: never change the teacher's "quiz" blocks. If this unit has no "quiz" block, add ONE "quiz" block at the end of the unit's blocks: title (e.g. "Unit quiz"), content = one line of instructions, and "questions": 4-6 questions that check the unit's learning outcomes — mostly "multiple_choice" ("options": 3-5 answer texts, "correct": zero-based indexes of the right options), "true_false" ("correctAnswer": true or false) and "short_answer" ("acceptedAnswers": 1-3 short accepted answers), plus exactly one "open" question with a "modelAnswer" (seen by teachers only). Give each question "points" (1 for closed questions, 5 for the open one).
 5. Fill blank unit fields: 3-6 measurable learningOutcomes, realistic nominalHours, and a clear description.
 
-Return only a JSON object: {"unitCode","unitTitle","nominalHours","description","learningOutcomes":[],"lessons":[{"title","estimatedMinutes","blocks":[{"type","title","content","questions":[{"type","prompt","options":[],"correct":[],"correctAnswer","acceptedAnswers":[],"modelAnswer","points"}]}]}]}`;
+Return only a JSON object: {"unitCode","unitTitle","nominalHours","description","learningOutcomes":[],"content","blocks":[{"type","title","content","questions":[{"type","prompt","options":[],"correct":[],"correctAnswer","acceptedAnswers":[],"modelAnswer","points"}]}]}`;
 }
 
 export function buildAssessmentsPrompt({ course, units, assessments, unstructuredText, aqfLevel, guidance, levelLabels, standardsActive }) {
@@ -356,7 +344,7 @@ export function buildAssessmentsPrompt({ course, units, assessments, unstructure
     : `label the levels exactly: ${labels}`;
   const unstructured = String(unstructuredText || '').slice(0, MAX_PROMPT_UNSTRUCTURED_CHARS);
   return `You are an expert assessment designer for OzEdu, an Australian online learning platform.
-Plan the assessment tasks for the WHOLE course "${course.title || 'Untitled course'}"${course.code ? ` (${course.code})` : ''}. A course has ONE Assessments & Rubrics list; units have only lessons and quizzes.
+Plan the assessment tasks for the WHOLE course "${course.title || 'Untitled course'}"${course.code ? ` (${course.code})` : ''}. A course has ONE Assessments & Rubrics list; units have only their content, blocks and quizzes.
 
 ${levelHeader(aqfLevel)}
 
@@ -404,7 +392,7 @@ function courseNeedsOutline(course, units) {
 }
 
 function emptyUnitDraft(init) {
-  return { unitCode: '', unitTitle: '', nominalHours: null, description: '', learningOutcomes: [], lessons: [], ...init };
+  return { unitCode: '', unitTitle: '', nominalHours: null, description: '', learningOutcomes: [], content: '', blocks: [], ...init };
 }
 
 function friendlyError(err) {
@@ -537,7 +525,7 @@ export async function buildCourseFromSpreadsheetWithAI({
         draft.course = mergeCourseFields(draft.course, outlineCourse);
         if (!draft.units.length) {
           const outlineUnits = (Array.isArray(data.units) ? data.units : []).slice(0, 20)
-            .map(u => sanitizeAiUnit({ ...u, lessons: [] }, { isUrlAllowed }))
+            .map(u => sanitizeAiUnit({ ...u, content: '', blocks: [], lessons: [] }, { isUrlAllowed }))
             .filter(u => u && (u.unitTitle || u.unitCode))
             .map(u => emptyUnitDraft({ unitCode: u.unitCode, unitTitle: u.unitTitle, nominalHours: u.nominalHours, description: u.description, learningOutcomes: u.learningOutcomes }));
           draft.units = outlineUnits;

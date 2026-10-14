@@ -2017,6 +2017,7 @@ details.info-box[open] summary::after {
 .catalog-heading {
   width: 100%;
   margin-bottom: 12px;
+  text-align: center;
 }
 
 .network-course-card {
