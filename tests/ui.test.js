@@ -525,6 +525,18 @@ async function run() {
     assert(view.container.querySelector('img[src="/david-photo.jpg"]'), 'David image is rendered');
     await click(view.container.querySelector('.close-btn'));
 
+    // Front page 4 postcards: click flips card over to show paragraph text, click again flips back
+    const frontCards = view.container.querySelectorAll('.front-card');
+    assert.strictEqual(frontCards.length, 4, '4 postcards rendered on front page');
+    assert(!frontCards[0].classList.contains('is-flipped'), 'card 0 initially unflipped');
+    assert(frontCards[0].querySelector('.front-card-desc-mobile').textContent.includes('OzEdu bridges'), 'back contains paragraph text');
+    await click(frontCards[0]);
+    assert(frontCards[0].classList.contains('is-flipped'), 'card 0 flips on click');
+    assert.strictEqual(frontCards[0].getAttribute('aria-expanded'), 'true');
+    await click(frontCards[0]);
+    assert(!frontCards[0].classList.contains('is-flipped'), 'card 0 flips back on second click');
+    assert.strictEqual(frontCards[0].getAttribute('aria-expanded'), 'false');
+
     await view.unmount();
   });
 
@@ -1161,6 +1173,20 @@ async function run() {
     assert(/display:\s*none/.test(ruleBody(phone, '.header .header-nav') || ''), 'phone menu is closed by default');
     assert(/display:\s*flex/.test(ruleBody(phone, '.header .header-nav.mobile-open') || ''), 'phone menu opens with .mobile-open');
     assert(!/mobile-menu-toggle|hamburger/.test(css), 'no 3-bar menu styles left');
+  });
+
+  await test('Phone postcards CSS: course postcards fit their column, so they never overlap or run off the screen', async () => {
+    const css = readFileSync(fileURLToPath(new URL('../src/App.css', import.meta.url)), 'utf8');
+    const phone = mediaBlocks(css, '@media (max-width: 600px)').join('\n');
+    // A square postcard with a minimum height is stretched wider than its column: postcards overlapped
+    // each other and pushed the phone page past the right edge.
+    const postcards = ruleBody(phone, '.global-cards-grid-4x6 > .global-course-card, .cards-grid:not(.front-cards-grid) > .card') || '';
+    for (const rule of [/aspect-ratio:\s*auto/, /min-width:\s*0/, /min-height:\s*0/]) {
+      assert(rule.test(postcards), `phone postcards: ${rule} (got: ${postcards.trim()})`);
+    }
+    assert(/flex-wrap:\s*wrap/.test(ruleBody(phone, '.pagination-actions') || ''), 'pagination buttons wrap on phones');
+    assert(/width:\s*100%\s*!important/.test(ruleBody(phone, '.global-filter-row > .search-input, .global-filter-row > .filter-select') || ''),
+      'the search box and subject filter fit the screen');
   });
 
   console.log(`\n🎉 All UI interaction tests passed (${passed}).`);

@@ -221,6 +221,7 @@
   border: 1px solid rgba(255, 255, 255, 0.12);
   backdrop-filter: blur(16px);
   transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: default;
 }
 
 .front-cards-grid .front-card:hover,
@@ -229,6 +230,35 @@
   transform: translateY(-6px) scale(1.02);
   border-color: rgba(250, 204, 21, 0.6);
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), 0 0 24px rgba(52, 211, 153, 0.25);
+}
+
+.front-card-inner {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  transform: none !important;
+}
+
+.front-card-front {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: static;
+  transform: none !important;
+}
+
+.front-card-back {
+  display: none !important;
+}
+
+.card-flip-prompt {
+  display: none !important;
 }
 
 .front-cards-grid .front-card .card-icon,
@@ -261,6 +291,7 @@
 }
 
 /* Desktop / laptop: always display paragraph text */
+.front-card-desc-desktop,
 .front-cards-grid .front-card p,
 .cards-grid .card.front-card p,
 .front-card p {
@@ -274,7 +305,8 @@
 }
 
 /* Android / iPhone / Mobile viewports:
-   Show only the 4 postcards with icons and headings, no paragraph text anywhere on the front page */
+   Front page 4 postcards show icon & heading by default.
+   When clicked/tapped, they flip over in 3D to reveal paragraph text on the back face. */
 @media (max-width: 768px) {
   .hero-text {
     margin: 0 auto 20px auto !important;
@@ -286,7 +318,7 @@
     margin-bottom: 0 !important;
   }
 
-  /* No paragraph text on mobile front page */
+  /* No paragraph text on mobile front page outside of flipped cards */
   .hero-text p {
     display: none !important;
   }
@@ -305,39 +337,181 @@
   .cards-grid .card.front-card,
   .front-card {
     aspect-ratio: 1 / 1 !important;
-    min-height: 120px !important;
-    padding: 14px 10px !important;
+    min-height: 145px !important;
+    padding: 0 !important;
     border-radius: 16px !important;
-    justify-content: center !important;
-    align-items: center !important;
-    text-align: center !important;
-    display: flex !important;
-    flex-direction: column !important;
-  }
-
-  .front-cards-grid .front-card .card-icon,
-  .cards-grid .card.front-card .card-icon,
-  .front-card .card-icon {
-    width: 38px !important;
-    height: 38px !important;
-    font-size: 1.35rem !important;
-    margin: 0 auto 8px auto !important;
-  }
-
-  .front-cards-grid .front-card h3,
-  .cards-grid .card.front-card h3,
-  .front-card h3 {
-    font-size: 0.88rem !important;
-    line-height: 1.25 !important;
-    margin: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    perspective: 1000px !important;
+    -webkit-perspective: 1000px !important;
+    cursor: pointer !important;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    overflow: visible !important;
     display: block !important;
   }
 
-  /* Hide paragraph text completely on Android / iPhone */
-  .front-cards-grid .front-card p,
-  .cards-grid .card.front-card p,
-  .front-card p {
+  .front-cards-grid .front-card:hover,
+  .cards-grid .card.front-card:hover,
+  .front-card:hover {
+    transform: none !important;
+    box-shadow: none !important;
+    border-color: transparent !important;
+  }
+
+  .front-card-inner {
+    position: relative !important;
+    width: 100% !important;
+    height: 100% !important;
+    text-align: center !important;
+    transition: transform 0.55s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    -webkit-transition: -webkit-transform 0.55s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    transform-style: preserve-3d !important;
+    -webkit-transform-style: preserve-3d !important;
+    border-radius: 16px !important;
+  }
+
+  /* Flipped state in 3D */
+  .front-card.is-flipped .front-card-inner {
+    transform: rotateY(180deg) !important;
+    -webkit-transform: rotateY(180deg) !important;
+  }
+
+  .front-card-front,
+  .front-card-back {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    border-radius: 16px !important;
+    padding: 12px 10px !important;
+    box-sizing: border-box !important;
+    -webkit-backface-visibility: hidden !important;
+    backface-visibility: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
+  }
+
+  /* Front Face: shows icon, heading, and tap hint */
+  .front-card-front {
+    background: rgba(15, 23, 42, 0.72) !important;
+    border: 1px solid rgba(255, 255, 255, 0.14) !important;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    transform: rotateY(0deg) translateZ(1px) !important;
+    -webkit-transform: rotateY(0deg) translateZ(1px) !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+    transition: border-color 0.25s, box-shadow 0.25s;
+  }
+
+  .front-card:active .front-card-front {
+    transform: rotateY(0deg) translateZ(1px) scale(0.97) !important;
+    -webkit-transform: rotateY(0deg) translateZ(1px) scale(0.97) !important;
+  }
+
+  .front-card-front .card-icon {
+    width: 38px !important;
+    height: 38px !important;
+    font-size: 1.35rem !important;
+    margin: 0 auto 6px auto !important;
+  }
+
+  .front-card-front h3 {
+    font-size: 0.88rem !important;
+    line-height: 1.25 !important;
+    margin: 0 !important;
+    color: #fef08a !important;
+    display: block !important;
+  }
+
+  /* On mobile front face, hide the desktop paragraph text */
+  .front-card-front .front-card-desc-desktop {
     display: none !important;
+  }
+
+  /* Mobile flip hint badge */
+  .card-flip-prompt {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 3px;
+    font-size: 0.65rem !important;
+    color: rgba(250, 204, 21, 0.85) !important;
+    background: rgba(250, 204, 21, 0.1) !important;
+    border: 1px solid rgba(250, 204, 21, 0.25) !important;
+    border-radius: 999px !important;
+    padding: 2px 8px !important;
+    margin-top: 6px !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.2px !important;
+    pointer-events: none;
+  }
+
+  /* Back Face: revealed when flipped, showing paragraph text */
+  .front-card-back {
+    background: rgba(15, 23, 42, 0.95) !important;
+    border: 1.5px solid rgba(250, 204, 21, 0.65) !important;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    transform: rotateY(180deg) translateZ(1px) !important;
+    -webkit-transform: rotateY(180deg) translateZ(1px) !important;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.65), 0 0 20px rgba(250, 204, 21, 0.25) !important;
+    overflow-y: auto !important;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    padding: 10px 8px !important;
+  }
+
+  .front-card-back::-webkit-scrollbar {
+    display: none;
+  }
+
+  .card-back-header {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 5px !important;
+    margin-bottom: 4px !important;
+    width: 100% !important;
+  }
+
+  .card-back-icon {
+    font-size: 0.95rem !important;
+    line-height: 1 !important;
+  }
+
+  .card-back-title {
+    font-size: 0.78rem !important;
+    font-weight: 700 !important;
+    color: #fef08a !important;
+    margin: 0 !important;
+    line-height: 1.2 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+
+  .front-card-desc-mobile {
+    font-size: 0.68rem !important;
+    line-height: 1.35 !important;
+    color: #f1f5f9 !important;
+    margin: 0 0 4px 0 !important;
+    text-align: center !important;
+    width: 100% !important;
+    display: block !important;
+  }
+
+  .card-flip-prompt.back-prompt {
+    font-size: 0.62rem !important;
+    color: #86efac !important;
+    background: rgba(34, 197, 94, 0.12) !important;
+    border-color: rgba(34, 197, 94, 0.3) !important;
+    margin-top: auto !important;
+    padding: 2px 7px !important;
   }
 }
 
@@ -355,25 +529,38 @@
   .front-cards-grid .front-card,
   .cards-grid .card.front-card,
   .front-card {
-    min-height: 105px !important;
-    padding: 10px 6px !important;
-    border-radius: 12px !important;
+    min-height: 135px !important;
   }
 
-  .front-cards-grid .front-card .card-icon,
-  .cards-grid .card.front-card .card-icon,
-  .front-card .card-icon {
+  .front-card-front,
+  .front-card-back {
+    padding: 8px 6px !important;
+  }
+
+  .front-card-front .card-icon {
     width: 32px !important;
     height: 32px !important;
     font-size: 1.15rem !important;
-    margin-bottom: 5px !important;
+    margin-bottom: 4px !important;
   }
 
-  .front-cards-grid .front-card h3,
-  .cards-grid .card.front-card h3,
-  .front-card h3 {
-    font-size: 0.78rem !important;
+  .front-card-front h3 {
+    font-size: 0.76rem !important;
     line-height: 1.2 !important;
+  }
+
+  .card-flip-prompt {
+    font-size: 0.58rem !important;
+    padding: 1px 6px !important;
+  }
+
+  .card-back-title {
+    font-size: 0.72rem !important;
+  }
+
+  .front-card-desc-mobile {
+    font-size: 0.64rem !important;
+    line-height: 1.3 !important;
   }
 }
 
@@ -2304,6 +2491,13 @@ details.info-box[open] summary::after {
 
   .global-cards-grid-4x6 > .global-course-card {
     gap: 8px;
+  }
+
+  /* Long author names end in "…" instead of being cut off mid-letter */
+  .global-course-author strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* The search box and subject filter fit the screen (they have fixed inline widths) */

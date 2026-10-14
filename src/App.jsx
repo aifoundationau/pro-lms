@@ -66,6 +66,14 @@ function App() {
   const [isAboutDavidOpen, setIsAboutDavidOpen] = useState(false);
   // Set when "Message the Super Admin" is pressed on the front page: the admin panel opens, then the composer.
   const [pendingSuperadminMessage, setPendingSuperadminMessage] = useState(false);
+  // Front page postcards flip state on mobile (Android / iPhone)
+  const [flippedFrontCards, setFlippedFrontCards] = useState({});
+  const toggleFrontCardFlip = (index) => {
+    setFlippedFrontCards(prev => ({
+      ...prev,
+      [index]: !prev[index]
+    }));
+  };
 
   // AI Course Import State
   const [isAiImportOpen, setIsAiImportOpen] = useState(false);
@@ -2302,16 +2310,43 @@ function App() {
         </div>
 
         <div className="cards-grid front-cards-grid">
-          {cards.map((card, index) => (
-            <div 
-              key={index} 
-              className={`glass card front-card animate-fade-in-up delay-${index + 1}`}
-            >
-              <div className="card-icon">{card.icon}</div>
-              <h3>{card.title}</h3>
-              <p>{card.content}</p>
-            </div>
-          ))}
+          {cards.map((card, index) => {
+            const isFlipped = !!flippedFrontCards[index];
+            return (
+              <div 
+                key={index} 
+                className={`glass card front-card animate-fade-in-up delay-${index + 1} ${isFlipped ? 'is-flipped' : ''}`}
+                onClick={() => toggleFrontCardFlip(index)}
+                role="button"
+                tabIndex={0}
+                aria-expanded={isFlipped}
+                aria-label={`${card.title}. Click to ${isFlipped ? 'flip back' : 'read full details'}`}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    toggleFrontCardFlip(index);
+                  }
+                }}
+              >
+                <div className="front-card-inner">
+                  <div className="front-card-front">
+                    <div className="card-icon">{card.icon}</div>
+                    <h3>{card.title}</h3>
+                    <p className="front-card-desc-desktop">{card.content}</p>
+                    <span className="card-flip-prompt">Tap to flip ↻</span>
+                  </div>
+                  <div className="front-card-back">
+                    <div className="card-back-header">
+                      <span className="card-back-icon">{card.icon}</span>
+                      <h4 className="card-back-title">{card.title}</h4>
+                    </div>
+                    <p className="front-card-desc-mobile">{card.content}</p>
+                    <span className="card-flip-prompt back-prompt">Tap to flip back ↺</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
 
       </main>
