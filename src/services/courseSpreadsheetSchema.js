@@ -8,7 +8,7 @@
 import { AQF_LEVELS, MAX_RUBRIC_LEVELS } from '../types/courseBuilderTypes.js';
 import { CURRICULUM_STANDARDS } from './curriculumStandards.js';
 
-export const SPREADSHEET_TEMPLATE_VERSION = 'OzEdu Course Spreadsheet v2';
+export const SPREADSHEET_TEMPLATE_VERSION = 'OzEdu Course Spreadsheet v3';
 
 export const SHEET = Object.freeze({
   instructions: 'Instructions',
@@ -17,6 +17,7 @@ export const SHEET = Object.freeze({
   units: 'Units',
   lessons: 'Lessons',
   blocks: 'Content Blocks',
+  quizzes: 'Quiz Questions',
   assessments: 'Assessments',
   rubrics: 'Rubrics'
 });
@@ -56,7 +57,8 @@ export const BLOCK_TYPE_OPTIONS = Object.freeze([
   { type: 'teacher_guide', label: 'Teacher Guide' },
   { type: 'youtube_video', label: 'YouTube Video' },
   { type: 'google_drive_link', label: 'Google Drive Resource' },
-  { type: 'notebook_link', label: 'Gemini Notebook' }
+  { type: 'notebook_link', label: 'Gemini Notebook' },
+  { type: 'quiz', label: 'Quiz & Questions' }
 ]);
 
 const BLOCK_TYPE_LABELS = {
@@ -65,7 +67,8 @@ const BLOCK_TYPE_LABELS = {
   youtube_video: 'YouTube Video',
   google_drive_link: 'Google Drive Resource',
   file_upload: 'Direct File Attachment',
-  notebook_link: 'Gemini Notebook'
+  notebook_link: 'Gemini Notebook',
+  quiz: 'Quiz & Questions'
 };
 
 export function blockTypeLabel(type) {
@@ -74,6 +77,7 @@ export function blockTypeLabel(type) {
 
 // Checked in order: specific phrases before generic words ("teacher notes" before "notes").
 const BLOCK_TYPE_KEYWORDS = [
+  ['quiz', ['quiz & questions', 'quiz and questions', 'quiz', 'unit quiz', 'knowledge check', 'test', 'questions']],
   ['notebook_link', ['gemini notebook', 'notebook', 'notebooklm', 'notebook link', 'notebook_link']],
   ['teacher_guide', ['teacher guide', 'teacher_guide', 'teacher', 'educator', 'facilitator', 'facilitation', 'pedagogy', 'instructor', 'trainer']],
   ['youtube_video', ['youtube', 'youtube video', 'youtube_video', 'video']],
@@ -97,6 +101,85 @@ export function parseBlockType(value) {
 }
 
 export const ASSESSMENT_TYPE_OPTIONS = Object.freeze(['Formative', 'Summative']);
+
+// ---------- quiz questions ----------
+
+export const QUESTION_TYPE_OPTIONS = Object.freeze([
+  { type: 'multiple_choice', label: 'Multiple choice' },
+  { type: 'true_false', label: 'True / False' },
+  { type: 'short_answer', label: 'Short answer' },
+  { type: 'open', label: 'Open question' }
+]);
+
+const QUESTION_TYPE_WORDS = [
+  ['true_false', ['true false', 'true or false', 't f', 'tf', 'yes no', 'boolean']],
+  ['multiple_choice', ['multiple choice', 'multiple choices', 'mcq', 'mc', 'choice', 'multi choice', 'multiple answer', 'select']],
+  ['short_answer', ['short answer', 'short', 'fill in the blank', 'fill in', 'one word', 'cloze', 'single word']],
+  ['open', ['open question', 'open', 'essay', 'long answer', 'extended response', 'written response', 'discussion', 'long', 'open ended']]
+];
+
+/** @returns {{ type: string, recognized: boolean }} */
+export function parseQuestionType(value) {
+  const words = normalizeHeader(String(value ?? '').replace(/\//g, ' '));
+  if (!words) return { type: '', recognized: false };
+  for (const [type, keywords] of QUESTION_TYPE_WORDS) {
+    if (keywords.includes(words)) return { type, recognized: true };
+  }
+  for (const [type, keywords] of QUESTION_TYPE_WORDS) {
+    if (keywords.some(k => k.length > 2 && containsWords(words, k))) return { type, recognized: true };
+  }
+  return { type: '', recognized: false };
+}
+
+const OPTION_MARKER = /^\s*(?:\(?[A-Ja-j][.)]|\(?\d{1,2}[.)]|[-*•▪◦])\s+/u;
+
+/** Options cell -> option texts: one per line ("A. Paris"), or "Paris | London" on one line. */
+export function parseOptionsCell(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return [];
+  let parts = raw.split(/\r?\n/);
+  if (parts.length === 1 && /\s\|\s|;/.test(raw)) parts = raw.split(/\s\|\s|;/);
+  return parts.map(p => p.replace(OPTION_MARKER, '').trim()).filter(Boolean);
+}
+
+/** "True" / "T" / "Yes" -> true, "False" / "F" / "No" -> false, otherwise null. */
+export function parseTrueFalse(value) {
+  const v = String(value ?? '').trim().toLowerCase().replace(/[.!]$/, '');
+  if (['true', 't', 'yes', 'y', 'correct', '1', '✓'].includes(v)) return true;
+  if (['false', 'f', 'no', 'n', 'incorrect', '0', '✗'].includes(v)) return false;
+  return null;
+}
+
+/** Accepted answers: one per line, or separated by " | " or ";". */
+export function splitAnswerList(value) {
+  return String(value ?? '').split(/\r?\n|\s\|\s|;/).map(a => a.trim()).filter(Boolean);
+}
+
+/**
+ * Correct option(s) for a multiple choice question: letters ("A", "A, C"), numbers ("2") or the
+ * option text. @returns {{ indexes: number[], unmatched: string[] }}
+ */
+export function parseCorrectOptions(value, options) {
+  const raw = String(value ?? '').trim();
+  const texts = (options || []).map(o => normalizeKey(o));
+  if (!raw) return { indexes: [], unmatched: [] };
+  const whole = texts.indexOf(normalizeKey(raw));
+  if (whole >= 0 && normalizeKey(raw)) return { indexes: [whole], unmatched: [] };
+  const indexes = [];
+  const unmatched = [];
+  for (const token of raw.split(/[\n,;&]|\s+and\s+/i).map(t => t.trim().replace(/^\(|[.)]$/g, '').trim()).filter(Boolean)) {
+    let index = -1;
+    if (/^[A-Ja-j]$/.test(token)) index = token.toUpperCase().charCodeAt(0) - 65;
+    else if (/^\d{1,2}$/.test(token)) index = Number(token) - 1;
+    else index = texts.indexOf(normalizeKey(token));
+    if (index >= 0 && index < texts.length) {
+      if (!indexes.includes(index)) indexes.push(index);
+    } else {
+      unmatched.push(token);
+    }
+  }
+  return { indexes, unmatched };
+}
 
 /** @returns {'formative' | 'summative' | ''} ('' = blank or not recognised) */
 export function parseAssessmentType(value) {
@@ -413,21 +496,43 @@ export const TABLES = Object.freeze({
       col('fileName', 'File Name', ['filename', 'attachment name'], { width: 20, help: 'Optional display name for a linked file.', example: '' })
     ]
   }),
+  quizzes: Object.freeze({
+    sheet: SHEET.quizzes,
+    minScore: 6,
+    signatures: ['question type', 'quiz title', 'correct answer', 'question', 'quiz', 'options', 'quiz question'],
+    columns: [
+      col('unitRef', 'Unit Code', UNIT_REF_ALIASES, { exactOnly: true, width: 14, style: 'text', help: 'Unit Code (blank = same as the row above).', example: 'SBP501' }),
+      col('lessonRef', 'Lesson #', ['lesson no', 'lesson number', 'lesson', 'lesson title', 'week', 'week #', 'session'], { exactOnly: true, width: 10, help: 'Lesson number from the Lessons tab (blank = same as the row above).', example: '1' }),
+      col('quizTitle', 'Quiz Title', ['quiz', 'quiz name', 'quiz block', 'test title'], { width: 26, style: 'wrap', help: 'Which quiz in the lesson (its block title). Blank = same as the row above. A new title adds a quiz at the end of the lesson.', example: 'Check your understanding' }),
+      col('questionNo', 'Question #', ['question no', 'question number', 'q #', 'q', 'no', '#'], { exactOnly: true, width: 11, help: 'Order inside the quiz (optional).', example: '1' }),
+      col('qType', 'Question Type', ['type', 'question kind', 'kind', 'format'], {
+        width: 18, list: QUESTION_TYPE_OPTIONS.map(o => o.label),
+        help: 'Multiple choice, True / False, Short answer (marked automatically) or Open question (marked by the teacher).', example: 'Multiple choice'
+      }),
+      col('prompt', 'Question', ['question text', 'prompt', 'item', 'stem'], { width: 50, style: 'wrap', help: 'The question students see.', example: 'Which pillar is NOT part of the triple bottom line?' }),
+      col('options', 'Options', ['answer options', 'choices', 'answers', 'options one per line'], { width: 40, style: 'wrap', help: 'Multiple choice only: one option per line (Alt+Enter in Excel, Ctrl+Enter in Google Sheets), e.g. "A. People".', example: 'A. People\nB. Planet\nC. Profit\nD. Politics' }),
+      col('correct', 'Correct Answer', ['correct', 'answer', 'answer key', 'correct option', 'correct answers', 'solution'], { width: 24, style: 'wrap', help: 'Multiple choice: letter(s), e.g. D or A, C. True / False: True or False. Short answer: accepted answers, one per line. Never shown to students.', example: 'D' }),
+      col('points', 'Points', ['marks', 'score', 'pts', 'mark'], { width: 9, help: 'Points for this question (default 1; open questions 5).', example: '1' }),
+      col('modelAnswer', 'Model Answer / Marking Guide', ['model answer', 'marking guide', 'marking notes', 'sample answer', 'expected answer'], { width: 46, style: 'wrap', help: 'Open questions: what a good answer includes (teachers only).', example: '' })
+    ]
+  }),
   assessments: Object.freeze({
     sheet: SHEET.assessments,
     minScore: 4,
     signatures: ['assessment title', 'assessment name', 'assessment type', 'weighting %', 'task description brief', 'external submission link', 'task title'],
     columns: [
-      col('unitRef', 'Unit Code', UNIT_REF_ALIASES, { exactOnly: true, width: 14, style: 'text', help: 'Unit Code (blank = same as the row above).', example: 'SBP501' }),
-      col('assessmentNo', 'Assessment #', ['assessment no', 'assessment number', 'task #', 'task no', 'at #', '#', 'no', 'order'], { exactOnly: true, width: 12, help: 'Number within the unit. The Rubrics tab uses it.', example: '1' }),
+      // Older layouts started with a Unit Code (filling down); still imported, not in the template.
+      col('unitRef', 'Unit Code', UNIT_REF_ALIASES, { exactOnly: true, inTemplate: false }),
+      col('assessmentNo', 'Assessment #', ['assessment no', 'assessment number', 'task #', 'task no', 'at #', '#', 'no', 'order'], { exactOnly: true, width: 12, help: 'Number in the course (1, 2, 3 …). The Rubrics tab uses it.', example: '1' }),
       col('title', 'Assessment Title', ['assessment name', 'task title', 'task name', 'assessment', 'title', 'name', 'task'], { width: 36, style: 'wrap', help: 'Assessment task name.', example: 'Workplace Sustainability Audit' }),
       col('type', 'Type', ['assessment type', 'task type', 'formative summative', 'category', 'kind'], { width: 13, list: ASSESSMENT_TYPE_OPTIONS, help: 'Formative (practice) or Summative (graded).', example: 'Summative' }),
-      col('nominalWeight', 'Weighting %', ['weighting', 'assessment weighting', '% of grade', 'grade weight', 'weighting percent', 'percentage of unit'], { width: 12, help: 'Share of the unit grade, e.g. 40.', example: '60' }),
+      col('nominalWeight', 'Weighting %', ['weighting', 'assessment weighting', '% of grade', 'grade weight', 'weighting percent', 'percentage of unit', 'percentage of course'], { width: 12, help: 'Share of the course grade, e.g. 40. All tasks together should add up to 100.', example: '60' }),
       col('dueDate', 'Due Date', ['due', 'deadline', 'submission date', 'date due'], { width: 14, style: 'text', help: 'YYYY-MM-DD.', example: '2026-04-10' }),
       col('description', 'Task Description / Brief', ['task description', 'description', 'brief', 'task brief', 'instructions', 'assessment description', 'requirements'], {
         width: 70, style: 'wrap', help: 'What students do and submit.', example: 'Audit one workplace process and recommend three improvements (1,500 words).'
       }),
       col('submissionLink', 'External Submission Link', ['submission link', 'submission url', 'submit link', 'link', 'url', 'google form', 'form link'], { width: 40, help: 'Optional https:// link (Google Form, Teams, Canvas).', example: '' }),
+      col('coversUnit', 'Covers Unit', ['covers unit', 'covers', 'unit covered', 'units covered', 'for unit', 'assesses unit'], { exactOnly: true, width: 14, style: 'text', help: 'Optional: the Unit Code this task assesses. Blank = the whole course.', example: 'SBP501' }),
       col('rubricSummary', 'Rubric Criteria', ['rubric', 'rubric criteria', 'marking criteria', 'grading criteria', 'marking guide', 'criteria'], { inTemplate: false }),
       col('details', 'Questions or Details', ['questions or details', 'questions', 'task details', 'exam questions', 'quiz questions'], { inTemplate: false })
     ]
@@ -437,7 +542,7 @@ export const TABLES = Object.freeze({
     minScore: 4,
     signatures: ['criterion', 'criteria', 'criterion title', 'criterion and weight', 'performance criterion'],
     columns: [
-      col('unitRef', 'Unit Code', UNIT_REF_ALIASES, { exactOnly: true, width: 14, style: 'text', help: 'Unit Code (blank = same as the row above).', example: 'SBP501' }),
+      col('unitRef', 'Unit Code', UNIT_REF_ALIASES, { exactOnly: true, inTemplate: false }),
       col('assessmentRef', 'Assessment #', ['assessment no', 'assessment number', 'assessment', 'assessment title', 'task', 'task #', 'task title', 'at #'], { exactOnly: true, width: 12, help: 'Assessment number (or title) from the Assessments tab. Blank = same as the row above.', example: '1' }),
       col('criterion', 'Criterion', ['criteria', 'criterion title', 'criterion and weight', 'performance criterion', 'criterion name', 'assessment criterion'], { width: 34, style: 'wrap', help: 'One criterion per row — add as many rows as you need.', example: 'Analysis of current practice' }),
       col('weight', 'Weight %', ['weight', 'weighting %', 'weighting', 'criterion weight', '%', 'weight percent'], { width: 10, help: 'Criterion weight. Each rubric should add up to 100.', example: '40' })
@@ -452,7 +557,7 @@ export const TABLES = Object.freeze({
 });
 
 /** Detection priority when two layouts score equally. */
-export const TABLE_PRIORITY = ['rubrics', 'blocks', 'assessments', 'lessons', 'units', 'outcomes', 'courseRow'];
+export const TABLE_PRIORITY = ['rubrics', 'quizzes', 'blocks', 'assessments', 'lessons', 'units', 'outcomes', 'courseRow'];
 
 /** Rubric sheet columns that are never performance levels. */
 export const RUBRIC_IGNORED_HEADERS = new Set(['notes', 'note', 'comments', 'comment', 'feedback', 'points', 'marks', 'max points', 'max marks', 'total', 'score', 'id', 'row']);

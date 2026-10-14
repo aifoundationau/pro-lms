@@ -154,6 +154,9 @@ async function run() {
     assert(labels.includes('Level Taxonomy'), 'renamed label');
     assert(!labels.includes('AQF Level Taxonomy'));
     assert.strictEqual(view.container.querySelectorAll('.standard-chip input[type=checkbox]').length, 5, 'all Curriculum Standards tick boxes kept');
+    const pcLabel = Array.from(view.container.querySelectorAll('.unit-editor-header label')).find(l => l.textContent.trim() === 'Performance Criteria');
+    assert(pcLabel, 'unit box below Unit Code / Title / Nominal Hours is titled Performance Criteria');
+    assert.strictEqual(document.getElementById(pcLabel.htmlFor)?.tagName, 'TEXTAREA', 'label is linked to its box');
     const toolbar = view.container.querySelector('.add-block-toolbar');
     const fileBtn = buttonWith(toolbar, 'Direct File Attachment');
     assert.strictEqual(fileBtn.disabled, true, 'Direct File Attachment cannot be clicked');
@@ -185,6 +188,48 @@ async function run() {
     assert.deepStrictEqual(linkInputs('youtube_video').slice(-2).map(i => i.value), videoUrls, 'each video keeps its own link');
     assert.deepStrictEqual(linkInputs('notebook_link').map(i => i.value), ['https://notebooklm.google.com/notebook/abc123', 'https://notebooklm.google.com/notebook/second']);
     assert.strictEqual(view.container.querySelectorAll('.content-block-item.type-youtube_video .video-preview-badge').length, videosBefore + 2, 'youtu.be and watch links are both recognised');
+    await view.unmount();
+  });
+
+  await test('Course Builder: unit quiz block (every question type, correct answers saved) and one course Assessments & Rubrics section', async () => {
+    const saved = [];
+    const course = { ...types.createBlankCourse('t1', 'Ms T'), id: 'course_ui_quiz' };
+    const view = await render(React.createElement(AQFCourseBuilder, { course, onSaveCourse: async (c) => { saved.push(c); }, onBack: () => {}, currentUser: teacher, userProfile: teacherProfile, userTokenBalance: 25 }));
+    // Units: lessons & blocks only.
+    assert.deepStrictEqual(Array.from(view.container.querySelectorAll('.unit-tabs-row .tab-btn')).map(t => t.textContent.trim()), ['📚 Lessons & Blocks (1)']);
+    const toolbar = view.container.querySelector('.add-block-toolbar');
+    await click(buttonWith(toolbar, 'Quiz & Questions'));
+    const quiz = () => view.container.querySelector('.content-block-item.type-quiz');
+    assert(quiz(), 'quiz block added');
+    assert(textOf(quiz()).includes('Answers hidden from students'));
+    const q1 = () => quiz().querySelectorAll('.qb-question')[0];
+    await type(q1().querySelector('textarea[aria-label="Question 1"]'), 'Which is a prime number?');
+    const optionInputs = () => q1().querySelectorAll('.qb-option input[type=text]');
+    for (const [i, text] of ['4', '6', '7', '9'].entries()) await type(optionInputs()[i], text);
+    await click(q1().querySelectorAll('.qb-option input[type=radio]')[2]);
+    await click(buttonWith(quiz(), '+ True / False'));
+    await click(quiz().querySelectorAll('.qb-question')[1].querySelectorAll('.qb-tf input[type=radio]')[1]);
+    await click(buttonWith(quiz(), '+ Short answer'));
+    await type(quiz().querySelector('textarea[aria-label="Question 3 accepted answers"]'), 'Canberra\ncanberra city');
+    await click(buttonWith(quiz(), '+ Open question'));
+    await type(quiz().querySelector('textarea[aria-label="Question 4 model answer"]'), 'Mentions evidence.');
+    assert(textOf(quiz()).includes('4 questions • 8 points • 3 marked automatically'), textOf(quiz()).slice(0, 200));
+    // Course-level assessments: one section reached from the sidebar.
+    await click(view.container.querySelector('.course-assessments-nav'));
+    assert.strictEqual(view.container.querySelectorAll('.assessment-card').length, 1, 'the blank course starts with one task');
+    await click(buttonWith(view.container.querySelector('.assessments-container'), '+ Summative Task'));
+    assert.strictEqual(view.container.querySelectorAll('.assessment-card').length, 2);
+    assert(textOf(view.container).includes('should add up to 100%'), 'weighting total is checked across the course');
+    await click(buttonWith(view.container, 'Save Draft'));
+    const savedQuiz = saved[0].units[0].lessons[0].blocks.find(b => b.type === 'quiz').quiz;
+    const [mc, tf, sa, open] = savedQuiz.questions;
+    assert.deepStrictEqual(mc.options.map(o => o.text), ['4', '6', '7', '9']);
+    assert.deepStrictEqual(mc.correctOptionIds, [mc.options[2].id], 'correct option saved for the answer key');
+    assert.strictEqual(tf.correctAnswer, false);
+    assert.deepStrictEqual(sa.acceptedAnswers, ['Canberra', 'canberra city']);
+    assert.strictEqual(open.modelAnswer, 'Mentions evidence.');
+    assert.strictEqual(saved[0].assessments.length, 2);
+    assert(saved[0].units.every(u => !('assessments' in u)));
     await view.unmount();
   });
 
@@ -227,18 +272,29 @@ async function run() {
     assert.strictEqual(linksIn(lessonCards[1], 'google_drive_link').length, 2, 'two Drive resources');
     assert.strictEqual(linksIn(lessonCards[1], 'notebook_link').length, 2, 'two Gemini Notebooks');
     const lessonOneTitles = Array.from(lessonCards[0].querySelectorAll('.content-block-item .block-title-input')).map(i => i.value);
-    assert.deepStrictEqual(lessonOneTitles, ['Key ideas', 'Facilitation notes', 'Introductory video', 'The triple bottom line explained', 'Lesson slides', 'Study notebook']);
-    // Unit 2 has a 5-band rubric: the matrix shows five level columns.
-    await click(view.container.querySelectorAll('.unit-nav-item')[1]);
-    await click(buttonWith(view.container, 'Assessments & Rubrics'));
-    const headers = Array.from(view.container.querySelectorAll('.rubric-matrix-table th')).map(th => th.textContent);
-    assert.deepStrictEqual(headers, ['Criterion & Weight', 'Fail (0-49%)', 'Pass (50-64%)', 'Credit (65-74%)', 'Distinction (75-84%)', 'High Distinction (85-100%)']);
-    // Due date & weighting from the spreadsheet are editable fields.
-    assert.strictEqual(view.container.querySelector('.asmt-meta-grid input[type=date]').value, '2026-05-15');
+    assert.deepStrictEqual(lessonOneTitles, ['Key ideas', 'Facilitation notes', 'Check your understanding', 'Introductory video', 'The triple bottom line explained', 'Lesson slides', 'Study notebook']);
+    // Unit quiz imported from the Quiz Questions tab, answer keys included (teacher view).
+    const quizEditor = lessonCards[0].querySelector('.content-block-item.type-quiz');
+    assert.strictEqual(quizEditor.querySelectorAll('.qb-question').length, 4);
+    assert.deepStrictEqual(Array.from(quizEditor.querySelectorAll('.qb-type')).map(s => s.value), ['multiple_choice', 'true_false', 'short_answer', 'open']);
+    const firstOptions = quizEditor.querySelectorAll('.qb-question')[0].querySelectorAll('.qb-option');
+    assert.deepStrictEqual(Array.from(firstOptions).map(o => o.querySelector('input[type=radio]').checked), [false, false, false, true], 'correct answer D is ticked');
+    // Units have lessons & blocks only; the course has one Assessments & Rubrics section.
+    assert(!textOf(view.container.querySelector('.unit-tabs-row')).includes('Assessments'), 'no per-unit assessments tab');
+    await click(buttonWith(view.container.querySelector('.builder-sidebar'), 'Assessments & Rubrics'));
+    const cards = view.container.querySelectorAll('.assessment-card');
+    assert.strictEqual(cards.length, 3);
+    assert(textOf(view.container).includes('Σ 100%'), 'course weightings add up to 100%');
+    const lastHeaders = Array.from(cards[2].querySelectorAll('.rubric-matrix-table th')).map(th => th.textContent);
+    assert.deepStrictEqual(lastHeaders, ['Criterion & Weight', 'Fail (0-49%)', 'Pass (50-64%)', 'Credit (65-74%)', 'Distinction (75-84%)', 'High Distinction (85-100%)'], '5-band rubric');
+    assert.deepStrictEqual(Array.from(view.container.querySelectorAll('.asmt-meta-grid input[type=date]')).map(i => i.value), ['2026-02-27', '2026-03-27', '2026-05-15']);
+    assert.deepStrictEqual(Array.from(view.container.querySelectorAll('select[aria-label="Units covered"]')).map(s => s.selectedOptions[0].textContent.split(' — ')[0]), ['SBP501', 'SBP501', 'SBP502']);
     await click(buttonWith(view.container, 'Save Draft'));
     assert.strictEqual(saved.length, 1);
     assert.strictEqual(saved[0].units.length, 2);
     assert.strictEqual(saved[0].learningOutcomes.length, 4);
+    assert.strictEqual(saved[0].assessments.length, 3, 'one course-level assessment list is saved');
+    assert(saved[0].units.every(u => !('assessments' in u)));
     failSave = true;
     await click(buttonWith(view.container, 'Save Draft'));
     assert(textOf(view.container).includes('NOT saved to the cloud'), 'save failures are never reported as success');
@@ -382,7 +438,10 @@ async function run() {
     };
     let messaged = null;
     const view = await render(React.createElement(StudentLearningPanel, { currentUser: { uid: 's1', email: 'stu@school.edu' }, courses: [course], onMessageTeacher: c => { messaged = c; } }));
-    assert(textOf(view.container).includes('My Learning'));
+    const overview = textOf(view.container);
+    assert(overview.includes('Student Admin Panel') && overview.includes('stu@school.edu'));
+    assert(view.container.querySelector('.cards-grid'), 'course postcards grid');
+    assert(overview.includes('Reef Ecology') && overview.includes('Ms T'), 'enrolled course postcard shown');
     await click(buttonWith(view.container, 'Open course'));
     const text = textOf(view.container);
     assert(text.includes('Corals are animals.'));
@@ -392,8 +451,8 @@ async function run() {
     assert(view.container.querySelector('a[href="https://notebooklm.google.com/notebook/x"]'));
     assert(view.container.querySelector('a[href="https://notebooklm.google.com/notebook/y"]'));
     assert.strictEqual(text.match(/Open Gemini Notebook/g).length, 2, 'both Gemini Notebooks are listed');
-    assert(view.container.querySelector('a[href="https://docs.google.com/presentation/d/s/view"]').textContent.includes('Open in Google Drive'));
-    assert(view.container.querySelector('a[href="https://example.org/article"]').textContent.includes('Open resource'), 'non-Drive links are not labelled Google Drive');
+    assert(view.container.querySelector('a.sl-link[href="https://docs.google.com/presentation/d/s/view"]').textContent.includes('Open in Google Drive'));
+    assert(view.container.querySelector('a.sl-link[href="https://example.org/article"]').textContent.includes('Open resource'), 'non-Drive links are not labelled Google Drive');
     assert(!view.container.querySelector('a[href^="javascript"]'), 'unsafe links never render');
     assert(text.includes('How this is marked'));
     await click(buttonWith(view.container, 'Message teacher'));
@@ -539,13 +598,18 @@ async function run() {
     await view.unmount();
   });
 
-  await test('Student dashboard: My Learning, Join as Teacher, no teacher tools', async () => {
+  await test('Student dashboard: Student Panel, Join as Teacher, Global Search, no teacher tools', async () => {
     const view = await renderAs({ uid: 's1', email: 'stu@school.edu', displayName: 'Stu' }, { role: 'Supporter', email: 'stu@school.edu' });
     const nav = view.container.querySelector('nav.header-nav');
-    for (const label of ['My Learning', 'Join as Teacher', 'Token Fund']) assert(buttonWith(nav, label), `student sees ${label}`);
-    for (const label of ['My Courses', 'Global Search', 'Student Registration']) assert(!buttonWith(nav, label), `student does not see ${label}`);
+    for (const label of ['Student Panel', 'Join as Teacher', 'Global Search', 'Token Fund']) assert(buttonWith(nav, label), `student sees ${label}`);
+    for (const label of ['My Courses', 'Student Registration']) assert(!buttonWith(nav, label), `student does not see ${label}`);
     await waitFor(() => textOf(view.container).includes('You are not enrolled in any courses yet'), 'student landing page');
     assert(textOf(view.container).includes('stu@school.edu'));
+    // Student can view Global Search, but cannot enrol or copy
+    await click(buttonWith(nav, 'Global Search'));
+    await waitFor(() => textOf(view.container).includes('Curated course catalog'), 'global courses visible to student');
+    assert(textOf(view.container).includes('Enrolment by Teacher Only'), 'enrolment by teacher only notice shown to student');
+    assert(!buttonWith(view.container, '+ Copy to My Courses'), 'student cannot copy or enrol directly');
     // Front page -> Contact -> "Message the Super Admin" opens the admin panel with a message to the Super Admin ready.
     await click(view.container.querySelector('.logo-btn'));
     await click(await waitFor(() => buttonWith(view.container.querySelector('nav.header-nav'), 'Contact'), 'front page Contact'));

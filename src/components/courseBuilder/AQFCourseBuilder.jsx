@@ -10,8 +10,13 @@ import {
   createBlankContentBlock,
   createBlankAssessment,
   defaultLevelPoints,
-  isGoogleNotebookUrl
+  isGoogleNotebookUrl,
+  createDefaultRubric,
+  moveUnitAssessmentsToCourse
 } from '../../types/courseBuilderTypes';
+import QuizBlockEditor from './QuizBlockEditor.jsx';
+import { mergeQuizAnswerKeys, remapQuizAnswerKeys, listCourseQuizzes } from '../../services/quizModel';
+import { loadQuizAnswerKeys } from '../../services/quizService';
 import CourseSpreadsheetPanel from './CourseSpreadsheetPanel.jsx';
 import RubricSpreadsheetImport from './RubricSpreadsheetImport.jsx';
 import { formatTokenBalance, hasUnlimitedTokens } from '../../services/rolePrivileges';
@@ -133,9 +138,39 @@ function AQFCourseBuilderInner({
   onRefreshBalance
 }) {
   // Course State
-  const [currentCourse, setCurrentCourse] = useState(course);
+  // Assessments live once, at course level (older courses keep their tasks, moved up from units).
+  const [currentCourse, setCurrentCourse] = useState(() => moveUnitAssessmentsToCourse(course));
   const [activeUnitId, setActiveUnitId] = useState(course.units?.[0]?.id || null);
-  const [activeTab, setActiveTab] = useState('curriculum'); // 'curriculum' | 'assessments' | 'settings'
+  const [activeTab, setActiveTab] = useState(initialPanel === 'assessments' ? 'assessments' : 'curriculum');
+  const [isAssessmentsExpanded, setIsAssessmentsExpanded] = useState(true);
+  const [isUnitsSectionExpanded, setIsUnitsSectionExpanded] = useState(true);
+  const [expandedUnits, setExpandedUnits] = useState(() => {
+    const map = {};
+    if (course.units?.[0]?.id) map[course.units[0].id] = true;
+    return map;
+  });
+  const [expandedLessons, setExpandedLessons] = useState({});
+  const [expandedAssessments, setExpandedAssessments] = useState({});
+
+  const toggleUnitExpand = (unitId) => {
+    setExpandedUnits(prev => ({ ...prev, [unitId]: !prev[unitId] }));
+  };
+
+  // Quiz answer keys are stored separately (teachers only) and merged in here for editing.
+  const [quizKeysStatus, setQuizKeysStatus] = useState('loading'); // 'loading' | 'ok' | 'error'
+  const keysCourseId = course?.id;
+  useEffect(() => {
+    if (!keysCourseId) return undefined;
+    let cancelled = false;
+    loadQuizAnswerKeys(keysCourseId).then(({ keys, ok }) => {
+      if (cancelled) return;
+      setQuizKeysStatus(ok ? 'ok' : 'error');
+      if (ok) setCurrentCourse(prev => mergeQuizAnswerKeys(prev, keys));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [keysCourseId]);
 
   // Add People / Enrol Members Modal State (0 Tokens)
   const [isAddPeopleOpen, setIsAddPeopleOpen] = useState(false);
@@ -227,6 +262,8 @@ function AQFCourseBuilderInner({
       units: [...(prev.units || []), newUnit]
     }));
     setActiveUnitId(newUnit.id);
+    setExpandedUnits(prev => ({ ...prev, [newUnit.id]: true }));
+    setIsUnitsSectionExpanded(true);
   };
 
   const handleUpdateUnit = (unitId, field, value) => {
@@ -244,8 +281,13 @@ function AQFCourseBuilderInner({
     if (confirm('Are you sure you want to delete this unit and all its lessons?')) {
       setCurrentCourse(prev => {
         const nextUnits = prev.units.filter(u => u.id !== unitId);
-        if (activeUnitId === unitId) setActiveUnitId(nextUnits[0]?.id || null);
-        return { ...prev, units: nextUnits };
+        if (activeUnitId === unitId) {
+          const nextActive = nextUnits[0]?.id || null;
+          setActiveUnitId(nextActive);
+          if (nextActive) setExpandedUnits(p => ({ ...p, [nextActive]: true }));
+        }
+        const assessments = (Array.isArray(prev.assessments) ? prev.assessments : []).map(a => (a?.unitId === unitId ? { ...a, unitId: '' } : a));
+        return { ...prev, units: nextUnits, assessments };
       });
     }
   };
@@ -341,36 +383,28 @@ function AQFCourseBuilderInner({
     }));
   };
 
-  // Assessment Operations
-  const handleAddAssessment = (unitId, type = 'formative') => {
-    const newAsmt = createBlankAssessment(type, type === 'summative' ? 'Summative Task' : 'Formative Task');
+  // Assessment Operations (one Assessments & Rubrics section for the whole course)
+  const updateAssessments = (updater) => {
     setCurrentCourse(prev => ({
       ...prev,
-      units: prev.units.map(u => u.id === unitId ? { ...u, assessments: [...(u.assessments || []), newAsmt] } : u)
+      assessments: updater(Array.isArray(prev.assessments) ? prev.assessments.filter(a => a && typeof a === 'object') : []),
+      updatedAt: Date.now()
     }));
   };
 
-  const handleUpdateAssessment = (unitId, asmtId, patch) => {
-    setCurrentCourse(prev => ({
-      ...prev,
-      units: prev.units.map(u => {
-        if (u.id !== unitId) return u;
-        return {
-          ...u,
-          assessments: (u.assessments || []).map(a => a.id === asmtId ? { ...a, ...patch } : a)
-        };
-      })
-    }));
+  const handleAddAssessment = (type = 'formative') => {
+    const newAsmt = { ...createBlankAssessment(type, type === 'summative' ? 'Summative Task' : 'Formative Task'), unitId: '' };
+    updateAssessments(list => [...list, newAsmt]);
+    setExpandedAssessments(prev => ({ ...prev, [newAsmt.id]: true }));
+    setIsAssessmentsExpanded(true);
   };
 
-  const handleDeleteAssessment = (unitId, asmtId) => {
-    setCurrentCourse(prev => ({
-      ...prev,
-      units: prev.units.map(u => {
-        if (u.id !== unitId) return u;
-        return { ...u, assessments: (u.assessments || []).filter(a => a.id !== asmtId) };
-      })
-    }));
+  const handleUpdateAssessment = (asmtId, patch) => {
+    updateAssessments(list => list.map(a => (a.id === asmtId ? { ...a, ...patch } : a)));
+  };
+
+  const handleDeleteAssessment = (asmtId) => {
+    updateAssessments(list => list.filter(a => a.id !== asmtId));
   };
 
   // Rubric Matrix Operations
@@ -381,22 +415,13 @@ function AQFCourseBuilderInner({
     'Exceeds benchmark standards.'
   ];
 
-  const updateRubric = (unitId, asmtId, updater) => {
-    setCurrentCourse(prev => ({
-      ...prev,
-      units: prev.units.map(u => {
-        if (u.id !== unitId) return u;
-        return {
-          ...u,
-          assessments: (u.assessments || []).map(a => (a.id === asmtId ? { ...a, rubric: updater(Array.isArray(a.rubric) ? a.rubric : []) } : a))
-        };
-      })
-    }));
+  const updateRubric = (asmtId, updater) => {
+    updateAssessments(list => list.map(a => (a.id === asmtId ? { ...a, rubric: updater(Array.isArray(a.rubric) ? a.rubric : []) } : a)));
   };
 
   // New rows copy the rubric's own level structure (e.g. a 5-band HD/D/C/P/F rubric stays 5-band).
-  const handleAddRubricCriterion = (unitId, asmtId) => {
-    updateRubric(unitId, asmtId, rubric => {
+  const handleAddRubricCriterion = (asmtId) => {
+    updateRubric(asmtId, rubric => {
       const labels = getRubricTierLabels(rubric);
       const isDefault = labels.length === DEFAULT_RUBRIC_LEVEL_LABELS.length && labels.every((l, i) => l === DEFAULT_RUBRIC_LEVEL_LABELS[i]);
       const points = defaultLevelPoints(labels.length);
@@ -410,14 +435,14 @@ function AQFCourseBuilderInner({
     });
   };
 
-  const handleDeleteRubricCriterion = (unitId, asmtId, criterionId) => {
-    updateRubric(unitId, asmtId, rubric => rubric.filter(c => c.id !== criterionId));
+  const handleDeleteRubricCriterion = (asmtId, criterionId) => {
+    updateRubric(asmtId, rubric => rubric.filter(c => c.id !== criterionId));
   };
 
   // 📊 Spreadsheet import / ✨ AI build result -> builder (keeps this course's identity)
   const handleApplyImportedCourse = (importedCourse, { message, warnings = [] } = {}) => {
     setCurrentCourse(prev => ({
-      ...importedCourse,
+      ...moveUnitAssessmentsToCourse(importedCourse),
       id: prev.id ?? importedCourse.id,
       authorId: prev.authorId || importedCourse.authorId,
       authorName: prev.authorName || importedCourse.authorName,
@@ -458,7 +483,7 @@ function AQFCourseBuilderInner({
       // Keep the existing course identity/ownership and standards selection so saves
       // still target the course being edited.
       setCurrentCourse(prev => ({
-        ...res.course,
+        ...moveUnitAssessmentsToCourse(res.course),
         id: prev.id ?? res.course.id,
         authorId: prev.authorId ?? res.course.authorId,
         authorName: prev.authorName ?? res.course.authorName,
@@ -496,7 +521,7 @@ function AQFCourseBuilderInner({
     }
   };
 
-  const handleImportUnit = async (unitToImport, authorId, courseTitle) => {
+  const handleImportUnit = async (unitToImport, authorId, courseTitle, sourceCourseId) => {
     setImportNotice(null);
     try {
       const res = await executeContentClone({
@@ -508,28 +533,43 @@ function AQFCourseBuilderInner({
         entityTitle: unitToImport.unitTitle
       });
 
-      // Clone unit with fresh IDs
-      const clonedUnit = {
-        ...unitToImport,
+      // Clone unit with fresh IDs (units hold lessons & blocks only)
+      const blockIdMap = {};
+      const { assessments: legacyUnitTasks = [], ...unitContent } = unitToImport;
+      let clonedUnit = {
+        ...unitContent,
         id: generateEntityId('unit'),
         unitTitle: `${unitToImport.unitTitle} (Imported)`,
         lessons: (unitToImport.lessons || []).map(l => ({
           ...l,
           id: generateEntityId('lesson'),
-          blocks: (l.blocks || []).map(b => ({ ...b, id: generateEntityId('block') }))
-        })),
-        assessments: (unitToImport.assessments || []).map(a => ({
-          ...a,
-          id: generateEntityId('asmt')
+          blocks: (l.blocks || []).map(b => {
+            const id = generateEntityId('block');
+            blockIdMap[b.id] = id;
+            return { ...b, id };
+          })
         }))
       };
 
+      // Quiz answer keys are stored with the source course; bring them along for the new quiz ids.
+      let keysNote = '';
+      const hasQuizzes = listCourseQuizzes({ units: [clonedUnit] }).length > 0;
+      if (hasQuizzes && sourceCourseId) {
+        const { keys, ok } = await loadQuizAnswerKeys(sourceCourseId);
+        if (ok) clonedUnit = mergeQuizAnswerKeys({ units: [clonedUnit] }, remapQuizAnswerKeys(keys, blockIdMap)).units[0];
+        else keysNote = ' The quiz answers could not be copied — tick the correct answers in each quiz.';
+      }
+      const movedTasks = (Array.isArray(legacyUnitTasks) ? legacyUnitTasks : []).filter(a => a && typeof a === 'object')
+        .map(a => ({ ...a, id: generateEntityId('asmt'), unitId: clonedUnit.id }));
+
       setCurrentCourse(prev => ({
         ...prev,
-        units: [...(prev.units || []), clonedUnit]
+        units: [...(prev.units || []), clonedUnit],
+        assessments: [...(Array.isArray(prev.assessments) ? prev.assessments : []), ...movedTasks]
       }));
       setActiveUnitId(clonedUnit.id);
-      setImportNotice({ type: 'success', message: res.message });
+      setActiveTab('curriculum');
+      setImportNotice({ type: keysNote ? 'error' : 'success', message: res.message + keysNote });
       if (onRefreshBalance) onRefreshBalance();
     } catch (err) {
       if (err.code === 'INSUFFICIENT_TOKENS') {
@@ -619,6 +659,9 @@ function AQFCourseBuilderInner({
   };
 
   const currentUnit = currentCourse.units?.find(u => u.id === activeUnitId) || currentCourse.units?.[0];
+  const courseAssessments = Array.isArray(currentCourse.assessments) ? currentCourse.assessments.filter(a => a && typeof a === 'object') : [];
+  const assessmentWeightTotal = Math.round(courseAssessments.reduce((sum, a) => sum + (Number(a.nominalWeight) || 0), 0) * 100) / 100;
+  const quizCount = listCourseQuizzes(currentCourse).length;
 
   return (
     <div className="aqf-builder-container animate-fade-in-up">
@@ -907,10 +950,31 @@ function AQFCourseBuilderInner({
           </div>
 
           <div className="sidebar-section">
+            <h4 className="sidebar-heading">Quick Navigator</h4>
+            <button
+              type="button"
+              className={`course-assessments-nav ${isAssessmentsExpanded ? 'active' : ''}`}
+              onClick={() => {
+                setActiveTab('assessments');
+                setIsAssessmentsExpanded(true);
+                const el = document.getElementById('builder-assessments-panel');
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }}
+              style={{ width: '100%', marginBottom: '12px' }}
+              title="Jump to Course Assessments at top of right column"
+            >
+              <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
+                <div className="course-assessments-nav-label">🎯 Assessments & Rubrics</div>
+                <div className="course-assessments-nav-sub">
+                  {courseAssessments.length} task{courseAssessments.length === 1 ? '' : 's'} • {quizCount} unit quiz{quizCount === 1 ? '' : 'zes'}
+                </div>
+              </div>
+            </button>
+
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <h4 className="sidebar-heading" style={{ margin: 0 }}>
+              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#fef08a' }}>
                 Units of Study ({(currentCourse.units || []).length})
-              </h4>
+              </span>
               <button className="nav-btn primary icon-only-btn" onClick={handleAddUnit} title="Add Unit">
                 + Unit
               </button>
@@ -921,7 +985,13 @@ function AQFCourseBuilderInner({
                 <div
                   key={u.id}
                   className={`unit-nav-item ${u.id === activeUnitId ? 'active' : ''}`}
-                  onClick={() => setActiveUnitId(u.id)}
+                  onClick={() => {
+                    setActiveUnitId(u.id);
+                    setExpandedUnits(prev => ({ ...prev, [u.id]: true }));
+                    setIsUnitsSectionExpanded(true);
+                    const el = document.getElementById(`unit-panel-${u.id}`);
+                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }}
                 >
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div className="unit-nav-code">{u.unitCode || `UNIT-${idx + 1}`}</div>
@@ -945,359 +1015,99 @@ function AQFCourseBuilderInner({
 
         {/* Right Editor Area */}
         <main className="builder-main-panel glass">
-          {currentUnit ? (
-            <div>
-              {/* Unit Header Card */}
-              <div className="unit-editor-header">
-                <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr 120px', gap: '12px', alignItems: 'flex-start' }}>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}>
-                      Unit Code
-                    </label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      value={currentUnit.unitCode || ''}
-                      onChange={e => handleUpdateUnit(currentUnit.id, 'unitCode', e.target.value)}
-                      placeholder="e.g. BSBTEC301"
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}>
-                      Unit Title
-                    </label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      style={{ fontWeight: 700, fontSize: '1.05rem' }}
-                      value={currentUnit.unitTitle || ''}
-                      onChange={e => handleUpdateUnit(currentUnit.id, 'unitTitle', e.target.value)}
-                      placeholder="e.g. Design and produce business documents"
-                    />
-                  </div>
-                  <div>
-                    <label
-                      style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}
-                      title="Nominal Guided Learning Hours: the estimated study and instructional hours allocated to complete this unit."
-                    >
-                      Nominal Hours
-                    </label>
-                    <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                      <input
-                        type="number"
-                        min="1"
-                        className="form-input"
-                        style={{ paddingRight: '36px' }}
-                        value={currentUnit.nominalHours || 40}
-                        onChange={e => handleUpdateUnit(currentUnit.id, 'nominalHours', Number(e.target.value) || 0)}
-                        placeholder="40"
-                        title="Nominal Guided Learning Hours (guided instructional and study time)"
-                      />
-                      <span style={{ position: 'absolute', right: '10px', fontSize: '0.78rem', color: '#94a3b8', pointerEvents: 'none', fontWeight: 600 }}>
-                        hrs
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <textarea
-                  rows="2"
-                  className="form-input"
-                  style={{ marginTop: '10px' }}
-                  value={currentUnit.description || ''}
-                  onChange={e => handleUpdateUnit(currentUnit.id, 'description', e.target.value)}
-                  placeholder="Unit performance criteria and learning outcomes..."
-                />
-                <label className="field-label" style={{ marginTop: '8px' }}>Unit Learning Outcomes (one per line)</label>
-                <textarea
-                  rows="2"
-                  className="form-input"
-                  value={listToLines(currentUnit.learningOutcomes)}
-                  onChange={e => handleUpdateUnit(currentUnit.id, 'learningOutcomes', linesToList(e.target.value))}
-                  placeholder="Explain…&#10;Apply…"
-                />
-              </div>
-
-              {/* Navigation Tabs for Active Unit */}
-              <div className="unit-tabs-row">
+          {/* 🎯 COURSE ASSESSMENTS & RUBRICS (At the very top of the right column) */}
+          <section id="builder-assessments-panel" className="assessments-container" aria-label="Course Assessments and Rubrics" style={{ marginBottom: '28px' }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '8px',
+                gap: '10px',
+                flexWrap: 'wrap',
+                cursor: 'pointer',
+                padding: '6px 8px',
+                borderRadius: '10px',
+                background: 'rgba(255, 255, 255, 0.03)'
+              }}
+              onClick={() => setIsAssessmentsExpanded(prev => !prev)}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <button
-                  className={`tab-btn ${activeTab === 'curriculum' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('curriculum')}
+                  type="button"
+                  className="collapse-toggle-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsAssessmentsExpanded(prev => !prev);
+                  }}
+                  aria-label={isAssessmentsExpanded ? 'Collapse Course Assessments' : 'Expand Course Assessments'}
+                  style={{ background: 'transparent', border: 'none', color: '#fef08a', fontSize: '1rem', cursor: 'pointer' }}
                 >
-                  📚 Lessons & Blocks ({(currentUnit.lessons || []).length})
+                  {isAssessmentsExpanded ? '▼' : '►'}
+                </button>
+                <h3 style={{ margin: 0, fontSize: '1.15rem' }}>🎯 Course Assessments & Rubrics</h3>
+                <span className="count-badge" style={{ background: '#3b82f6', color: '#fff', fontSize: '0.75rem', fontWeight: 800, padding: '2px 8px', borderRadius: '10px' }}>
+                  {courseAssessments.length}
+                </span>
+                {courseAssessments.length > 0 && (
+                  <strong style={{ marginLeft: '6px', fontSize: '0.85rem', color: assessmentWeightTotal === 100 ? '#86efac' : '#fca5a5' }}>
+                    (Σ {assessmentWeightTotal}%{assessmentWeightTotal === 100 ? '' : ' — should add up to 100%'})
+                  </strong>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                <button className="nav-btn secondary" onClick={() => handleAddAssessment('formative')}>
+                  + Formative Task
+                </button>
+                <button className="nav-btn primary" onClick={() => handleAddAssessment('summative')}>
+                  + Summative Task
                 </button>
                 <button
-                  className={`tab-btn ${activeTab === 'assessments' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('assessments')}
+                  type="button"
+                  className="nav-btn secondary"
+                  style={{ padding: '4px 10px', fontSize: '0.8rem' }}
+                  onClick={() => setIsAssessmentsExpanded(prev => !prev)}
                 >
-                  🎯 Assessments & Rubrics ({(currentUnit.assessments || []).length})
+                  {isAssessmentsExpanded ? 'Collapse' : 'Expand'}
                 </button>
               </div>
+            </div>
 
-              {/* TAB 1: CURRICULUM (LESSONS & BLOCKS) */}
-              {activeTab === 'curriculum' && (
-                <div className="lessons-container">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-                    <h3 style={{ margin: 0, fontSize: '1.1rem' }}>Modular Lesson Stack</h3>
-                    <button className="nav-btn primary" onClick={() => handleAddLesson(currentUnit.id)}>
-                      + Add Lesson
+            <p style={{ margin: '0 0 14px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+              One list for the whole course. Weightings are a share of the course grade. Unit quizzes are added as ❓ Quiz & Questions blocks inside lessons.
+            </p>
+
+            {isAssessmentsExpanded && (
+              <div>
+                {courseAssessments.length === 0 ? (
+                  <div className="empty-state-card">
+                    <p>No assessment tasks yet.</p>
+                    <button className="nav-btn primary" onClick={() => handleAddAssessment('summative')}>
+                      Add Summative Task
                     </button>
                   </div>
-
-                  {(currentUnit.lessons || []).length === 0 ? (
-                    <div className="empty-state-card">
-                      <p>No lessons added yet.</p>
-                      <button className="nav-btn primary" onClick={() => handleAddLesson(currentUnit.id)}>
-                        Create First Lesson
-                      </button>
-                    </div>
-                  ) : (
-                    (currentUnit.lessons || []).map((lesson, lIdx) => (
-                      <div key={lesson.id} className="lesson-card glass">
-                        {/* Lesson Header */}
-                        <div className="lesson-header-row">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
-                            <span className="lesson-index-badge">#{lIdx + 1}</span>
-                            <input
-                              type="text"
-                              className="form-input lesson-title-input"
-                              value={lesson.title || ''}
-                              onChange={e => handleUpdateLesson(currentUnit.id, lesson.id, 'title', e.target.value)}
-                              placeholder="Lesson Title"
-                            />
-                          </div>
-
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <input
-                              type="number"
-                              className="form-input"
-                              style={{ width: '80px', margin: 0 }}
-                              value={lesson.estimatedMinutes || 45}
-                              onChange={e => handleUpdateLesson(currentUnit.id, lesson.id, 'estimatedMinutes', Number(e.target.value))}
-                              title="Estimated duration in minutes"
-                            />
-                            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>min</span>
-                            <button
-                              className="delete-icon-btn"
-                              onClick={() => handleDeleteLesson(currentUnit.id, lesson.id)}
-                              title="Delete Lesson"
-                            >
-                              🗑️
-                            </button>
-                          </div>
-                        </div>
-
-                        {/* Modular Content Blocks Stack */}
-                        <div className="blocks-stack">
-                          {(lesson.blocks || []).map((block, bIdx) => (
-                            <div key={block.id} className={`content-block-item type-${block.type}`}>
-                              <div className="block-header">
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                  <span className="block-type-icon">
-                                    {CONTENT_BLOCK_TYPES.find(t => t.type === block.type)?.icon || '📄'}
-                                  </span>
-                                  <span className="block-type-label">
-                                    {CONTENT_BLOCK_TYPES.find(t => t.type === block.type)?.label || block.type}
-                                  </span>
-                                </div>
-                                <button
-                                  className="delete-icon-btn"
-                                  onClick={() => handleDeleteBlock(currentUnit.id, lesson.id, block.id)}
-                                  title="Remove Block"
-                                >
-                                  ×
-                                </button>
-                              </div>
-
-                              <input
-                                type="text"
-                                className="form-input block-title-input"
-                                value={block.title || ''}
-                                onChange={e => handleUpdateBlock(currentUnit.id, lesson.id, block.id, { title: e.target.value })}
-                                placeholder="Block Title or Section Heading"
-                              />
-
-                              {/* BLOCK TYPE: Text Description */}
-                              {block.type === 'text_description' && (
-                                <textarea
-                                  rows="3"
-                                  className="form-input"
-                                  value={block.content || ''}
-                                  onChange={e => handleUpdateBlock(currentUnit.id, lesson.id, block.id, { content: e.target.value })}
-                                  placeholder="Markdown instructional content, core theory, or student notes..."
-                                />
-                              )}
-
-                              {/* BLOCK TYPE: Teacher Guide */}
-                              {block.type === 'teacher_guide' && (
-                                <div className="teacher-guide-box">
-                                  <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#f59e0b', marginBottom: '4px' }}>
-                                    🧑‍🏫 Internal Pedagogy & Facilitation Guide (Invisible to students)
-                                  </div>
-                                  <textarea
-                                    rows="3"
-                                    className="form-input"
-                                    style={{ borderColor: '#f59e0b' }}
-                                    value={block.content || ''}
-                                    onChange={e => handleUpdateBlock(currentUnit.id, lesson.id, block.id, { content: e.target.value })}
-                                    placeholder="Classroom timings, discussion scaffolding, common misconceptions..."
-                                  />
-                                </div>
-                              )}
-
-                              {/* BLOCK TYPE: YouTube Video */}
-                              {block.type === 'youtube_video' && (
-                                <div>
-                                  <input
-                                    type="text"
-                                    className="form-input"
-                                    value={block.metadata?.youtubeUrl || block.content || ''}
-                                    onChange={e => {
-                                      const url = e.target.value;
-                                      handleUpdateBlock(currentUnit.id, lesson.id, block.id, {
-                                        content: url,
-                                        metadata: { youtubeUrl: url }
-                                      });
-                                    }}
-                                    placeholder="Paste YouTube Video URL (e.g. https://www.youtube.com/watch?v=...)"
-                                  />
-                                  {youtubeVideoId(block.metadata?.youtubeUrl || block.content) && (
-                                    <div className="video-preview-badge">
-                                      <span>▶️ YouTube Streaming Embed Active</span>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-
-                              {/* BLOCK TYPE: Google Drive Resource */}
-                              {block.type === 'google_drive_link' && (
-                                <div>
-                                  {/* Prominent Google Drive Public-Sharing Warning Banner */}
-                                  <div className="drive-advisory-banner">
-                                    <span>⚠️</span>
-                                    <div>
-                                      <strong>Google Drive Link Advisory:</strong> Please ensure this file/folder is set to <strong>"Anyone with the link can view"</strong> in Google Drive before publishing.
-                                    </div>
-                                  </div>
-
-                                  <input
-                                    type="text"
-                                    className="form-input"
-                                    value={block.metadata?.driveUrl || block.content || ''}
-                                    onChange={e => {
-                                      const url = e.target.value;
-                                      handleUpdateBlock(currentUnit.id, lesson.id, block.id, {
-                                        content: url,
-                                        metadata: { driveUrl: url }
-                                      });
-                                    }}
-                                    placeholder="Paste Google Drive shared link (Docs, Slides, Sheets, or Folders)"
-                                  />
-                                </div>
-                              )}
-
-                              {/* BLOCK TYPE: Direct File Upload */}
-                              {block.type === 'file_upload' && (
-                                <div>
-                                  <input
-                                    type="text"
-                                    className="form-input"
-                                    value={block.metadata?.fileUrl || block.content || ''}
-                                    onChange={e => {
-                                      const url = e.target.value;
-                                      handleUpdateBlock(currentUnit.id, lesson.id, block.id, {
-                                        content: url,
-                                        metadata: { fileUrl: url }
-                                      });
-                                    }}
-                                    placeholder="File Download URL or Cloud Storage Link..."
-                                  />
-                                </div>
-                              )}
-
-                              {/* BLOCK TYPE: Gemini Notebook (Gemini Notebook / NotebookLM share link) */}
-                              {block.type === 'notebook_link' && (
-                                <div>
-                                  <input
-                                    type="url"
-                                    className="form-input"
-                                    value={block.metadata?.notebookUrl || block.content || ''}
-                                    onChange={e => {
-                                      const url = e.target.value.trim();
-                                      handleUpdateBlock(currentUnit.id, lesson.id, block.id, {
-                                        content: url,
-                                        metadata: { notebookUrl: url }
-                                      });
-                                    }}
-                                    placeholder="Paste the Gemini Notebook share link (e.g. https://notebooklm.google.com/notebook/...)"
-                                  />
-                                  {(block.metadata?.notebookUrl || block.content) && !isGoogleNotebookUrl(block.metadata?.notebookUrl || block.content) && (
-                                    <div className="notebook-hint">⚠️ This does not look like a Gemini Notebook link. Paste the notebook&apos;s https:// share link (e.g. https://notebooklm.google.com/notebook/…) and share the notebook so students can open it.</div>
-                                  )}
-                                  {isGoogleNotebookUrl(block.metadata?.notebookUrl || block.content) && (
-                                    <div className="video-preview-badge">📓 Gemini Notebook link ready</div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-
-                        {/* Add Block Toolbar */}
-                        <div className="add-block-toolbar">
-                          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Add Block:</span>
-                          {CONTENT_BLOCK_TYPES.map(bt => (
-                            <button
-                              key={bt.type}
-                              type="button"
-                              className={`add-block-btn ${bt.disabled ? 'disabled' : ''}`}
-                              onClick={() => !bt.disabled && handleAddBlock(currentUnit.id, lesson.id, bt.type)}
-                              disabled={Boolean(bt.disabled)}
-                              aria-disabled={Boolean(bt.disabled)}
-                              title={bt.disabled ? bt.disabledReason : bt.description}
-                            >
-                              <span>{bt.icon}</span>
-                              <span>{bt.label}</span>
-                              {bt.disabled && <span className="soon-badge">Soon</span>}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
-
-              {/* TAB 2: ASSESSMENTS & RUBRICS */}
-              {activeTab === 'assessments' && (
-                <div className="assessments-container">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-                    <h3 style={{ margin: 0, fontSize: '1.1rem' }}>Unit Assessments & Evidence Tasks</h3>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                      <button className="nav-btn secondary" onClick={() => handleAddAssessment(currentUnit.id, 'formative')}>
-                        + Formative Task
-                      </button>
-                      <button className="nav-btn primary" onClick={() => handleAddAssessment(currentUnit.id, 'summative')}>
-                        + Summative Task
-                      </button>
-                    </div>
-                  </div>
-
-                  {(currentUnit.assessments || []).length === 0 ? (
-                    <div className="empty-state-card">
-                      <p>No assessment tasks configured for this unit.</p>
-                      <button className="nav-btn primary" onClick={() => handleAddAssessment(currentUnit.id, 'summative')}>
-                        Add Summative Capstone
-                      </button>
-                    </div>
-                  ) : (
-                    (currentUnit.assessments || []).map((asmt, aIdx) => (
-                      <div key={asmt.id} className="assessment-card glass">
+                ) : (
+                  courseAssessments.map((asmt) => {
+                    const isCardOpen = expandedAssessments[asmt.id] !== false;
+                    const rubricRows = Array.isArray(asmt.rubric) ? asmt.rubric : [];
+                    const legacyRubricText = typeof asmt.rubric === 'string' ? asmt.rubric.trim() : '';
+                    return (
+                      <div key={asmt.id} className="assessment-card glass" style={{ marginBottom: '14px' }}>
                         <div className="assessment-header-row">
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+                            <button
+                              type="button"
+                              className="collapse-toggle-btn"
+                              onClick={() => setExpandedAssessments(prev => ({ ...prev, [asmt.id]: !isCardOpen }))}
+                              aria-label={isCardOpen ? "Collapse task" : "Expand task"}
+                              style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '2px 4px' }}
+                            >
+                              {isCardOpen ? '▼' : '►'}
+                            </button>
                             <select
                               className={`asmt-type-pill asmt-type-select ${asmt.type}`}
                               value={asmt.type === 'summative' ? 'summative' : 'formative'}
-                              onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { type: e.target.value })}
+                              onChange={e => handleUpdateAssessment(asmt.id, { type: e.target.value })}
                               aria-label="Assessment type"
                             >
                               <option value="formative">FORMATIVE</option>
@@ -1308,178 +1118,715 @@ function AQFCourseBuilderInner({
                               className="form-input"
                               style={{ fontWeight: 700 }}
                               value={asmt.title || ''}
-                              onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { title: e.target.value })}
+                              onChange={e => handleUpdateAssessment(asmt.id, { title: e.target.value })}
                               placeholder="Assessment Title"
                             />
-                          </div>
-
-                          <button
-                            className="delete-icon-btn"
-                            onClick={() => handleDeleteAssessment(currentUnit.id, asmt.id)}
-                            title="Delete Assessment"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-
-                        <textarea
-                          rows="2"
-                          className="form-input"
-                          style={{ marginTop: '10px' }}
-                          value={asmt.description || ''}
-                          onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { description: e.target.value })}
-                          placeholder="Task brief, submission requirements, and evidence portfolio..."
-                        />
-
-                        {/* Due date, weighting & external submission link */}
-                        <div className="asmt-meta-grid">
-                          <div>
-                            <label className="field-label">Due Date</label>
-                            <input
-                              type="date"
-                              className="form-input"
-                              value={asmt.dueDate || ''}
-                              onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { dueDate: e.target.value })}
-                            />
-                          </div>
-                          <div>
-                            <label className="field-label">Weighting (% of unit)</label>
-                            <input
-                              type="number"
-                              min="0"
-                              max="100"
-                              className="form-input"
-                              value={asmt.nominalWeight ?? ''}
-                              onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { nominalWeight: e.target.value === '' ? null : Math.min(100, Math.max(0, Number(e.target.value) || 0)) })}
-                            />
-                          </div>
-                          <div className="asmt-meta-wide">
-                            <label className="field-label">External Submission Link (Google Forms / Canvas / Teams)</label>
-                            <input
-                              type="text"
-                              className="form-input"
-                              value={asmt.externalSubmissionLinks?.[0] || ''}
-                              onChange={e => handleUpdateAssessment(currentUnit.id, asmt.id, { externalSubmissionLinks: [e.target.value] })}
-                              placeholder="https://forms.google.com/... or https://teams.microsoft.com/..."
-                            />
-                          </div>
-                        </div>
-
-                        {/* Interactive Rubric Matrix */}
-                        <div className="rubric-matrix-box">
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                            <strong style={{ fontSize: '0.9rem', color: '#fef08a' }}>
-                              📊 Assessment Rubric Matrix
-                              <span style={{ marginLeft: '8px', fontSize: '0.75rem', fontWeight: 600, color: rubricWeightTotal(asmt.rubric) === 100 ? '#86efac' : '#fca5a5' }}>
-                                (Σ {rubricWeightTotal(asmt.rubric)}%)
+                            {asmt.nominalWeight !== null && asmt.nominalWeight !== undefined && (
+                              <span style={{ fontSize: '0.78rem', color: '#94a3b8', background: 'rgba(255,255,255,0.06)', padding: '2px 6px', borderRadius: '4px' }}>
+                                {asmt.nominalWeight}%
                               </span>
+                            )}
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <button
+                              type="button"
+                              className="collapse-toggle-btn"
+                              style={{ fontSize: '0.78rem', color: '#94a3b8', background: 'transparent', border: 'none', cursor: 'pointer' }}
+                              onClick={() => setExpandedAssessments(prev => ({ ...prev, [asmt.id]: !isCardOpen }))}
+                            >
+                              {isCardOpen ? 'Collapse' : 'Expand'}
+                            </button>
+                            <button
+                              className="delete-icon-btn"
+                              onClick={() => handleDeleteAssessment(asmt.id)}
+                              title="Delete Assessment"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        </div>
+
+                        {isCardOpen && (
+                          <>
+                            <textarea
+                              rows="2"
+                              className="form-input"
+                              style={{ marginTop: '10px' }}
+                              value={asmt.description || ''}
+                              onChange={e => handleUpdateAssessment(asmt.id, { description: e.target.value })}
+                              placeholder="Task brief, submission requirements, and evidence portfolio..."
+                            />
+
+                            {/* Due date, weighting, units covered & external submission link */}
+                            <div className="asmt-meta-grid">
+                              <div>
+                                <label className="field-label">Due Date</label>
+                                <input
+                                  type="date"
+                                  className="form-input"
+                                  value={asmt.dueDate || ''}
+                                  onChange={e => handleUpdateAssessment(asmt.id, { dueDate: e.target.value })}
+                                />
+                              </div>
+                              <div>
+                                <label className="field-label">Weighting (% of course)</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  className="form-input"
+                                  value={asmt.nominalWeight ?? ''}
+                                  onChange={e => handleUpdateAssessment(asmt.id, { nominalWeight: e.target.value === '' ? null : Math.min(100, Math.max(0, Number(e.target.value) || 0)) })}
+                                />
+                              </div>
+                              <div>
+                                <label className="field-label">Covers</label>
+                                <select
+                                  className="form-input"
+                                  value={asmt.unitId && (currentCourse.units || []).some(u => u.id === asmt.unitId) ? asmt.unitId : ''}
+                                  onChange={e => handleUpdateAssessment(asmt.id, { unitId: e.target.value })}
+                                  aria-label="Units covered"
+                                >
+                                  <option value="">Whole course</option>
+                                  {(currentCourse.units || []).map(u => (
+                                    <option key={u.id} value={u.id}>{u.unitCode ? `${u.unitCode} — ` : ''}{u.unitTitle || 'Unit'}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="asmt-meta-wide">
+                                <label className="field-label">External Submission Link (Google Forms / Canvas / Teams)</label>
+                                <input
+                                  type="text"
+                                  className="form-input"
+                                  value={asmt.externalSubmissionLinks?.[0] || ''}
+                                  onChange={e => handleUpdateAssessment(asmt.id, { externalSubmissionLinks: [e.target.value] })}
+                                  placeholder="https://forms.google.com/... or https://teams.microsoft.com/..."
+                                />
+                              </div>
+                            </div>
+
+                            {/* Interactive Rubric Matrix */}
+                            <div className="rubric-matrix-box">
+                              {legacyRubricText && (
+                                <div className="legacy-rubric-note">
+                                  <strong>Marking notes (text):</strong>
+                                  <div style={{ whiteSpace: 'pre-wrap', margin: '4px 0 6px' }}>{legacyRubricText}</div>
+                                  <button
+                                    type="button"
+                                    className="nav-btn secondary"
+                                    style={{ fontSize: '0.78rem', padding: '4px 8px' }}
+                                    onClick={() => handleUpdateAssessment(asmt.id, { rubric: createDefaultRubric(), rubricNotes: legacyRubricText })}
+                                  >
+                                    Convert to a rubric matrix
+                                  </button>
+                                </div>
+                              )}
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                <strong style={{ fontSize: '0.9rem', color: '#fef08a' }}>
+                                  📊 Assessment Rubric Matrix
+                                  <span style={{ marginLeft: '8px', fontSize: '0.75rem', fontWeight: 600, color: rubricWeightTotal(rubricRows) === 100 ? '#86efac' : '#fca5a5' }}>
+                                    (Σ {rubricWeightTotal(rubricRows)}%)
+                                  </span>
+                                </strong>
+                                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                  <RubricSpreadsheetImport
+                                    assessment={{ ...asmt, rubric: rubricRows }}
+                                    onApply={nextRubric => handleUpdateAssessment(asmt.id, { rubric: nextRubric })}
+                                  />
+                                  <button
+                                    className="nav-btn secondary"
+                                    style={{ fontSize: '0.78rem', padding: '4px 8px' }}
+                                    onClick={() => handleAddRubricCriterion(asmt.id)}
+                                  >
+                                    + Add Criterion Row
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="rubric-table-responsive">
+                                <table className="rubric-matrix-table">
+                                  <thead>
+                                    <tr>
+                                      <th style={{ width: '25%' }}>Criterion & Weight</th>
+                                      {getRubricTierLabels(rubricRows).map((label, tIdx) => (
+                                        <th key={tIdx}>{label}</th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {rubricRows.length === 0 && (
+                                      <tr>
+                                        <td colSpan={getRubricTierLabels(rubricRows).length + 1} style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '12px' }}>
+                                          No criteria yet — use + Add Criterion Row or ⬆ Upload Rubric.
+                                        </td>
+                                      </tr>
+                                    )}
+                                    {rubricRows.map((crit) => (
+                                      <tr key={crit.id}>
+                                        <td>
+                                          <div style={{ display: 'flex', gap: '4px', alignItems: 'flex-start' }}>
+                                            <input
+                                              type="text"
+                                              className="form-input matrix-crit-input"
+                                              value={crit.criterionTitle || ''}
+                                              onChange={e => {
+                                                const nextRubric = rubricRows.map(r => r.id === crit.id ? { ...r, criterionTitle: e.target.value } : r);
+                                                handleUpdateAssessment(asmt.id, { rubric: nextRubric });
+                                              }}
+                                              placeholder="Criterion Title"
+                                            />
+                                            <button
+                                              type="button"
+                                              className="delete-icon-btn"
+                                              onClick={() => handleDeleteRubricCriterion(asmt.id, crit.id)}
+                                              title="Remove this criterion row"
+                                              aria-label={`Remove criterion ${crit.criterionTitle || ''}`}
+                                            >
+                                              ×
+                                            </button>
+                                          </div>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
+                                            <input
+                                              type="number"
+                                              className="form-input"
+                                              style={{ width: '65px', padding: '4px' }}
+                                              value={crit.weightPercentage ?? 25}
+                                              onChange={e => {
+                                                const nextRubric = rubricRows.map(r => r.id === crit.id ? { ...r, weightPercentage: Number(e.target.value) || 0 } : r);
+                                                handleUpdateAssessment(asmt.id, { rubric: nextRubric });
+                                              }}
+                                            />
+                                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>% weight</span>
+                                          </div>
+                                        </td>
+                                        {getRubricTierLabels(rubricRows).map((_, lIdx) => {
+                                          const lvl = crit.levels?.[lIdx];
+                                          if (!lvl) return <td key={lIdx} className="matrix-empty-cell">—</td>;
+                                          return (
+                                            <td key={lIdx}>
+                                              <textarea
+                                                rows="2"
+                                                className="form-input matrix-desc-input"
+                                                value={lvl.descriptor || ''}
+                                                onChange={e => {
+                                                  const updatedLevels = crit.levels.map((oldL, i) => i === lIdx ? { ...oldL, descriptor: e.target.value } : oldL);
+                                                  const nextRubric = rubricRows.map(r => r.id === crit.id ? { ...r, levels: updatedLevels } : r);
+                                                  handleUpdateAssessment(asmt.id, { rubric: nextRubric });
+                                                }}
+                                              />
+                                            </td>
+                                          );
+                                        })}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </section>
+
+          {/* 📚 UNITS OF STUDY (In the right column, below Course Assessments) */}
+          <section id="builder-units-panel" className="units-container" aria-label="Units of Study">
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '10px',
+                gap: '10px',
+                flexWrap: 'wrap',
+                cursor: 'pointer',
+                padding: '6px 8px',
+                borderRadius: '10px',
+                background: 'rgba(255, 255, 255, 0.03)',
+                borderTop: '1px solid rgba(255, 255, 255, 0.1)'
+              }}
+              onClick={() => setIsUnitsSectionExpanded(prev => !prev)}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="collapse-toggle-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsUnitsSectionExpanded(prev => !prev);
+                  }}
+                  aria-label={isUnitsSectionExpanded ? 'Collapse Units of Study' : 'Expand Units of Study'}
+                  style={{ background: 'transparent', border: 'none', color: '#fef08a', fontSize: '1rem', cursor: 'pointer' }}
+                >
+                  {isUnitsSectionExpanded ? '▼' : '►'}
+                </button>
+                <h3 style={{ margin: 0, fontSize: '1.15rem' }}>📚 Units of Study</h3>
+                <span className="count-badge" style={{ background: '#3b82f6', color: '#fff', fontSize: '0.75rem', fontWeight: 800, padding: '2px 8px', borderRadius: '10px' }}>
+                  {(currentCourse.units || []).length}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                <button className="nav-btn primary" onClick={handleAddUnit}>
+                  + Add Unit
+                </button>
+                <button
+                  type="button"
+                  className="nav-btn secondary"
+                  style={{ padding: '4px 10px', fontSize: '0.8rem' }}
+                  onClick={() => setIsUnitsSectionExpanded(prev => !prev)}
+                >
+                  {isUnitsSectionExpanded ? 'Collapse' : 'Expand'}
+                </button>
+              </div>
+            </div>
+
+            {isUnitsSectionExpanded && (
+              <div>
+                {(currentCourse.units || []).length === 0 ? (
+                  <div className="empty-state-card">
+                    <p>No units added yet. Add a unit to build out lessons and quizzes.</p>
+                    <button className="nav-btn primary" onClick={handleAddUnit}>
+                      + Add Unit
+                    </button>
+                  </div>
+                ) : (
+                  (currentCourse.units || []).map((unit, uIdx) => {
+                    const isUnitOpen = expandedUnits[unit.id] !== false;
+                    const lessons = Array.isArray(unit.lessons) ? unit.lessons : [];
+                    const unitQuizCount = lessons.reduce((acc, l) => acc + (l.blocks || []).filter(b => b.type === 'quiz').length, 0);
+
+                    return (
+                      <div
+                        key={unit.id}
+                        id={`unit-panel-${unit.id}`}
+                        className="unit-section-card glass"
+                        style={{ marginBottom: '20px', borderRadius: '12px', padding: '16px', border: '1px solid rgba(255, 255, 255, 0.1)' }}
+                      >
+                        {/* Unit Card Summary / Header Bar */}
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            cursor: 'pointer',
+                            padding: '4px 0',
+                            marginBottom: isUnitOpen ? '14px' : '0'
+                          }}
+                          onClick={() => toggleUnitExpand(unit.id)}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0, flexWrap: 'wrap' }}>
+                            <button
+                              type="button"
+                              className="collapse-toggle-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleUnitExpand(unit.id);
+                              }}
+                              aria-label={isUnitOpen ? 'Collapse unit' : 'Expand unit'}
+                              style={{ background: 'transparent', border: 'none', color: '#fef08a', fontSize: '1rem', cursor: 'pointer' }}
+                            >
+                              {isUnitOpen ? '▼' : '►'}
+                            </button>
+                            <span className="sl-code" style={{ fontWeight: 800, color: '#38bdf8' }}>
+                              {unit.unitCode || `UNIT-${uIdx + 1}`}
+                            </span>
+                            <strong style={{ fontSize: '1.05rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {unit.unitTitle || 'Untitled Unit'}
                             </strong>
-                            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                              <RubricSpreadsheetImport
-                                assessment={asmt}
-                                onApply={nextRubric => handleUpdateAssessment(currentUnit.id, asmt.id, { rubric: nextRubric })}
-                              />
-                              <button
-                                className="nav-btn secondary"
-                                style={{ fontSize: '0.78rem', padding: '4px 8px' }}
-                                onClick={() => handleAddRubricCriterion(currentUnit.id, asmt.id)}
+                            <span className="sl-muted" style={{ fontSize: '0.8rem' }}>
+                              • {unit.nominalHours || 40} hrs • {lessons.length} lesson{lessons.length === 1 ? '' : 's'}
+                              {unitQuizCount > 0 ? ` • ${unitQuizCount} quiz${unitQuizCount === 1 ? '' : 'zes'}` : ''}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} onClick={e => e.stopPropagation()}>
+                            <button
+                              type="button"
+                              className="collapse-toggle-btn"
+                              style={{ fontSize: '0.78rem', color: '#94a3b8', background: 'transparent', border: 'none', cursor: 'pointer' }}
+                              onClick={() => toggleUnitExpand(unit.id)}
+                            >
+                              {isUnitOpen ? 'Collapse' : 'Expand'}
+                            </button>
+                            <button
+                              className="delete-icon-btn"
+                              onClick={() => handleDeleteUnit(unit.id)}
+                              title="Delete Unit"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Unit Content when expanded */}
+                        {isUnitOpen && (
+                          <div>
+                            {/* Unit Editor Header */}
+                            <div className="unit-editor-header">
+                              <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr 120px', gap: '12px', alignItems: 'flex-start' }}>
+                                <div>
+                                  <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}>
+                                    Unit Code
+                                  </label>
+                                  <input
+                                    type="text"
+                                    className="form-input"
+                                    value={unit.unitCode || ''}
+                                    onChange={e => handleUpdateUnit(unit.id, 'unitCode', e.target.value)}
+                                    placeholder="e.g. BSBTEC301"
+                                  />
+                                </div>
+                                <div>
+                                  <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}>
+                                    Unit Title
+                                  </label>
+                                  <input
+                                    type="text"
+                                    className="form-input"
+                                    style={{ fontWeight: 700, fontSize: '1.05rem' }}
+                                    value={unit.unitTitle || ''}
+                                    onChange={e => handleUpdateUnit(unit.id, 'unitTitle', e.target.value)}
+                                    placeholder="e.g. Design and produce business documents"
+                                  />
+                                </div>
+                                <div>
+                                  <label
+                                    style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', marginBottom: '4px' }}
+                                    title="Nominal Guided Learning Hours: the estimated study and instructional hours allocated to complete this unit."
+                                  >
+                                    Nominal Hours
+                                  </label>
+                                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      className="form-input"
+                                      style={{ paddingRight: '36px' }}
+                                      value={unit.nominalHours || 40}
+                                      onChange={e => handleUpdateUnit(unit.id, 'nominalHours', Number(e.target.value) || 0)}
+                                      placeholder="40"
+                                      title="Nominal Guided Learning Hours (guided instructional and study time)"
+                                    />
+                                    <span style={{ position: 'absolute', right: '10px', fontSize: '0.78rem', color: '#94a3b8', pointerEvents: 'none', fontWeight: 600 }}>
+                                      hrs
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                              <label
+                                htmlFor={`unit-performance-criteria-${unit.id}`}
+                                style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#94a3b8', margin: '10px 0 4px' }}
                               >
-                                + Add Criterion Row
-                              </button>
+                                Performance Criteria
+                              </label>
+                              <textarea
+                                id={`unit-performance-criteria-${unit.id}`}
+                                rows="2"
+                                className="form-input"
+                                value={unit.description || ''}
+                                onChange={e => handleUpdateUnit(unit.id, 'description', e.target.value)}
+                                placeholder="What a learner must demonstrate to be competent in this unit…"
+                              />
+                              <label className="field-label" style={{ marginTop: '8px' }}>Unit Learning Outcomes (one per line)</label>
+                              <textarea
+                                rows="2"
+                                className="form-input"
+                                value={listToLines(unit.learningOutcomes)}
+                                onChange={e => handleUpdateUnit(unit.id, 'learningOutcomes', linesToList(e.target.value))}
+                                placeholder="Explain…&#10;Apply…"
+                              />
+                            </div>
+
+                            {/* A unit holds lessons & blocks only */}
+                            <div className="unit-tabs-row">
+                              <span className="tab-btn active" aria-current="true">
+                                📚 Lessons & Blocks ({(unit.lessons || []).length})
+                              </span>
+                            </div>
+
+                            {/* UNIT CURRICULUM (LESSONS & BLOCKS) */}
+                            <div className="lessons-container">
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+                                <h3 style={{ margin: 0, fontSize: '1.05rem' }}>Modular Lesson Stack</h3>
+                                <button className="nav-btn primary" onClick={() => handleAddLesson(unit.id)}>
+                                  + Add Lesson
+                                </button>
+                              </div>
+
+                              {(unit.lessons || []).length === 0 ? (
+                                <div className="empty-state-card">
+                                  <p>No lessons added yet.</p>
+                                  <button className="nav-btn primary" onClick={() => handleAddLesson(unit.id)}>
+                                    Create First Lesson
+                                  </button>
+                                </div>
+                              ) : (
+                                (unit.lessons || []).map((lesson, lIdx) => {
+                                  const isLessonOpen = expandedLessons[lesson.id] !== false;
+                                  const quizBlocks = (lesson.blocks || []).filter(b => b.type === 'quiz');
+
+                                  return (
+                                    <div key={lesson.id} className="lesson-card glass">
+                                      {/* Lesson Header */}
+                                      <div className="lesson-header-row">
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+                                          <button
+                                            type="button"
+                                            className="collapse-toggle-btn"
+                                            onClick={() => setExpandedLessons(prev => ({ ...prev, [lesson.id]: !isLessonOpen }))}
+                                            aria-label={isLessonOpen ? "Collapse lesson" : "Expand lesson"}
+                                            style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '2px 4px' }}
+                                          >
+                                            {isLessonOpen ? '▼' : '►'}
+                                          </button>
+                                          <span className="lesson-index-badge">#{lIdx + 1}</span>
+                                          <input
+                                            type="text"
+                                            className="form-input lesson-title-input"
+                                            value={lesson.title || ''}
+                                            onChange={e => handleUpdateLesson(unit.id, lesson.id, 'title', e.target.value)}
+                                            placeholder="Lesson Title"
+                                          />
+                                          {quizBlocks.length > 0 && (
+                                            <span style={{ fontSize: '0.72rem', background: 'rgba(167, 139, 250, 0.2)', color: '#c4b5fd', padding: '2px 6px', borderRadius: '4px', fontWeight: 700 }}>
+                                              {quizBlocks.length} quiz{quizBlocks.length === 1 ? '' : 'zes'}
+                                            </span>
+                                          )}
+                                        </div>
+
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                          <input
+                                            type="number"
+                                            className="form-input"
+                                            style={{ width: '80px', margin: 0 }}
+                                            value={lesson.estimatedMinutes || 45}
+                                            onChange={e => handleUpdateLesson(unit.id, lesson.id, 'estimatedMinutes', Number(e.target.value))}
+                                            title="Estimated duration in minutes"
+                                          />
+                                          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>min</span>
+                                          <button
+                                            type="button"
+                                            className="collapse-toggle-btn"
+                                            style={{ fontSize: '0.75rem', color: '#94a3b8', background: 'transparent', border: 'none', cursor: 'pointer' }}
+                                            onClick={() => setExpandedLessons(prev => ({ ...prev, [lesson.id]: !isLessonOpen }))}
+                                          >
+                                            {isLessonOpen ? 'Collapse' : 'Expand'}
+                                          </button>
+                                          <button
+                                            className="delete-icon-btn"
+                                            onClick={() => handleDeleteLesson(unit.id, lesson.id)}
+                                            title="Delete Lesson"
+                                          >
+                                            🗑️
+                                          </button>
+                                        </div>
+                                      </div>
+
+                                      {/* Modular Content Blocks Stack */}
+                                      {isLessonOpen && (
+                                        <>
+                                          <div className="blocks-stack">
+                                            {(lesson.blocks || []).map((block, bIdx) => (
+                                              <div key={block.id} className={`content-block-item type-${block.type}`}>
+                                                <div className="block-header">
+                                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                    <span className="block-type-icon">
+                                                      {CONTENT_BLOCK_TYPES.find(t => t.type === block.type)?.icon || '📄'}
+                                                    </span>
+                                                    <span className="block-type-label">
+                                                      {CONTENT_BLOCK_TYPES.find(t => t.type === block.type)?.label || block.type}
+                                                    </span>
+                                                  </div>
+                                                  <button
+                                                    className="delete-icon-btn"
+                                                    onClick={() => handleDeleteBlock(unit.id, lesson.id, block.id)}
+                                                    title="Remove Block"
+                                                  >
+                                                    ×
+                                                  </button>
+                                                </div>
+
+                                                <input
+                                                  type="text"
+                                                  className="form-input block-title-input"
+                                                  value={block.title || ''}
+                                                  onChange={e => handleUpdateBlock(unit.id, lesson.id, block.id, { title: e.target.value })}
+                                                  placeholder="Block Title or Section Heading"
+                                                />
+
+                                                {/* BLOCK TYPE: Text Description */}
+                                                {block.type === 'text_description' && (
+                                                  <textarea
+                                                    rows="3"
+                                                    className="form-input"
+                                                    value={block.content || ''}
+                                                    onChange={e => handleUpdateBlock(unit.id, lesson.id, block.id, { content: e.target.value })}
+                                                    placeholder="Markdown instructional content, core theory, or student notes..."
+                                                  />
+                                                )}
+
+                                                {/* BLOCK TYPE: Teacher Guide */}
+                                                {block.type === 'teacher_guide' && (
+                                                  <div className="teacher-guide-box">
+                                                    <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#f59e0b', marginBottom: '4px' }}>
+                                                      🧑‍🏫 Internal Pedagogy & Facilitation Guide (Invisible to students)
+                                                    </div>
+                                                    <textarea
+                                                      rows="3"
+                                                      className="form-input"
+                                                      style={{ borderColor: '#f59e0b' }}
+                                                      value={block.content || ''}
+                                                      onChange={e => handleUpdateBlock(unit.id, lesson.id, block.id, { content: e.target.value })}
+                                                      placeholder="Classroom timings, discussion scaffolding, common misconceptions..."
+                                                    />
+                                                  </div>
+                                                )}
+
+                                                {/* BLOCK TYPE: YouTube Video */}
+                                                {block.type === 'youtube_video' && (
+                                                  <div>
+                                                    <input
+                                                      type="text"
+                                                      className="form-input"
+                                                      value={block.metadata?.youtubeUrl || block.content || ''}
+                                                      onChange={e => {
+                                                        const url = e.target.value;
+                                                        handleUpdateBlock(unit.id, lesson.id, block.id, {
+                                                          content: url,
+                                                          metadata: { youtubeUrl: url }
+                                                        });
+                                                      }}
+                                                      placeholder="Paste YouTube Video URL (e.g. https://www.youtube.com/watch?v=...)"
+                                                    />
+                                                    {youtubeVideoId(block.metadata?.youtubeUrl || block.content) && (
+                                                      <div className="video-preview-badge">
+                                                        <span>▶️ YouTube Streaming Embed Active</span>
+                                                      </div>
+                                                    )}
+                                                  </div>
+                                                )}
+
+                                                {/* BLOCK TYPE: Google Drive Resource */}
+                                                {block.type === 'google_drive_link' && (
+                                                  <div>
+                                                    <div className="drive-advisory-banner">
+                                                      <span>⚠️</span>
+                                                      <div>
+                                                        <strong>Google Drive Link Advisory:</strong> Please ensure this file/folder is set to <strong>"Anyone with the link can view"</strong> in Google Drive before publishing.
+                                                      </div>
+                                                    </div>
+
+                                                    <input
+                                                      type="text"
+                                                      className="form-input"
+                                                      value={block.metadata?.driveUrl || block.content || ''}
+                                                      onChange={e => {
+                                                        const url = e.target.value;
+                                                        handleUpdateBlock(unit.id, lesson.id, block.id, {
+                                                          content: url,
+                                                          metadata: { driveUrl: url }
+                                                        });
+                                                      }}
+                                                      placeholder="Paste Google Drive shared link (Docs, Slides, Sheets, or Folders)"
+                                                    />
+                                                  </div>
+                                                )}
+
+                                                {/* BLOCK TYPE: Direct File Upload */}
+                                                {block.type === 'file_upload' && (
+                                                  <div>
+                                                    <input
+                                                      type="text"
+                                                      className="form-input"
+                                                      value={block.metadata?.fileUrl || block.content || ''}
+                                                      onChange={e => {
+                                                        const url = e.target.value;
+                                                        handleUpdateBlock(unit.id, lesson.id, block.id, {
+                                                          content: url,
+                                                          metadata: { fileUrl: url }
+                                                        });
+                                                      }}
+                                                      placeholder="File Download URL or Cloud Storage Link..."
+                                                    />
+                                                  </div>
+                                                )}
+
+                                                {/* BLOCK TYPE: Gemini Notebook */}
+                                                {block.type === 'notebook_link' && (
+                                                  <div>
+                                                    <input
+                                                      type="url"
+                                                      className="form-input"
+                                                      value={block.metadata?.notebookUrl || block.content || ''}
+                                                      onChange={e => {
+                                                        const url = e.target.value.trim();
+                                                        handleUpdateBlock(unit.id, lesson.id, block.id, {
+                                                          content: url,
+                                                          metadata: { notebookUrl: url }
+                                                        });
+                                                      }}
+                                                      placeholder="Paste the Gemini Notebook share link (e.g. https://notebooklm.google.com/notebook/...)"
+                                                    />
+                                                    {(block.metadata?.notebookUrl || block.content) && !isGoogleNotebookUrl(block.metadata?.notebookUrl || block.content) && (
+                                                      <div className="notebook-hint">⚠️ This does not look like a Gemini Notebook link. Paste the notebook&apos;s https:// share link (e.g. https://notebooklm.google.com/notebook/…) and share the notebook so students can open it.</div>
+                                                    )}
+                                                    {isGoogleNotebookUrl(block.metadata?.notebookUrl || block.content) && (
+                                                      <div className="video-preview-badge">📓 Gemini Notebook link ready</div>
+                                                    )}
+                                                  </div>
+                                                )}
+
+                                                {/* BLOCK TYPE: Quiz & Questions */}
+                                                {block.type === 'quiz' && (
+                                                  <QuizBlockEditor
+                                                    quiz={block.quiz}
+                                                    keysStatus={quizKeysStatus}
+                                                    onChange={nextQuiz => handleUpdateBlock(unit.id, lesson.id, block.id, { quiz: nextQuiz })}
+                                                  />
+                                                )}
+                                              </div>
+                                            ))}
+                                          </div>
+
+                                          {/* Add Block Toolbar */}
+                                          <div className="add-block-toolbar">
+                                            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Add Block:</span>
+                                            {CONTENT_BLOCK_TYPES.map(bt => (
+                                              <button
+                                                key={bt.type}
+                                                type="button"
+                                                className={`add-block-btn ${bt.disabled ? 'disabled' : ''}`}
+                                                onClick={() => !bt.disabled && handleAddBlock(unit.id, lesson.id, bt.type)}
+                                                disabled={Boolean(bt.disabled)}
+                                                aria-disabled={Boolean(bt.disabled)}
+                                                title={bt.disabled ? bt.disabledReason : bt.description}
+                                              >
+                                                <span>{bt.icon}</span>
+                                                <span>{bt.label}</span>
+                                                {bt.disabled && <span className="soon-badge">Soon</span>}
+                                              </button>
+                                            ))}
+                                          </div>
+                                        </>
+                                      )}
+                                    </div>
+                                  );
+                                })
+                              )}
                             </div>
                           </div>
-
-                          <div className="rubric-table-responsive">
-                            <table className="rubric-matrix-table">
-                              <thead>
-                                <tr>
-                                  <th style={{ width: '25%' }}>Criterion & Weight</th>
-                                  {getRubricTierLabels(asmt.rubric).map((label, tIdx) => (
-                                    <th key={tIdx}>{label}</th>
-                                  ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {(asmt.rubric || []).length === 0 && (
-                                  <tr>
-                                    <td colSpan={getRubricTierLabels(asmt.rubric).length + 1} style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '12px' }}>
-                                      No criteria yet — use + Add Criterion Row or ⬆ Upload Rubric.
-                                    </td>
-                                  </tr>
-                                )}
-                                {(asmt.rubric || []).map((crit) => (
-                                  <tr key={crit.id}>
-                                    <td>
-                                      <div style={{ display: 'flex', gap: '4px', alignItems: 'flex-start' }}>
-                                        <input
-                                          type="text"
-                                          className="form-input matrix-crit-input"
-                                          value={crit.criterionTitle || ''}
-                                          onChange={e => {
-                                            const nextRubric = asmt.rubric.map(r => r.id === crit.id ? { ...r, criterionTitle: e.target.value } : r);
-                                            handleUpdateAssessment(currentUnit.id, asmt.id, { rubric: nextRubric });
-                                          }}
-                                          placeholder="Criterion Title"
-                                        />
-                                        <button
-                                          type="button"
-                                          className="delete-icon-btn"
-                                          onClick={() => handleDeleteRubricCriterion(currentUnit.id, asmt.id, crit.id)}
-                                          title="Remove this criterion row"
-                                          aria-label={`Remove criterion ${crit.criterionTitle || ''}`}
-                                        >
-                                          ×
-                                        </button>
-                                      </div>
-                                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
-                                        <input
-                                          type="number"
-                                          className="form-input"
-                                          style={{ width: '65px', padding: '4px' }}
-                                          value={crit.weightPercentage ?? 25}
-                                          onChange={e => {
-                                            const nextRubric = asmt.rubric.map(r => r.id === crit.id ? { ...r, weightPercentage: Number(e.target.value) || 0 } : r);
-                                            handleUpdateAssessment(currentUnit.id, asmt.id, { rubric: nextRubric });
-                                          }}
-                                        />
-                                        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>% weight</span>
-                                      </div>
-                                    </td>
-                                    {getRubricTierLabels(asmt.rubric).map((_, lIdx) => {
-                                      const lvl = crit.levels?.[lIdx];
-                                      if (!lvl) return <td key={lIdx} className="matrix-empty-cell">—</td>;
-                                      return (
-                                        <td key={lIdx}>
-                                          <textarea
-                                            rows="2"
-                                            className="form-input matrix-desc-input"
-                                            value={lvl.descriptor || ''}
-                                            onChange={e => {
-                                              const updatedLevels = crit.levels.map((oldL, i) => i === lIdx ? { ...oldL, descriptor: e.target.value } : oldL);
-                                              const nextRubric = asmt.rubric.map(r => r.id === crit.id ? { ...r, levels: updatedLevels } : r);
-                                              handleUpdateAssessment(currentUnit.id, asmt.id, { rubric: nextRubric });
-                                            }}
-                                          />
-                                        </td>
-                                      );
-                                    })}
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
+                        )}
                       </div>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="empty-state-card">
-              <p>No unit selected. Select or add a unit from the left panel.</p>
-            </div>
-          )}
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </section>
         </main>
       </div>
 
@@ -1791,7 +2138,7 @@ function AQFCourseBuilderInner({
                           <button
                             className="nav-btn primary"
                             style={{ padding: '4px 10px', fontSize: '0.78rem' }}
-                            onClick={() => handleImportUnit(u, courseItem.authorId, courseItem.title)}
+                            onClick={() => handleImportUnit(u, courseItem.authorId, courseItem.title, courseItem.id)}
                           >
                             {isCharity || isUnlimited ? 'Import (0 Tokens)' : 'Import (1 Token)'}
                           </button>
@@ -1852,6 +2199,7 @@ function AQFCourseBuilderInner({
         <CourseAddPeopleModal
           course={currentCourse}
           currentUser={currentUser}
+          userProfile={userProfile}
           onClose={() => setIsAddPeopleOpen(false)}
           onMemberAdded={() => {}}
         />
@@ -2367,6 +2715,13 @@ function AQFCourseBuilderInner({
         .builder-import-notes ul { margin: 6px 0; padding-left: 18px; max-height: 200px; overflow-y: auto; }
         .course-details-more { margin-top: 10px; }
         .course-details-more > summary { cursor: pointer; font-size: 0.82rem; font-weight: 700; color: #fef08a; }
+        .legacy-rubric-note { padding: 8px 10px; border-radius: 8px; background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); font-size: 0.82rem; margin-bottom: 8px; }
+        .course-assessments-nav { display: flex; width: 100%; padding: 10px 12px; border-radius: 10px; background: rgba(56,189,248,0.08); border: 1px solid rgba(56,189,248,0.35); color: inherit; font: inherit; cursor: pointer; text-align: left; }
+        .course-assessments-nav:hover { background: rgba(56,189,248,0.16); }
+        .course-assessments-nav.active { background: rgba(56,189,248,0.22); border-color: #38bdf8; }
+        .course-assessments-nav-label { font-weight: 800; font-size: 0.85rem; color: #7dd3fc; }
+        .course-assessments-nav-sub { font-size: 0.78rem; color: var(--text-secondary); margin-top: 2px; }
+        .content-block-item.type-quiz { border-color: rgba(167,139,250,0.45); }
         .notebook-hint { margin-top: 6px; font-size: 0.78rem; color: #fcd34d; }
         .add-block-btn.disabled, .add-block-btn:disabled {
           opacity: 0.45;

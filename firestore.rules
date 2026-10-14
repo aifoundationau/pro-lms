@@ -82,8 +82,8 @@ service cloud.firestore {
 
     // ---- User Profiles & Role Enforcement (/users/{userId}) ----
     match /users/{userId} {
-      // Users read own profile; staff can view user directory
-      allow read: if isUser(userId) || isStaff();
+      // Users read own profile; staff can view user directory; registered users can view teacher profiles
+      allow read: if isUser(userId) || isStaff() || (signedIn() && resource.data.get('role', '').lower() in ['teacher', 'admin staff', 'superadmin']);
 
       // Newly registered users: default role & classification "supporter", 0 tokens, no Charity Pass
       // (the verified project-owner account may register as superadmin)
@@ -101,6 +101,20 @@ service cloud.firestore {
       allow update: if (isUser(userId)
                         && request.resource.data.get('role', '') == resource.data.get('role', '')
                         && request.resource.data.get('classification', '') == resource.data.get('classification', '')
+                        && request.resource.data.get('isCharityTeacher', false) == resource.data.get('isCharityTeacher', false)
+                        && request.resource.data.get('token_balance', 0) <= resource.data.get('token_balance', 0))
+                    // Allow teachers/staff to promote a Supporter to Student upon enrolment
+                    || (isStaff()
+                        && resource.data.get('role', '').lower() == 'supporter'
+                        && request.resource.data.get('role', '').lower() == 'student'
+                        && request.resource.data.get('classification', '').lower() in ['student', 'supporter']
+                        && request.resource.data.get('isCharityTeacher', false) == resource.data.get('isCharityTeacher', false)
+                        && request.resource.data.get('token_balance', 0) == resource.data.get('token_balance', 0))
+                    // Allow the user themselves to transition from Supporter to Student if enrolled
+                    || (isUser(userId)
+                        && resource.data.get('role', '').lower() == 'supporter'
+                        && request.resource.data.get('role', '').lower() == 'student'
+                        && request.resource.data.get('classification', '').lower() in ['student', 'supporter']
                         && request.resource.data.get('isCharityTeacher', false) == resource.data.get('isCharityTeacher', false)
                         && request.resource.data.get('token_balance', 0) <= resource.data.get('token_balance', 0))
                     || (isSuperadmin()
@@ -185,7 +199,7 @@ service cloud.firestore {
                     || (emailVerified()
                         && request.resource.data.studentUid == request.auth.uid
                         && request.resource.data.studentEmail == myEmail()
-                        && request.resource.data.status == 'submitted'
+                        && request.resource.data.status in ['submitted', 'draft']
                         && workId == request.resource.data.courseId + '__' + request.resource.data.assessmentId + '__' + request.auth.uid
                         && !request.resource.data.keys().hasAny(['grade', 'feedback', 'gradedByUid', 'gradedByName', 'gradedAt', 'gradedAtIso'])
                         && isEnrolled(request.resource.data.courseId));
@@ -194,10 +208,57 @@ service cloud.firestore {
                         && resource.data.studentUid == request.auth.uid
                         && resource.data.get('status', '') != 'graded'
                         && request.resource.data.studentUid == request.auth.uid
-                        && request.resource.data.status == 'submitted'
+                        && request.resource.data.status in ['submitted', 'draft']
                         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
                              'text', 'linkUrl', 'status', 'submittedAt', 'submittedAtIso', 'attempts',
-                             'courseTitle', 'assessmentTitle', 'unitId', 'unitTitle', 'teacherUid', 'studentName', 'studentEmail', 'tag'
+                             'courseTitle', 'assessmentTitle', 'unitId', 'unitTitle', 'teacherUid', 'studentName', 'studentEmail', 'tag',
+                             'isDraft', 'draftSavedAt', 'draftSavedAtIso'
+                           ])
+                        && isEnrolled(resource.data.courseId));
+      allow delete: if false; // Strict NO-DELETE policy
+    }
+
+    // ---- Unit quiz answer keys (/lms_quiz_keys/<courseId>): staff only, never students ----
+    // Saved in the same batch as the course, so ownership is checked against the course as written.
+    match /lms_quiz_keys/{courseId} {
+      allow read: if isStaff();
+      allow create, update: if request.resource.data.get('courseId', '') == courseId
+                            && (isSuperadmin()
+                                || (isStaff()
+                                    && existsAfter(coursePath(courseId))
+                                    && getAfter(coursePath(courseId)).data.get('authorId', '') in [request.auth.uid, '']));
+      allow delete: if false;
+    }
+
+    // ---- Unit quiz attempts (/lms_quiz_attempts/<courseId>__<quizId>__<uid>) ----
+    // Students submit only their own answers (no marks) while enrolled, and may resubmit until the
+    // teacher releases results; teachers and staff read, mark and release.
+    match /lms_quiz_attempts/{attemptId} {
+      allow read: if isStaff() || (signedIn() && (resource == null || resource.data.get('studentUid', '') == request.auth.uid));
+      allow create: if isStaff()
+                    || (emailVerified()
+                        && request.resource.data.studentUid == request.auth.uid
+                        && request.resource.data.studentEmail == myEmail()
+                        && request.resource.data.status == 'submitted'
+                        && request.resource.data.answers is map
+                        && attemptId == request.resource.data.courseId + '__' + request.resource.data.quizId + '__' + request.auth.uid
+                        && request.resource.data.keys().hasOnly([
+                             'courseId', 'courseTitle', 'teacherUid', 'unitId', 'unitTitle', 'lessonId', 'lessonTitle',
+                             'quizId', 'quizTitle', 'studentUid', 'studentEmail', 'studentName', 'answers', 'questionCount',
+                             'status', 'submittedAt', 'submittedAtIso', 'attempts', 'tag'
+                           ])
+                        && isEnrolled(request.resource.data.courseId));
+      allow update: if isStaff()
+                    || (emailVerified()
+                        && resource.data.studentUid == request.auth.uid
+                        && resource.data.get('status', '') != 'graded'
+                        && request.resource.data.studentUid == request.auth.uid
+                        && request.resource.data.status == 'submitted'
+                        && request.resource.data.answers is map
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                             'answers', 'questionCount', 'status', 'submittedAt', 'submittedAtIso', 'attempts',
+                             'courseTitle', 'quizTitle', 'unitId', 'unitTitle', 'lessonId', 'lessonTitle', 'teacherUid',
+                             'studentName', 'studentEmail', 'tag'
                            ])
                         && isEnrolled(resource.data.courseId));
       allow delete: if false; // Strict NO-DELETE policy
@@ -230,6 +291,8 @@ service cloud.firestore {
                       request.resource.data.recipientEmail == 'superadmin'
                       // teachers / staff / Super Admin -> anyone (the app limits teachers to their students)
                       || isStaff()
+                      // students / users can contact any teacher or support
+                      || request.resource.data.category in ['teacher', 'student', 'support']
                       // students -> the teacher of a course they are enrolled in
                       || (request.resource.data.get('courseId', '') != ''
                           && isEnrolled(request.resource.data.courseId)

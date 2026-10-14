@@ -16,10 +16,20 @@ import {
   SUPERADMIN_INBOX,
   MAX_MESSAGE_CHARS,
   loadContacts,
-  buildTeacherApplicationMessage
+  buildTeacherApplicationMessage,
+  buildEnrolmentWelcome,
+  sendEnrolmentWelcomes
 } from '../src/services/messageService.js';
-import { parseMemberText, parseRosterSheets, memberDocId, buildMemberRecord, isValidMemberEmail } from '../src/services/courseEnrollmentService.js';
-import { validateSubmission, submissionDocId, buildSubmissionPayload } from '../src/services/submissionService.js';
+import {
+  parseMemberText,
+  parseRosterSheets,
+  memberDocId,
+  buildMemberRecord,
+  isValidMemberEmail,
+  addMemberToCourseFree,
+  subscribeToMyEnrolments
+} from '../src/services/courseEnrollmentService.js';
+import { validateSubmission, validateDraftSubmission, submissionDocId, buildSubmissionPayload } from '../src/services/submissionService.js';
 import { validateGrantAmount, MAX_GRANT_TOKENS } from '../src/services/tokenService.js';
 import { resolvePrivileges, formatTokenBalance, hasUnlimitedTokens, MAX_SUPERADMIN_GRANT } from '../src/services/rolePrivileges.js';
 import { buildCourseCopy, normalizeCourse } from '../src/services/lmsRepository.js';
@@ -28,6 +38,22 @@ import { checkAiAssistBalance } from '../src/services/aiCourseShared.js';
 import { youtubeVideoId } from '../src/services/mediaLinks.js';
 import { dataUrlBytes } from '../src/services/imageUtils.js';
 import { splitTextLinks } from '../src/services/mediaLinks.js';
+import { summarizeStudentProgress } from '../src/services/studentDashboard.js';
+import { moveUnitAssessmentsToCourse, createQuizQuestion, createBlankCourse } from '../src/types/courseBuilderTypes.js';
+import {
+  extractQuizAnswerKeys,
+  stripQuizAnswerKeys,
+  mergeQuizAnswerKeys,
+  remapQuizAnswerKeys,
+  normalizeQuiz,
+  cleanQuizAnswers,
+  scoreQuizAttempt,
+  buildQuizAttemptPayload,
+  buildQuizResultUpdate,
+  quizAttemptDocId,
+  quizResultsTable,
+  listCourseQuizzes
+} from '../src/services/quizModel.js';
 import {
   buildTeacherApplicationPayload,
   validateDocumentUrl,
@@ -98,6 +124,17 @@ async function run() {
   });
   assert.deepStrictEqual(contacts.map(c => c.email), [SUPERADMIN_INBOX, 'boss@school.edu', 'stu@school.edu']);
   assert.deepStrictEqual(contacts[2].courses, [{ id: 'c1', title: 'Bio' }]);
+
+  // Students can contact any registered teacher, network course teachers, and their course teachers
+  const studentContacts = await loadContacts({
+    selfEmail: 'stu@school.edu',
+    enrolledCourses: [{ id: 'c1', title: 'Bio', authorEmail: 'teacher@school.edu', authorName: 'Ms T' }],
+    networkCourses: [{ id: 'net_c2', title: 'Chemistry', authorEmail: 'chem_teacher@school.edu', authorName: 'Dr C' }],
+    registeredTeachers: [{ email: 'math_prof@school.edu', name: 'Prof M' }]
+  });
+  assert(studentContacts.some(c => c.email === 'chem_teacher@school.edu'), 'student can contact network course teacher');
+  assert(studentContacts.some(c => c.email === 'math_prof@school.edu'), 'student can contact any registered teacher');
+  assert(studentContacts.some(c => c.email === 'teacher@school.edu'), 'student can contact their course teacher');
   console.log('✅ Test 2 Passed: conversations group correctly with unread counts and permitted contacts.');
 
   // 3. Bulk enrolment parsing (paste and spreadsheet)
@@ -126,11 +163,21 @@ async function run() {
   assert.throws(() => validateSubmission({ text: 'x'.repeat(20001) }), e => e.code === 'TOO_LONG');
   assert.deepStrictEqual(validateSubmission({ text: ' answer ', linkUrl: ' https://docs.google.com/x ' }), { text: 'answer', linkUrl: 'https://docs.google.com/x' });
   assert.strictEqual(submissionDocId('c1', 'a1', 's1'), 'c1__a1__s1');
+
+  // Draft submissions validation & payload
+  assert.throws(() => validateDraftSubmission({}), e => e.code === 'EMPTY_DRAFT');
+  assert.deepStrictEqual(validateDraftSubmission({ text: ' draft notes ' }), { text: 'draft notes', linkUrl: '' });
+  const draftPayload = buildSubmissionPayload({ course: { id: 'c1', title: 'Bio', authorId: 't1' }, assessment: { id: 'a1', title: 'Essay' }, unit: null, user: { uid: 's1', email: 'S@x.org' }, text: 'Work in progress', linkUrl: '', isDraft: true });
+  assert.strictEqual(draftPayload.status, 'draft');
+  assert.strictEqual(draftPayload.isDraft, true);
+  assert(Boolean(draftPayload.draftSavedAtIso));
+
   const payload = buildSubmissionPayload({ course: { id: 'c1', title: 'Bio', authorId: 't1' }, assessment: { id: 'a1', title: 'Essay' }, unit: null, user: { uid: 's1', email: 'S@x.org' }, text: 'Hi', linkUrl: '' });
   assert.strictEqual(payload.studentEmail, 's@x.org');
   assert.strictEqual(payload.status, 'submitted');
+  assert.strictEqual(payload.isDraft, false);
   assert(!('grade' in payload), 'students never send grades');
-  console.log('✅ Test 4 Passed: submission validation and payloads.');
+  console.log('✅ Test 4 Passed: submission and draft validation and payloads.');
 
   // 5. Tokens: Super Admin grants 1–999, UNL display, Super Admin passes
   assert.strictEqual(MAX_GRANT_TOKENS, 999);
@@ -147,6 +194,7 @@ async function run() {
   assert.strictEqual(resolvePrivileges(null).role, 'supporter', 'new people are supporters');
   assert.strictEqual(resolvePrivileges({ role: 'teacher' }).isStaff, true);
   assert.strictEqual(resolvePrivileges({ role: 'student' }).isStaff, false);
+  assert.strictEqual(resolvePrivileges({ role: 'student' }).canViewDraftCourses, true, 'students can view draft courses');
   const clone = await executeContentClone({ currentUser: { uid: 'a1' }, userProfile: { role: 'superadmin' }, targetAuthorId: 't1', entityId: 'u1', entityTitle: 'Unit' });
   assert.strictEqual(clone.cost, 0);
   assert.strictEqual(clone.superadminPass, true);
@@ -284,7 +332,176 @@ async function run() {
   assert.strictEqual(sanitizeIdVerification(legacySimulated).confidence_score, null);
   console.log('✅ Test 10 Passed: AI ID check gives real 0-100 confidence; outages and missing keys say "Not verified".');
 
-  console.log('\n🎉 All LMS feature tests passed (10/10).');
+  // 11. Student Admin Panel overview + enrolment welcome message
+  const dashNow = new Date(2026, 9, 14, 10).getTime(); // 14 Oct 2026
+  const dashCourses = [
+    { id: 'c1', title: 'Reef', units: [{ unitTitle: 'U1', assessments: [
+      { id: 'a1', title: 'Quiz', dueDate: '2026-10-01' },            // overdue
+      { id: 'a2', title: 'Essay', dueDate: '2026-10-20', type: 'summative' }, // due soon
+      { id: 'a3', title: 'Report', dueDate: '2026-12-01' },          // later
+      { id: 'a4', title: 'Done', dueDate: '2026-09-01' }             // submitted
+    ] }] },
+    { id: 'c2', title: 'Algae', units: [{ assessments: [{ id: 'b1', title: 'Lab' }, { id: 'b2', title: 'Exam', dueDate: 'soon' }] }] },
+    null
+  ];
+  const dash = summarizeStudentProgress(dashCourses, { c1: { a4: { status: 'submitted' } }, c2: { b1: { status: 'graded', grade: 'A' } } }, dashNow);
+  assert.deepStrictEqual(dash.stats, { courses: 2, assessments: 6, submitted: 2, graded: 1, overdue: 1, dueSoon: 1, quizzes: 0, quizzesDone: 0 });
+  assert.deepStrictEqual(dash.perCourse.c1, { total: 4, submitted: 1, graded: 0, quizzes: 0, quizzesDone: 0 });
+  assert.deepStrictEqual(dash.upcoming.map(u => [u.title, u.status]), [['Quiz', 'overdue'], ['Essay', 'due'], ['Report', 'due'], ['Exam', 'due']], 'overdue first, then by date, undated last');
+  assert.strictEqual(dash.upcoming[3].dueDate, '', 'invalid dates are treated as no due date');
+  assert.deepStrictEqual(summarizeStudentProgress([], {}, dashNow).stats.courses, 0);
+
+  const welcomeMsg = buildEnrolmentWelcome({ course: { title: 'Reef Ecology', startDate: '2026-11-02' }, memberName: 'Stu Dent', memberEmail: 'Stu@School.edu', senderName: 'Ms T' });
+  assert.strictEqual(welcomeMsg.subject, 'Welcome to Reef Ecology');
+  for (const part of ['Hi Stu, welcome to "Reef Ecology"', 'Ms T has enrolled you', 'starts on 2026-11-02', 'stu@school.edu', 'Student Panel', 'support@aifoundation.net.au']) {
+    assert(welcomeMsg.body.includes(part), part);
+  }
+  assert(!/\n{3,}/.test(welcomeMsg.body));
+  const coTeacher = buildEnrolmentWelcome({ course: { title: 'Reef' }, memberEmail: 'x@y.edu', memberRole: 'teacher' }).body;
+  assert(coTeacher.includes('Hi there') && coTeacher.includes('co-teacher') && !coTeacher.includes('starts on'));
+  // Welcome messages pass message validation for a teacher and for the Super Admin (gold "admin" tag).
+  const asTeacher = buildMessage({ sender: teacher, senderProfile: { role: 'teacher' }, to: 'stu@school.edu', ...welcomeMsg });
+  assert.strictEqual(asTeacher.data.category, 'teacher');
+  const asAdmin = buildMessage({ sender: admin, senderProfile: { role: 'superadmin', email: admin.email }, to: 'stu@school.edu', ...welcomeMsg });
+  assert.strictEqual(asAdmin.data.category, 'admin');
+  const noRecipients = await sendEnrolmentWelcomes({ sender: teacher, senderProfile: { role: 'teacher' }, course: { id: 'c1' }, members: [{ email: 'not-an-email' }, { email: teacher.email }] });
+  assert.deepStrictEqual(noRecipients, { sent: [], failed: [] }, 'invalid emails and the sender are skipped');
+  console.log('✅ Test 11 Passed: Student Admin Panel progress, due/overdue list, and enrolment welcome messages.');
+
+  // 12. Supporter-to-student role transition and real-time enrolment subscription
+  // When a supporter is not enrolled in courses:
+  const supporterPrivileges = resolvePrivileges({ role: 'supporter', email: 'supporter@school.edu' }, 0);
+  assert.strictEqual(supporterPrivileges.isStudent, false);
+  assert.strictEqual(supporterPrivileges.isSupporter, true);
+  assert.strictEqual(supporterPrivileges.role, 'supporter');
+  assert.strictEqual(supporterPrivileges.canViewGlobalCourses, true, 'supporters can view global courses');
+
+  // As soon as a teacher adds them to a course, the supporter becomes a student:
+  const upgradedPrivileges = resolvePrivileges({ role: 'supporter', email: 'supporter@school.edu' }, 1);
+  assert.strictEqual(upgradedPrivileges.isStudent, true, 'supporter becomes student when enrolled');
+  assert.strictEqual(upgradedPrivileges.isSupporter, false);
+  assert.strictEqual(upgradedPrivileges.role, 'student');
+  assert.strictEqual(upgradedPrivileges.classification, 'student');
+  assert.strictEqual(upgradedPrivileges.canViewGlobalCourses, true, 'students can view global courses');
+
+  // Teachers keep their staff privileges even when enrolled:
+  const teacherEnrolledPrivileges = resolvePrivileges({ role: 'teacher', email: 'teacher@school.edu' }, 1);
+  assert.strictEqual(teacherEnrolledPrivileges.isTeacher, true);
+  assert.strictEqual(teacherEnrolledPrivileges.isStaff, true);
+  assert.strictEqual(teacherEnrolledPrivileges.role, 'teacher');
+
+  // Enrolment record creation:
+  const enrolResult = await addMemberToCourseFree({
+    courseId: 'c1',
+    courseTitle: 'Reef Ecology',
+    memberName: 'Supporter Sam',
+    memberEmail: 'sam@school.edu',
+    memberRole: 'student',
+    addedByUid: teacher.uid,
+    addedByName: teacher.displayName
+  });
+  assert.strictEqual(enrolResult.success, true);
+  assert.strictEqual(enrolResult.tokenCost, 0);
+  assert.strictEqual(enrolResult.member.memberEmail, 'sam@school.edu');
+
+  // Real-time subscription emits immediately from cache:
+  let receivedEnrolments = null;
+  const unsub = subscribeToMyEnrolments('sam@school.edu', enrolments => {
+    receivedEnrolments = enrolments;
+  });
+  assert(Array.isArray(receivedEnrolments), 'subscription delivers enrolments');
+  assert(receivedEnrolments.some(e => e.courseId === 'c1'), 'enrolled course is in subscription');
+  unsub();
+
+  // Welcome message generation for the newly enrolled supporter:
+  const welcome = buildEnrolmentWelcome({
+    course: { title: 'Reef Ecology' },
+    memberName: enrolResult.member.memberName,
+    memberEmail: enrolResult.member.memberEmail,
+    senderName: teacher.displayName
+  });
+  assert(welcome.subject.includes('Reef Ecology'));
+  assert(welcome.body.includes('Ms T has enrolled you in this course'));
+  assert(welcome.body.includes('Student Panel'));
+  console.log('✅ Test 12 Passed: Supporter becomes student upon enrolment and receives welcome message.');
+
+  {
+    // 13. Course structure & unit quizzes: one course-level assessment list, answer keys kept from students, bulk marking
+    const legacyCourse = {
+      id: 'c9', title: 'Legacy',
+      assessments: [{ id: 'a0', title: 'Course exam' }],
+      units: [
+        { id: 'u1', unitTitle: 'One', lessons: [], assessments: [{ id: 'a1', title: 'Unit 1 task', nominalWeight: 50 }, { id: 'a0', title: 'Duplicate of course exam' }] },
+        { id: 'u2', unitTitle: 'Two', lessons: [], assessments: [{ id: 'a2', title: 'Unit 2 task' }] }
+      ]
+    };
+    const migrated = moveUnitAssessmentsToCourse(legacyCourse);
+    assert.deepStrictEqual(migrated.assessments.map(a => [a.id, a.unitId || '']), [['a0', ''], ['a1', 'u1'], ['a2', 'u2']], 'ids kept (submissions stay linked), duplicates skipped');
+    assert(migrated.units.every(u => !('assessments' in u)) && legacyCourse.units[0].assessments.length === 2, 'units cleaned; input untouched');
+    assert.strictEqual(moveUnitAssessmentsToCourse(migrated), migrated, 'idempotent');
+    assert(!('assessments' in createBlankCourse('t1').units[0]) && createBlankCourse('t1').assessments.length === 1, 'new courses: lessons in units, one assessment list');
+
+    const mc = { ...createQuizQuestion('multiple_choice'), prompt: 'Primes?' };
+    mc.options = [{ id: 'o1', text: '2' }, { id: 'o2', text: '4' }, { id: 'o3', text: '3' }];
+    mc.correctOptionIds = ['o1', 'o3'];
+    mc.allowMultiple = true;
+    mc.points = 2;
+    const quizBlock = {
+      id: 'quiz1', type: 'quiz', title: 'Check',
+      quiz: {
+        instructions: 'Go',
+        questions: [
+          { ...mc, id: 'q1' },
+          { id: 'q2', type: 'true_false', prompt: 'Sky green?', points: 1, correctAnswer: false },
+          { id: 'q3', type: 'short_answer', prompt: 'Capital of France?', points: 1, acceptedAnswers: ['Paris'] },
+          { id: 'q4', type: 'open', prompt: 'Explain.', points: 5, modelAnswer: 'Model' }
+        ]
+      }
+    };
+    const quizCourse = { id: 'cq', title: 'Quiz course', authorId: 't1', units: [{ id: 'u1', unitTitle: 'U', lessons: [{ id: 'l1', title: 'L', blocks: [quizBlock] }] }], assessments: [] };
+    const keys = extractQuizAnswerKeys(quizCourse);
+    assert.deepStrictEqual(keys.quiz1.q1, { correctOptionIds: ['o1', 'o3'] });
+    assert.deepStrictEqual(Object.keys(keys.quiz1), ['q1', 'q2', 'q3', 'q4']);
+    const stored = normalizeCourse(quizCourse);
+    const storedJson = JSON.stringify(stored);
+    for (const field of ['correctOptionIds', 'correctAnswer', 'acceptedAnswers', 'modelAnswer']) {
+      assert(!storedJson.includes(field), `${field} never stored in the course document students can read`);
+    }
+    assert.strictEqual(stored.units[0].lessons[0].blocks[0].quiz.questions.length, 4, 'questions themselves are kept');
+    const teacherView = mergeQuizAnswerKeys(stripQuizAnswerKeys(quizCourse), keys);
+    assert.deepStrictEqual(teacherView.units[0].lessons[0].blocks[0].quiz, quizBlock.quiz, 'teachers get the keys back');
+    assert.deepStrictEqual(Object.keys(remapQuizAnswerKeys(keys, { quiz1: 'quizNew' })), ['quizNew']);
+
+    const studentQuiz = normalizeQuiz(stored.units[0].lessons[0].blocks[0].quiz);
+    const answers = { q1: ['o3', 'o1', 'bogus'], q2: false, q3: '  paris. ', q4: 'Because…', extra: 'ignored' };
+    assert.deepStrictEqual(cleanQuizAnswers(studentQuiz, answers), { q1: ['o3', 'o1'], q2: false, q3: 'paris.', q4: 'Because…' });
+    const payload = buildQuizAttemptPayload({ course: quizCourse, unit: quizCourse.units[0], lesson: quizCourse.units[0].lessons[0], block: stored.units[0].lessons[0].blocks[0], user: student, answers, nowIso: '2026-10-14T00:00:00.000Z' });
+    assert.deepStrictEqual([payload.quizId, payload.status, payload.questionCount, quizAttemptDocId('cq', 'quiz1', 's1')], ['quiz1', 'submitted', 4, 'cq__quiz1__s1']);
+    assert(!('score' in payload) && !('results' in payload), 'students never write marks');
+    assert.throws(() => buildQuizAttemptPayload({ course: quizCourse, block: quizBlock, user: student, answers: {} }), e => e.code === 'EMPTY_ATTEMPT');
+
+    const fullQuiz = quizBlock.quiz; // the teacher's quiz, with keys
+    const auto = scoreQuizAttempt(fullQuiz, answers);
+    assert.deepStrictEqual([auto.score, auto.maxScore, auto.pending, auto.autoMarked], [4, 9, 1, 3], 'closed questions marked automatically; the open one waits');
+    assert.throws(() => buildQuizResultUpdate({ quiz: fullQuiz, attempt: { answers }, grader: teacher }), e => e.code === 'NEEDS_MARKING');
+    const marked = scoreQuizAttempt(fullQuiz, answers, { q4: 4, q3: 0 });
+    assert.deepStrictEqual([marked.score, marked.percent, marked.pending], [7, 78, 0], 'teacher marks the open answer and can override any mark');
+    const update = buildQuizResultUpdate({ quiz: fullQuiz, attempt: { answers }, manualScores: { q4: 4 }, feedback: 'Well done', grader: teacher, nowIso: '2026-10-14T01:00:00.000Z' });
+    assert.deepStrictEqual([update.status, update.score, update.maxScore, update.percent, update.grade, update.feedback], ['graded', 8, 9, 89, '89%', 'Well done']);
+    assert.deepStrictEqual(update.results.map(r => [r.questionId, r.correct]), [['q1', true], ['q2', true], ['q3', true], ['q4', false]]);
+    const wrong = scoreQuizAttempt(fullQuiz, { q1: ['o1'], q2: true });
+    assert.deepStrictEqual(wrong.results.map(r => r.earned), [0, 0, 0, 0], 'partly right multiple choice, wrong and unanswered questions score 0');
+    assert.strictEqual(scoreQuizAttempt(studentQuiz, answers).pending, 4, 'without answer keys nothing is marked automatically');
+    const table = quizResultsTable(fullQuiz, [{ id: 'x', studentName: 'Stu', studentEmail: 'stu@school.edu', answers, status: 'submitted' }], { x: { q4: 5 } });
+    assert.deepStrictEqual(table.header, ['Student', 'Email', 'Status', 'Q1 (2)', 'Q2 (1)', 'Q3 (1)', 'Q4 (5)', 'Score', 'Out of', '%']);
+    assert.deepStrictEqual(table.rows[0], ['Stu', 'stu@school.edu', 'Ready to release', 2, 1, 1, 5, 9, 9, 100]);
+    assert.deepStrictEqual(listCourseQuizzes(quizCourse).map(q => q.block.id), ['quiz1']);
+    const withQuizzes = summarizeStudentProgress([quizCourse], {}, Date.now(), { cq: { quiz1: { status: 'submitted' } } });
+    assert.deepStrictEqual([withQuizzes.stats.quizzes, withQuizzes.stats.quizzesDone], [1, 1], 'quiz progress shows in the Student Panel');
+    console.log('✅ Test 13 Passed: one course assessment list (migrated), quiz keys hidden from students, auto + bulk marking.');
+  }
+
+  console.log('\n🎉 All LMS feature tests passed (13/13).');
 }
 
 run().then(() => process.exit(0)).catch(err => {

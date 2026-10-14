@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { listCourseSubmissions, gradeSubmission, MAX_FEEDBACK_CHARS } from '../../services/submissionService';
 import { isHttpUrl } from '../../services/courseSpreadsheetSchema';
+import { moveUnitAssessmentsToCourse } from '../../types/courseBuilderTypes';
+import { listCourseQuizzes } from '../../services/quizModel';
+import QuizMarkingPanel from './QuizMarkingPanel.jsx';
 
 function SubmissionCard({ submission, currentUser, onGraded, onMessageStudent }) {
   const [grade, setGrade] = useState(submission.grade || '');
@@ -31,9 +34,9 @@ function SubmissionCard({ submission, currentUser, onGraded, onMessageStudent })
           <div className="cs-muted">{submission.studentEmail}</div>
         </div>
         <div className="cs-right">
-          <span className={`cs-status ${submission.status}`}>{submission.status === 'graded' ? `Graded: ${submission.grade}` : 'Awaiting grade'}</span>
+          <span className={`cs-status ${submission.status}`}>{submission.status === 'graded' ? `Graded: ${submission.grade}` : submission.status === 'draft' ? '✏️ Draft (not submitted)' : 'Awaiting grade'}</span>
           <div className="cs-muted">
-            {submission.submittedAtMs ? new Date(submission.submittedAtMs).toLocaleString() : ''}
+            {submission.submittedAtMs ? new Date(submission.submittedAtMs).toLocaleString() : submission.draftSavedAtMs ? `Draft saved ${new Date(submission.draftSavedAtMs).toLocaleString()}` : ''}
             {Number(submission.attempts) > 1 ? ` • attempt ${submission.attempts}` : ''}
           </div>
         </div>
@@ -55,8 +58,9 @@ function SubmissionCard({ submission, currentUser, onGraded, onMessageStudent })
   );
 }
 
-/** Teacher view of every submission for a course, grouped by assessment. */
+/** Teacher view: course assessment submissions (grouped by assessment) and bulk unit-quiz marking. */
 export default function CourseSubmissionsModal({ course, currentUser, onClose, onMessageStudent }) {
+  const [view, setView] = useState('assessments'); // 'assessments' | 'quizzes'
   const [submissions, setSubmissions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -96,10 +100,13 @@ export default function CourseSubmissionsModal({ course, currentUser, onClose, o
     applyResult(await fetchSubmissions());
   };
 
-  const assessments = [];
-  for (const unit of course.units || []) {
-    for (const a of unit.assessments || []) assessments.push({ ...a, unitTitle: unit.unitTitle, unitCode: unit.unitCode });
-  }
+  // One Assessments & Rubrics list per course (older courses: tasks moved up from their units).
+  const structured = moveUnitAssessmentsToCourse(course);
+  const assessments = (structured.assessments || []).filter(a => a && typeof a === 'object').map(a => {
+    const unit = (structured.units || []).find(u => u?.id && u.id === a.unitId);
+    return { ...a, unitTitle: unit?.unitTitle || '', unitCode: unit?.unitCode || '' };
+  });
+  const quizCount = listCourseQuizzes(structured).length;
   const known = new Set(assessments.map(a => String(a.id)));
   const orphaned = submissions.filter(s => !known.has(String(s.assessmentId)));
 
@@ -109,6 +116,16 @@ export default function CourseSubmissionsModal({ course, currentUser, onClose, o
         <button className="close-btn" onClick={onClose} aria-label="Close">✕</button>
         <h2 id="cs-title" style={{ marginBottom: 4 }}>📥 Submissions</h2>
         <p className="cs-muted" style={{ textAlign: 'center', marginTop: 0 }}>{course.title} • {submissions.length} submission{submissions.length === 1 ? '' : 's'}</p>
+        <div className="cs-tabs" role="tablist" aria-label="Marking">
+          <button type="button" role="tab" aria-selected={view === 'assessments'} className={view === 'assessments' ? 'active' : ''} onClick={() => setView('assessments')}>
+            📥 Assessments ({assessments.length})
+          </button>
+          <button type="button" role="tab" aria-selected={view === 'quizzes'} className={view === 'quizzes' ? 'active' : ''} onClick={() => setView('quizzes')}>
+            ❓ Unit quizzes ({quizCount})
+          </button>
+        </div>
+        {view === 'quizzes' ? <QuizMarkingPanel course={course} currentUser={currentUser} /> : (
+        <>
         <div className="cs-row" style={{ justifyContent: 'flex-end' }}>
           <button type="button" className="nav-btn secondary cs-small" onClick={load} disabled={loading}>↻ Refresh</button>
         </div>
@@ -120,7 +137,7 @@ export default function CourseSubmissionsModal({ course, currentUser, onClose, o
           const list = submissions.filter(s => String(s.assessmentId) === String(a.id));
           return (
             <section key={a.id} className="cs-section">
-              <h3>{a.title} <span className="cs-muted">({a.unitCode} • {list.length} submitted)</span></h3>
+              <h3>{a.title} <span className="cs-muted">({a.unitCode ? `${a.unitCode} • ` : ''}{list.length} submitted)</span></h3>
               {list.length === 0 ? <p className="cs-muted">No submissions yet.</p> : list.map(s => (
                 <SubmissionCard
                   key={s.id}
@@ -142,8 +159,13 @@ export default function CourseSubmissionsModal({ course, currentUser, onClose, o
             ))}
           </section>
         )}
+        </>
+        )}
 
         <style>{`
+          .cs-tabs { display: flex; gap: 6px; margin: 8px 0 4px; border-bottom: 1px solid rgba(255,255,255,0.12); }
+          .cs-tabs button { background: none; border: none; color: #94a3b8; font-weight: 700; padding: 8px 12px; cursor: pointer; border-bottom: 3px solid transparent; }
+          .cs-tabs button.active { color: #f1f5f9; border-bottom-color: #a78bfa; }
           .cs-modal { max-width: 900px; max-height: 90vh; overflow-y: auto; padding: 28px; }
           .cs-muted { color: #94a3b8; font-size: 0.82rem; font-weight: 400; }
           .cs-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }

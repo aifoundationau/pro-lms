@@ -125,8 +125,50 @@ export const CONTENT_BLOCK_TYPES = [
     label: 'Gemini Notebook',
     icon: '📓',
     description: 'Gemini Notebook (or NotebookLM) share link for guided study and AI-assisted notes.'
+  },
+  {
+    type: 'quiz',
+    label: 'Quiz & Questions',
+    icon: '❓',
+    description: 'Multiple choice, true/false, short answer and open questions. Closed questions are marked automatically; open answers are marked in bulk by the teacher.'
   }
 ];
+
+// ---------- Unit quizzes (the "Quiz & Questions" block) ----------
+
+/** Question types: closed ones have a fixed answer and are marked automatically; open ones by the teacher. */
+export const QUIZ_QUESTION_TYPES = Object.freeze([
+  Object.freeze({ type: 'multiple_choice', label: 'Multiple choice', closed: true }),
+  Object.freeze({ type: 'true_false', label: 'True / False', closed: true }),
+  Object.freeze({ type: 'short_answer', label: 'Short answer', closed: true }),
+  Object.freeze({ type: 'open', label: 'Open question', closed: false })
+]);
+
+/** Answer-key fields: stored only in the staff-only lms_quiz_keys collection, never in the course. */
+export const QUIZ_KEY_FIELDS = Object.freeze(['correctOptionIds', 'correctAnswer', 'acceptedAnswers', 'modelAnswer']);
+
+export const QUIZ_LIMITS = Object.freeze({ questions: 100, options: 10, prompt: 2000, option: 500, answer: 5000, points: 100 });
+
+/** A new question of the given type, with sensible defaults (answer key fields included). */
+export function createQuizQuestion(type = 'multiple_choice') {
+  const base = { id: generateEntityId('q'), type, prompt: '', points: 1 };
+  switch (type) {
+    case 'true_false':
+      return { ...base, correctAnswer: true };
+    case 'short_answer':
+      return { ...base, acceptedAnswers: [] };
+    case 'open':
+      return { ...base, points: 5, modelAnswer: '' };
+    default: {
+      const options = ['', '', '', ''].map(() => ({ id: generateEntityId('opt'), text: '' }));
+      return { ...base, type: 'multiple_choice', options, allowMultiple: false, correctOptionIds: [options[0].id] };
+    }
+  }
+}
+
+export function createBlankQuiz() {
+  return { instructions: '', questions: [createQuizQuestion('multiple_choice')] };
+}
 
 /** Block types whose content is a link (stored in `content` and in block.metadata). */
 export const LINK_BLOCK_METADATA_KEYS = Object.freeze({
@@ -223,7 +265,7 @@ export function createDefaultRubric() {
  * Creates a blank ContentBlock
  */
 export function createBlankContentBlock(type = 'text_description', order = 0) {
-  return {
+  const block = {
     id: generateEntityId('block'),
     type,
     order,
@@ -241,6 +283,11 @@ export function createBlankContentBlock(type = 'text_description', order = 0) {
     },
     tag: 'lms'
   };
+  if (type === 'quiz') {
+    block.title = 'Unit Quiz';
+    block.quiz = createBlankQuiz();
+  }
+  return block;
 }
 
 /**
@@ -288,8 +335,43 @@ export function createBlankUnit(unitCode = 'UNIT-101', unitTitle = 'Unit 1: Fund
     description: '',
     learningOutcomes: [],
     tag: 'lms',
-    lessons: [createBlankLesson(0, 'Lesson 1: Core Concepts')],
-    assessments: [createBlankAssessment('formative', 'Knowledge Check 1')]
+    // Units hold lessons & blocks only; assessments live once, at course level (course.assessments).
+    lessons: [createBlankLesson(0, 'Lesson 1: Core Concepts')]
+  };
+}
+
+/**
+ * Moves assessments still stored inside units (older courses) up to the single course-level
+ * Assessments & Rubrics list. Ids are kept (so existing submissions stay linked) and each moved
+ * task remembers its unit in `unitId`. Pure and idempotent; never mutates the input.
+ */
+export function moveUnitAssessmentsToCourse(course) {
+  if (!course || typeof course !== 'object') return course;
+  const units = Array.isArray(course.units) ? course.units : [];
+  const base = Array.isArray(course.assessments) ? course.assessments.filter(a => a && typeof a === 'object') : [];
+  const hasUnitAssessments = units.some(u => u && typeof u === 'object' && 'assessments' in u);
+  if (!hasUnitAssessments) {
+    return Array.isArray(course.assessments) && base.length === course.assessments.length ? course : { ...course, assessments: base };
+  }
+  const seen = new Set(base.map(a => String(a.id ?? '')).filter(Boolean));
+  const moved = [];
+  for (const unit of units) {
+    for (const a of Array.isArray(unit?.assessments) ? unit.assessments : []) {
+      if (!a || typeof a !== 'object') continue;
+      const id = String(a.id ?? '');
+      if (id && seen.has(id)) continue;
+      if (id) seen.add(id);
+      moved.push({ ...a, unitId: a.unitId || unit.id || '' });
+    }
+  }
+  return {
+    ...course,
+    assessments: [...base, ...moved],
+    units: units.map(u => {
+      if (!u || typeof u !== 'object' || !('assessments' in u)) return u;
+      const { assessments: _moved, ...rest } = u;
+      return rest;
+    })
   };
 }
 
@@ -320,6 +402,8 @@ export function createBlankCourse(authorId = 'anonymous', authorName = 'Educator
     tag: 'lms',
     tags: ['lms', 'Draft', 'OzEdu', 'AQF'],
     units: [createBlankUnit('UNIT-101', 'Unit 1: Foundation Knowledge')],
+    // The course's one Assessments & Rubrics section.
+    assessments: [createBlankAssessment('formative', 'Knowledge Check 1')],
     createdAt: Date.now(),
     updatedAt: Date.now()
   };

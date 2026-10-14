@@ -7,7 +7,14 @@
  * - download* helpers (browser only)    -> .xlsx downloads built with the dependency-free writer
  */
 
-import { DEFAULT_RUBRIC_LEVEL_LABELS, LINK_BLOCK_METADATA_KEYS } from '../types/courseBuilderTypes.js';
+import {
+  DEFAULT_RUBRIC_LEVEL_LABELS,
+  LINK_BLOCK_METADATA_KEYS,
+  moveUnitAssessmentsToCourse,
+  createQuizQuestion,
+  generateEntityId
+} from '../types/courseBuilderTypes.js';
+import { isQuizBlock } from './quizModel.js';
 import { buildXlsxWorkbook, downloadFile, safeFileStem, columnLetter, XLSX_STYLE } from './xlsxWriter.js';
 import {
   SPREADSHEET_TEMPLATE_VERSION,
@@ -16,7 +23,9 @@ import {
   COURSE_FIELDS,
   blockTypeLabel,
   standardsToLabels,
-  isHttpUrl
+  isHttpUrl,
+  normalizeKey,
+  QUESTION_TYPE_OPTIONS
 } from './courseSpreadsheetSchema.js';
 import { finalizeCourseDraft, parseLinkCell, formatLinkLine } from './courseSpreadsheetImport.js';
 
@@ -80,8 +89,8 @@ function instructionsSheet() {
   add('Template version', SPREADSHEET_TEMPLATE_VERSION, XLSX_STYLE.LABEL);
 
   section('How to use');
-  add('1. Fill in', 'Work through the tabs: Course → Learning Outcomes → Units → Lessons → Content Blocks → Assessments → Rubrics. Every tab is optional — leave out anything you do not need.', XLSX_STYLE.LABEL);
-  add('2. Link rows', 'Rows on the Lessons, Content Blocks, Assessments and Rubrics tabs belong to a unit through its Unit Code (or unit number). Content Blocks also give their Lesson #, and Rubrics their Assessment #. A blank Unit Code, Lesson # or Assessment # repeats the value from the row above.', XLSX_STYLE.LABEL);
+  add('1. Fill in', 'Work through the tabs: Course → Learning Outcomes → Units → Lessons → Content Blocks → Quiz Questions → Assessments → Rubrics. Every tab is optional — leave out anything you do not need.', XLSX_STYLE.LABEL);
+  add('2. Link rows', 'Rows on the Lessons, Content Blocks and Quiz Questions tabs belong to a unit through its Unit Code (or unit number); Content Blocks and Quiz Questions also give their Lesson #. Assessments belong to the whole course (Covers Unit is optional), and Rubrics give their Assessment #. A blank Unit Code, Lesson #, Quiz Title or Assessment # repeats the value from the row above.', XLSX_STYLE.LABEL);
   add('3. Upload', 'Course Builder → 📊 Spreadsheet → upload the file → Import into Course Builder (free), or ✨ Build out with Gemini AI. ✨ AI Assist → Spreadsheets accepts the same file.', XLSX_STYLE.LABEL);
   add('Google Sheets', 'Use File → Import to open this file in Google Sheets. To upload it back, use File → Download → Microsoft Excel (.xlsx), which keeps every tab — or download each tab as .csv and upload them all together.', XLSX_STYLE.LABEL);
 
@@ -90,9 +99,10 @@ function instructionsSheet() {
   add(SHEET.outcomes, 'One course learning outcome per row — add as many rows as you need.', XLSX_STYLE.LABEL);
   add(SHEET.units, 'One row per unit of study / unit of competency.', XLSX_STYLE.LABEL);
   add(SHEET.lessons, 'One row per lesson: Unit Code, Lesson #, title and duration, plus the lesson\'s links in the YouTube Video Links, Google Drive Resource Links and Gemini Notebook Links columns — as many as you need, one per line.', XLSX_STYLE.LABEL);
-  add(SHEET.blocks, 'One row per block inside a lesson. Types: Content Description, Teacher Guide (hidden from students), YouTube Video, Google Drive Resource, Gemini Notebook. Text goes in the Text column and links in the Link URL column. Add as many rows of each type as you need.', XLSX_STYLE.LABEL);
-  add(SHEET.assessments, 'One row per assessment task: type, weighting, due date, task brief and an optional external submission link.', XLSX_STYLE.LABEL);
-  add(SHEET.rubrics, 'The Assessment Rubric Matrix: one row per criterion with its Weight % and a descriptor for each performance level — add as many criteria as you need. The level headings (e.g. "Novice (0-49%)") become the level names: rename them, or add or remove level columns (2–10 levels).', XLSX_STYLE.LABEL);
+  add(SHEET.blocks, 'One row per block inside a lesson. Types: Content Description, Teacher Guide (hidden from students), YouTube Video, Google Drive Resource, Gemini Notebook, Quiz & Questions. Text goes in the Text column and links in the Link URL column. A Quiz & Questions row places a quiz between blocks (its Text is the quiz instructions). Add as many rows of each type as you need.', XLSX_STYLE.LABEL);
+  add(SHEET.quizzes, 'Unit quizzes: one row per question. Rows with the same Unit Code, Lesson # and Quiz Title form one quiz. Multiple choice, True / False and Short answer questions are marked automatically; Open questions are marked by the teacher (in bulk, in 📥 Submissions → ❓ Unit quizzes). A quiz without a Content Blocks row is added at the end of its lesson.', XLSX_STYLE.LABEL);
+  add(SHEET.assessments, 'The course\'s one Assessments & Rubrics list: one row per task with its type, weighting (share of the course grade — all tasks should add up to 100), due date, task brief, an optional external submission link and, optionally, the unit it covers.', XLSX_STYLE.LABEL);
+  add(SHEET.rubrics, 'The Assessment Rubric Matrix: one row per criterion with its Assessment #, Weight % and a descriptor for each performance level — add as many criteria as you need. The level headings (e.g. "Novice (0-49%)") become the level names: rename them, or add or remove level columns (2–10 levels).', XLSX_STYLE.LABEL);
 
   section('Rules');
   add('Dates', 'YYYY-MM-DD, for example 2026-03-02.', XLSX_STYLE.LABEL);
@@ -100,7 +110,8 @@ function instructionsSheet() {
   add('Links', 'Links must start with https://. Share Google Drive files as "Anyone with the link can view". Gemini Notebook blocks take a notebook share link, e.g. https://notebooklm.google.com/notebook/….', XLSX_STYLE.LABEL);
   add('More than one link', 'Put as many links as you need in one cell, one per line (Alt+Enter in Excel, Ctrl+Enter in Google Sheets). Give a link a title with "Title | link", e.g. Intro video | https://www.youtube.com/watch?v=VIDEO_ID. Each link becomes its own block. You can also repeat the Lesson # on another row to list more links.', XLSX_STYLE.LABEL);
   add('Link order', 'Links from the Lessons tab are added after the lesson\'s Content Blocks rows: YouTube videos first, then Google Drive resources, then Gemini Notebooks. To place a link between other blocks, add it as a row on the Content Blocks tab instead.', XLSX_STYLE.LABEL);
-  add('Different level names', 'To give one rubric its own level names, repeat the Rubrics header row (Unit Code, Assessment #, Criterion, Weight %, …) directly above that rubric with its own level headings.', XLSX_STYLE.LABEL);
+  add('Quiz answers', 'Multiple choice: put each option on its own line (A. …, B. …) and write the correct letter(s) in Correct Answer, e.g. B or A, C. True / False: True or False. Short answer: the accepted answers, one per line (not case-sensitive). Correct answers and model answers are kept for teachers only — students never see them.', XLSX_STYLE.LABEL);
+  add('Different level names', 'To give one rubric its own level names, repeat the Rubrics header row (Assessment #, Criterion, Weight %, …) directly above that rubric with its own level headings.', XLSX_STYLE.LABEL);
   add('File attachments', 'Direct file attachments are coming soon. Use a Google Drive Resource block for files for now.', XLSX_STYLE.LABEL);
 
   section('✨ AI Assist (Gemini)');
@@ -112,7 +123,7 @@ function instructionsSheet() {
   for (const field of COURSE_FIELDS.filter(f => f.inTemplate !== false)) {
     add(`${SHEET.course} › ${field.header}`, hintFor(field), XLSX_STYLE.LABEL);
   }
-  for (const key of ['outcomes', 'units', 'lessons', 'blocks', 'assessments', 'rubrics']) {
+  for (const key of ['outcomes', 'units', 'lessons', 'blocks', 'quizzes', 'assessments', 'rubrics']) {
     const table = TABLES[key];
     for (const column of table.columns.filter(c => c.inTemplate !== false)) {
       add(`${table.sheet} › ${column.header}`, hintFor(column), XLSX_STYLE.LABEL);
@@ -224,7 +235,7 @@ function contentBlockRow(ref, lessonNumber, blockNumber, block) {
     blockNumber,
     blockTypeLabel(block.type),
     block.title || '',
-    isLink ? '' : block.content || '',
+    block.type === 'quiz' ? block.quiz?.instructions || '' : isLink ? '' : block.content || '',
     isLink ? blockContent(block) : '',
     block.metadata?.fileName || ''
   ];
@@ -239,15 +250,58 @@ function rubricLabels(rubric) {
   return best;
 }
 
+const LETTERS = 'ABCDEFGHIJ';
+
+/** "Quiz Title" used on the Quiz Questions tab: the block title, or "Quiz 2" when blank or repeated. */
+function quizReferences(blocks) {
+  const quizzes = blocks.filter(isQuizBlock);
+  const counts = new Map();
+  for (const b of quizzes) {
+    const key = normalizeKey(b.title);
+    if (key) counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return new Map(quizzes.map((b, i) => {
+    const title = String(b.title || '').trim();
+    return [b, title && counts.get(normalizeKey(title)) === 1 ? title : `Quiz ${i + 1}`];
+  }));
+}
+
+/** One Quiz Questions row per question (answer keys included: this is the teacher's workbook). */
+function quizQuestionRows(unitRef, lessonNumber, quizRef, block) {
+  const questions = Array.isArray(block.quiz?.questions) ? block.quiz.questions : [];
+  return questions.filter(q => q && typeof q === 'object').map((q, i) => {
+    const options = (Array.isArray(q.options) ? q.options : []).filter(o => String(o?.text || '').trim());
+    const correctIds = new Set(Array.isArray(q.correctOptionIds) ? q.correctOptionIds : []);
+    let correct = '';
+    if (q.type === 'multiple_choice') correct = options.map((o, oi) => (correctIds.has(o.id) ? LETTERS[oi] : '')).filter(Boolean).join(', ');
+    else if (q.type === 'true_false') correct = q.correctAnswer === true ? 'True' : q.correctAnswer === false ? 'False' : '';
+    else if (q.type === 'short_answer') correct = (q.acceptedAnswers || []).join('\n');
+    return [
+      unitRef,
+      lessonNumber,
+      quizRef,
+      i + 1,
+      QUESTION_TYPE_OPTIONS.find(t => t.type === q.type)?.label || 'Open question',
+      q.prompt || '',
+      q.type === 'multiple_choice' ? options.map((o, oi) => `${LETTERS[oi]}. ${o.text}`).join('\n') : '',
+      correct,
+      Number.isFinite(Number(q.points)) ? Number(q.points) : '',
+      q.type === 'open' ? q.modelAnswer || '' : ''
+    ];
+  });
+}
+
 /**
  * Builds the A-to-Z workbook. With a course, every tab is filled in (export / worked example);
  * without one, the tabs contain headers only.
  */
 export function buildCourseWorkbookSheets(course = null) {
-  const units = Array.isArray(course?.units) ? course.units : [];
+  const structured = course ? moveUnitAssessmentsToCourse(course) : null;
+  const units = Array.isArray(structured?.units) ? structured.units : [];
   const refs = unitReferences(units);
+  const unitRefById = new Map(units.map((u, i) => [u?.id, refs[i]]));
 
-  const outcomeRows = (course?.learningOutcomes || []).filter(Boolean).map((o, i) => [i + 1, o]);
+  const outcomeRows = (structured?.learningOutcomes || []).filter(Boolean).map((o, i) => [i + 1, o]);
   const unitRows = units.map((u, i) => [
     i + 1,
     u.unitCode || '',
@@ -258,7 +312,7 @@ export function buildCourseWorkbookSheets(course = null) {
   ]);
   const lessonRows = [];
   const blockRows = [];
-  const assessmentRows = [];
+  const quizRows = [];
   units.forEach((unit, uIdx) => {
     (unit.lessons || []).forEach((lesson, lIdx) => {
       const blocks = (Array.isArray(lesson.blocks) ? lesson.blocks : []).filter(b => b && typeof b === 'object');
@@ -278,63 +332,59 @@ export function buildCourseWorkbookSheets(course = null) {
       blocks.slice(0, tailStart).forEach((block, bIdx) => {
         blockRows.push(contentBlockRow(refs[uIdx], lIdx + 1, bIdx + 1, block));
       });
-    });
-    (unit.assessments || []).forEach((a, aIdx) => {
-      assessmentRows.push([
-        refs[uIdx],
-        aIdx + 1,
-        a.title || '',
-        a.type === 'summative' ? 'Summative' : 'Formative',
-        Number.isFinite(Number(a.nominalWeight)) ? Number(a.nominalWeight) : '',
-        a.dueDate || '',
-        a.description || '',
-        (a.externalSubmissionLinks || []).filter(Boolean).join('\n')
-      ]);
+      const quizRefs = quizReferences(blocks);
+      for (const [block, ref] of quizRefs) quizRows.push(...quizQuestionRows(refs[uIdx], lIdx + 1, ref, block));
     });
   });
 
+  // One Assessments & Rubrics list for the course; "Covers Unit" links a task to a unit (optional).
+  const tasks = (Array.isArray(structured?.assessments) ? structured.assessments : []).filter(a => a && typeof a === 'object');
+  const assessmentRows = tasks.map((a, aIdx) => [
+    aIdx + 1,
+    a.title || '',
+    a.type === 'summative' ? 'Summative' : 'Formative',
+    Number.isFinite(Number(a.nominalWeight)) && a.nominalWeight !== null && a.nominalWeight !== '' ? Number(a.nominalWeight) : '',
+    a.dueDate || '',
+    a.description || '',
+    (a.externalSubmissionLinks || []).filter(Boolean).join('\n'),
+    a.unitId && unitRefById.has(a.unitId) ? unitRefById.get(a.unitId) : ''
+  ]);
+
   // Rubrics: a header row is repeated whenever a rubric uses different level names.
-  const rubricColumns = TABLES.rubrics.columns;
+  const rubricColumns = TABLES.rubrics.columns.filter(c => c.inTemplate !== false);
   let headerLabels = null;
   const rubricBody = [];
-  units.forEach((unit, uIdx) => {
-    (unit.assessments || []).forEach((a, aIdx) => {
-      const rubric = Array.isArray(a.rubric) ? a.rubric : [];
-      if (!rubric.length) return;
-      const labels = rubricLabels(rubric);
-      if (headerLabels === null) {
-        headerLabels = labels;
-      } else if (JSON.stringify(labels) !== JSON.stringify(headerLabels)) {
-        headerLabels = labels;
-        rubricBody.push([...rubricColumns.map(c => ({ v: c.header, s: XLSX_STYLE.HEADER })), ...labels.map(l => ({ v: l, s: XLSX_STYLE.HEADER }))]);
-      }
-      for (const criterion of rubric) {
-        rubricBody.push([
-          refs[uIdx],
-          aIdx + 1,
-          criterion.criterionTitle || '',
-          Number.isFinite(Number(criterion.weightPercentage)) ? Number(criterion.weightPercentage) : '',
-          ...labels.map((_, i) => criterion.levels?.[i]?.descriptor || '')
-        ]);
-      }
-    });
-  });
-  const firstLabels = (() => {
-    for (const unit of units) {
-      for (const a of unit.assessments || []) {
-        if (a.rubric?.length) return rubricLabels(a.rubric);
-      }
+  tasks.forEach((a, aIdx) => {
+    const rubric = Array.isArray(a.rubric) ? a.rubric : [];
+    if (!rubric.length) return;
+    const labels = rubricLabels(rubric);
+    if (headerLabels === null) {
+      headerLabels = labels;
+    } else if (JSON.stringify(labels) !== JSON.stringify(headerLabels)) {
+      headerLabels = labels;
+      rubricBody.push([...rubricColumns.map(c => ({ v: c.header, s: XLSX_STYLE.HEADER })), ...labels.map(l => ({ v: l, s: XLSX_STYLE.HEADER }))]);
     }
-    return DEFAULT_RUBRIC_LEVEL_LABELS;
-  })();
+    for (const criterion of rubric) {
+      rubricBody.push([
+        aIdx + 1,
+        criterion.criterionTitle || '',
+        Number.isFinite(Number(criterion.weightPercentage)) ? Number(criterion.weightPercentage) : '',
+        ...labels.map((_, i) => criterion.levels?.[i]?.descriptor || '')
+      ]);
+    }
+  });
+  const firstLabels = tasks.find(a => Array.isArray(a.rubric) && a.rubric.length)
+    ? rubricLabels(tasks.find(a => Array.isArray(a.rubric) && a.rubric.length).rubric)
+    : DEFAULT_RUBRIC_LEVEL_LABELS;
 
   return [
     instructionsSheet(),
-    courseSheet(course),
+    courseSheet(structured),
     tableSheet('outcomes', outcomeRows),
     tableSheet('units', unitRows),
     tableSheet('lessons', lessonRows),
     tableSheet('blocks', blockRows),
+    tableSheet('quizzes', quizRows),
     tableSheet('assessments', assessmentRows),
     tableSheet('rubrics', rubricBody, { extraHeaders: firstLabels, extraWidth: 42 })
   ];
@@ -388,6 +438,28 @@ function criterion(title, weight, labels, descriptors) {
   return { criterionTitle: title, weightPercentage: weight, levels: labels.map((label, i) => ({ label, descriptor: descriptors[i] || '' })) };
 }
 
+function choiceQuestion(prompt, options, correctIndexes, points = 1) {
+  const q = createQuizQuestion('multiple_choice');
+  q.prompt = prompt;
+  q.points = points;
+  q.options = options.map(text => ({ id: generateEntityId('opt'), text }));
+  q.correctOptionIds = correctIndexes.map(i => q.options[i].id);
+  q.allowMultiple = correctIndexes.length > 1;
+  return q;
+}
+
+function trueFalseQuestion(prompt, answer) {
+  return { ...createQuizQuestion('true_false'), prompt, correctAnswer: answer };
+}
+
+function shortAnswerQuestion(prompt, acceptedAnswers) {
+  return { ...createQuizQuestion('short_answer'), prompt, acceptedAnswers };
+}
+
+function openQuestion(prompt, modelAnswer, points = 5) {
+  return { ...createQuizQuestion('open'), prompt, modelAnswer, points };
+}
+
 /** A complete two-unit course that shows every tab filled in. */
 export function createExampleCourse() {
   const draft = {
@@ -425,6 +497,19 @@ export function createExampleCourse() {
             blocks: [
               { type: 'text_description', title: 'Key ideas', content: 'Sustainability means meeting today\'s needs without compromising the ability of future generations to meet theirs. Businesses apply it through the triple bottom line: environmental, social and economic performance.' },
               { type: 'teacher_guide', title: 'Facilitation notes', content: 'Open with a 10-minute discussion: "What does a sustainable business look like?" Capture answers under People / Planet / Profit. Common misconception: sustainability is only about the environment.' },
+              {
+                type: 'quiz',
+                title: 'Check your understanding',
+                content: 'Answer every question. You can resubmit until your teacher releases results.',
+                quiz: {
+                  questions: [
+                    choiceQuestion('Which of these is NOT part of the triple bottom line?', ['People', 'Planet', 'Profit', 'Politics'], [3]),
+                    trueFalseQuestion('Sustainability is only about the environment.', false),
+                    shortAnswerQuestion('What does TBL stand for?', ['Triple bottom line', 'The triple bottom line']),
+                    openQuestion('Describe one change your workplace could make to reduce its environmental impact.', 'Names a specific practice (e.g. switching to LED lighting), explains its environmental benefit and says how the result would be measured.')
+                  ]
+                }
+              },
               { type: 'youtube_video', title: 'Introductory video', content: 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_1' },
               { type: 'youtube_video', title: 'The triple bottom line explained', content: 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_2' },
               { type: 'google_drive_link', title: 'Lesson slides', content: 'https://docs.google.com/presentation/d/REPLACE_WITH_SLIDES_ID/view' },
@@ -440,35 +525,6 @@ export function createExampleCourse() {
               { type: 'google_drive_link', title: 'Case study pack', content: 'https://drive.google.com/file/d/REPLACE_WITH_FILE_ID/view' },
               { type: 'notebook_link', title: 'Systems thinking notebook', content: 'https://notebooklm.google.com/notebook/REPLACE_WITH_NOTEBOOK_ID_2' },
               { type: 'notebook_link', title: 'Revision notebook', content: 'https://notebooklm.google.com/notebook/REPLACE_WITH_NOTEBOOK_ID_3' }
-            ]
-          }
-        ],
-        assessments: [
-          {
-            title: 'Concepts Check',
-            type: 'formative',
-            description: 'Ten short questions on sustainability principles and the triple bottom line. Feedback only.',
-            dueDate: '2026-02-27',
-            nominalWeight: 20,
-            externalSubmissionLinks: [],
-            rubric: [
-              criterion('Understanding of key concepts', 50, FOUR_LEVELS, ['Defines few terms correctly.', 'Defines most terms correctly.', 'Defines and explains all terms.', 'Explains terms with insightful workplace examples.']),
-              criterion('Application to examples', 30, FOUR_LEVELS, ['Examples are missing or incorrect.', 'Examples are relevant but brief.', 'Examples are relevant and explained.', 'Examples are original and well analysed.']),
-              criterion('Written communication', 20, FOUR_LEVELS, ['Hard to follow.', 'Clear with some errors.', 'Clear and well organised.', 'Concise, precise and professional.'])
-            ]
-          },
-          {
-            title: 'Workplace Sustainability Audit',
-            type: 'summative',
-            description: 'Audit one process in your workplace (or a case study) and recommend three improvements with expected impact. 1,500 words plus a one-page system map.',
-            dueDate: '2026-03-27',
-            nominalWeight: 80,
-            externalSubmissionLinks: [],
-            rubric: [
-              criterion('Analysis of current practice', 40, FOUR_LEVELS, ['Describes the process with little analysis.', 'Identifies main impacts.', 'Analyses impacts using systems thinking.', 'Insightful analysis of root causes and feedback loops.']),
-              criterion('Quality of recommendations', 30, FOUR_LEVELS, ['Recommendations are vague.', 'Recommendations are relevant.', 'Recommendations are specific and justified.', 'Recommendations are innovative, costed and prioritised.']),
-              criterion('Use of evidence', 20, FOUR_LEVELS, ['Little evidence.', 'Some relevant evidence.', 'Well-chosen, cited evidence.', 'Comprehensive, critically evaluated evidence.']),
-              criterion('Communication & system map', 10, FOUR_LEVELS, ['Unclear structure and map.', 'Clear structure; basic map.', 'Well structured; accurate map.', 'Professional report; insightful map.'])
             ]
           }
         ]
@@ -488,6 +544,17 @@ export function createExampleCourse() {
               // A video between two blocks goes on the Content Blocks tab (Link URL column).
               { type: 'youtube_video', title: 'Emission scopes in 5 minutes', content: 'https://www.youtube.com/watch?v=REPLACE_WITH_VIDEO_ID_3' },
               { type: 'teacher_guide', title: 'Activity', content: 'Give each group one month of utility bills and have them calculate Scope 2 emissions using the current emission factors.' },
+              {
+                type: 'quiz',
+                title: 'Emission scopes quiz',
+                content: '',
+                quiz: {
+                  questions: [
+                    choiceQuestion('Which of these are Scope 1 emissions? Select all that apply.', ['Fuel used in company vehicles', 'Purchased electricity', 'Gas burned in on-site boilers', 'Employee commuting'], [0, 2], 2),
+                    trueFalseQuestion('Scope 3 covers the wider value chain.', true)
+                  ]
+                }
+              },
               { type: 'google_drive_link', title: 'Utility bill dataset', content: 'https://docs.google.com/spreadsheets/d/REPLACE_WITH_SHEET_ID/view' }
             ]
           },
@@ -498,21 +565,52 @@ export function createExampleCourse() {
               { type: 'text_description', title: 'Choosing a framework', content: 'Compare GRI, ISSB (IFRS S1/S2) and the Australian Sustainability Reporting Standards. Choose based on audience, mandatory requirements and data maturity.' }
             ]
           }
-        ],
-        assessments: [
-          {
-            title: 'ESG Impact Report',
-            type: 'summative',
-            description: 'Prepare a 2,000-word ESG summary report for a real or case-study organisation, including a Scope 1 and 2 footprint and three targets.',
-            dueDate: '2026-05-15',
-            nominalWeight: 100,
-            externalSubmissionLinks: [],
-            rubric: [
-              criterion('Footprint calculation', 40, BANDS, ['Major errors.', 'Mostly correct with gaps.', 'Correct for Scopes 1 and 2.', 'Correct and well documented.', 'Correct, documented and sensitivity-tested.']),
-              criterion('Framework alignment', 30, BANDS, ['No framework used.', 'Framework named but loosely applied.', 'Framework applied to most sections.', 'Framework applied consistently.', 'Framework applied with critical commentary.']),
-              criterion('Targets & recommendations', 30, BANDS, ['No targets.', 'Targets are vague.', 'Targets are measurable.', 'Targets are measurable and time-bound.', 'Targets are SMART and linked to strategy.'])
-            ]
-          }
+        ]
+      }
+    ],
+    // One Assessments & Rubrics list for the whole course; unitIndex = the unit each task covers.
+    assessments: [
+      {
+        title: 'Concepts Check',
+        type: 'formative',
+        description: 'Ten short questions on sustainability principles and the triple bottom line. Feedback only.',
+        dueDate: '2026-02-27',
+        nominalWeight: 10,
+        externalSubmissionLinks: [],
+        unitIndex: 0,
+        rubric: [
+          criterion('Understanding of key concepts', 50, FOUR_LEVELS, ['Defines few terms correctly.', 'Defines most terms correctly.', 'Defines and explains all terms.', 'Explains terms with insightful workplace examples.']),
+          criterion('Application to examples', 30, FOUR_LEVELS, ['Examples are missing or incorrect.', 'Examples are relevant but brief.', 'Examples are relevant and explained.', 'Examples are original and well analysed.']),
+          criterion('Written communication', 20, FOUR_LEVELS, ['Hard to follow.', 'Clear with some errors.', 'Clear and well organised.', 'Concise, precise and professional.'])
+        ]
+      },
+      {
+        title: 'Workplace Sustainability Audit',
+        type: 'summative',
+        description: 'Audit one process in your workplace (or a case study) and recommend three improvements with expected impact. 1,500 words plus a one-page system map.',
+        dueDate: '2026-03-27',
+        nominalWeight: 40,
+        externalSubmissionLinks: [],
+        unitIndex: 0,
+        rubric: [
+          criterion('Analysis of current practice', 40, FOUR_LEVELS, ['Describes the process with little analysis.', 'Identifies main impacts.', 'Analyses impacts using systems thinking.', 'Insightful analysis of root causes and feedback loops.']),
+          criterion('Quality of recommendations', 30, FOUR_LEVELS, ['Recommendations are vague.', 'Recommendations are relevant.', 'Recommendations are specific and justified.', 'Recommendations are innovative, costed and prioritised.']),
+          criterion('Use of evidence', 20, FOUR_LEVELS, ['Little evidence.', 'Some relevant evidence.', 'Well-chosen, cited evidence.', 'Comprehensive, critically evaluated evidence.']),
+          criterion('Communication & system map', 10, FOUR_LEVELS, ['Unclear structure and map.', 'Clear structure; basic map.', 'Well structured; accurate map.', 'Professional report; insightful map.'])
+        ]
+      },
+      {
+        title: 'ESG Impact Report',
+        type: 'summative',
+        description: 'Prepare a 2,000-word ESG summary report for a real or case-study organisation, including a Scope 1 and 2 footprint and three targets.',
+        dueDate: '2026-05-15',
+        nominalWeight: 50,
+        externalSubmissionLinks: [],
+        unitIndex: 1,
+        rubric: [
+          criterion('Footprint calculation', 40, BANDS, ['Major errors.', 'Mostly correct with gaps.', 'Correct for Scopes 1 and 2.', 'Correct and well documented.', 'Correct, documented and sensitivity-tested.']),
+          criterion('Framework alignment', 30, BANDS, ['No framework used.', 'Framework named but loosely applied.', 'Framework applied to most sections.', 'Framework applied consistently.', 'Framework applied with critical commentary.']),
+          criterion('Targets & recommendations', 30, BANDS, ['No targets.', 'Targets are vague.', 'Targets are measurable.', 'Targets are measurable and time-bound.', 'Targets are SMART and linked to strategy.'])
         ]
       }
     ]

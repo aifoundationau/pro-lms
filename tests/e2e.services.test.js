@@ -173,6 +173,9 @@ async function run() {
     });
     assert.strictEqual(bulk.added, 2, 'duplicate emails (any case) are enrolled once');
     assert.strictEqual(bulk.persisted, true);
+    // Every newly enrolled person gets a welcome message from the teacher.
+    const welcomes = await messages.sendEnrolmentWelcomes({ sender: user, senderProfile: { role: 'teacher', email: user.email }, course, members: bulk.addedMembers });
+    assert.deepStrictEqual([welcomes.sent.length, welcomes.failed.length], [2, 0], 'welcome messages sent to both new students');
     const single = await enrol.addMemberToCourseFree({ courseId, courseTitle: course.title, memberEmail: 'guest@example.com', memberRole: 'guest', addedByUid: user.uid });
     assert.strictEqual(single.persisted, true);
     const again = await enrol.addMemberToCourseFree({ courseId, courseTitle: course.title, memberEmail: 'guest@example.com', memberRole: 'guest', addedByUid: user.uid });
@@ -183,6 +186,12 @@ async function run() {
     assert.strictEqual((await enrol.listCourseMembers(courseId)).length, 2, 'removed member hidden (record kept)');
     const counter = (await getDoc(doc(db, 'lms_courses', courseId))).data().students;
     assert.strictEqual(counter, 2, 'enrolment counter matches active members');
+    // The Super Admin can enrol people too; their welcome comes from the Super Admin team.
+    const owner = await signInAs('owner');
+    const byAdmin = await enrol.addMemberToCourseFree({ courseId, courseTitle: course.title, memberEmail: 'admin.added@example.com', memberName: 'Ada Added', addedByUid: owner.uid });
+    const adminWelcome = await messages.sendEnrolmentWelcomes({ sender: owner, senderProfile: { role: 'superadmin', email: owner.email }, course, members: [{ email: byAdmin.member.memberEmail, name: byAdmin.member.memberName }] });
+    assert.deepStrictEqual(adminWelcome.sent, ['admin.added@example.com']);
+    await enrol.removeMemberFromCourse({ courseId, memberEmail: 'admin.added@example.com' });
   });
 
   // 4. Student panel: sees the course, submits, messages the teacher, asks for tokens
@@ -190,6 +199,10 @@ async function run() {
     const user = await signInAs('student');
     const enrolments = await enrol.listMyEnrolments(user.email);
     assert.deepStrictEqual(enrolments.map(e => e.courseId), [courseId]);
+    const myInbox = await messages.fetchInboxOnce({ email: user.email, isSuperadmin: false });
+    const welcome = myInbox.find(m => m.meta?.enrolmentWelcome && m.courseId === courseId);
+    assert(welcome, 'the student received the enrolment welcome');
+    assert(welcome.subject === 'Welcome to Reef Ecology' && welcome.body.includes('Student Panel') && welcome.category === 'teacher', welcome.body);
     const loaded = await lms.getLmsCourseById(courseId);
     assert.strictEqual(loaded.units[0].assessments[0].id, 'a1');
     await subs.submitAssessment({ course: loaded, unit: loaded.units[0], assessment: loaded.units[0].assessments[0], user, text: 'Coral polyps host zooxanthellae.', linkUrl: 'https://docs.google.com/document/d/abc' });

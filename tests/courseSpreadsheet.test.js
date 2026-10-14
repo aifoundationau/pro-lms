@@ -18,8 +18,8 @@ import {
 } from '../src/services/courseSpreadsheetImport.js';
 import { buildCourseWorkbookSheets, buildRubricWorkbookSheets, createExampleCourse } from '../src/services/courseSpreadsheetTemplate.js';
 import { parseDateCell, parseAqfLevel, parseStandards, parseBlockType, parseAssessmentType, detectHeaderRow } from '../src/services/courseSpreadsheetSchema.js';
-import { mergeUnit, mergeRubric, mergeBlocks, buildCourseFromSpreadsheetWithAI } from '../src/services/courseSpreadsheetAiService.js';
-import { sanitizeAiUnit, createUrlPolicy, normalizeRubricWeights, checkAiAssistBalance } from '../src/services/aiCourseShared.js';
+import { mergeUnit, mergeRubric, mergeBlocks, mergeCourseAssessments, buildCourseFromSpreadsheetWithAI } from '../src/services/courseSpreadsheetAiService.js';
+import { sanitizeAiUnit, sanitizeAiAssessments, createUrlPolicy, normalizeRubricWeights, checkAiAssistBalance } from '../src/services/aiCourseShared.js';
 import { generateGeminiJson, parseJsonFromModelText, GEMINI_ERROR } from '../src/services/geminiClient.js';
 import { formatTokenBalance, resolvePrivileges, MAX_SUPERADMIN_GRANT } from '../src/services/rolePrivileges.js';
 import { SAMPLE_SHEET_CSV } from '../src/services/geminiCourseService.js';
@@ -36,6 +36,31 @@ function workbookSheets(sheetDefs, name = 'book.xlsx') {
 
 function stripIds(value) {
   return JSON.parse(JSON.stringify(value, (key, v) => (key === 'id' || key === 'updatedAt' ? undefined : v)));
+}
+
+/** Course content without generated ids: correct options by position, assessment units by index. */
+function comparable(course) {
+  const units = course.units || [];
+  const unitIndex = new Map(units.map((u, i) => [u.id, i]));
+  return stripIds({
+    units: units.map(u => ({
+      ...u,
+      lessons: (u.lessons || []).map(l => ({
+        ...l,
+        blocks: (l.blocks || []).map(b => (b.type !== 'quiz' ? b : {
+          ...b,
+          quiz: {
+            ...b.quiz,
+            questions: (b.quiz?.questions || []).map(q => (q.type !== 'multiple_choice' ? q : {
+              ...q,
+              correctOptionIds: (q.correctOptionIds || []).map(id => (q.options || []).findIndex(o => o.id === id))
+            }))
+          }
+        }))
+      }))
+    })),
+    assessments: (course.assessments || []).map(a => ({ ...a, unitId: a.unitId ? unitIndex.get(a.unitId) ?? 'missing' : '' }))
+  });
 }
 
 /** Fake Gemini REST endpoint: `respond(prompt, url)` returns the model JSON (or a Response-like object). */
@@ -81,13 +106,20 @@ async function run() {
   const rebuilt = finalizeCourseDraft(parsed.draft, {});
   const a = stripIds(example);
   const b = stripIds(rebuilt);
-  for (const field of ['title', 'code', 'aqfLevel', 'category', 'year', 'startDate', 'token_cost', 'description', 'knowledge', 'curriculumStandards', 'aqfEquivalenceNotes', 'learningOutcomes', 'units']) {
+  for (const field of ['title', 'code', 'aqfLevel', 'category', 'year', 'startDate', 'token_cost', 'description', 'knowledge', 'curriculumStandards', 'aqfEquivalenceNotes', 'learningOutcomes']) {
     assert.deepStrictEqual(b[field], a[field], `round trip changed ${field}`);
   }
-  const bands = rebuilt.units[1].assessments[0].rubric[0].levels.map(l => l.label);
+  assert.deepStrictEqual(comparable(rebuilt), comparable(example), 'units, lessons, blocks, quizzes and the course assessments survive');
+  assert(rebuilt.units.every(u => !('assessments' in u)), 'units hold lessons & blocks only');
+  assert.deepStrictEqual(rebuilt.assessments.map(x => [x.title, x.nominalWeight]), [['Concepts Check', 10], ['Workplace Sustainability Audit', 40], ['ESG Impact Report', 50]], 'one course-level Assessments & Rubrics list');
+  const bands = rebuilt.assessments[2].rubric[0].levels.map(l => l.label);
   assert.strictEqual(bands.length, 5, '5-level rubric survives (repeated header row)');
+  assert.strictEqual(rebuilt.assessments[2].unitId, rebuilt.units[1].id, 'Covers Unit links the task to its unit');
   assert(rebuilt.units[0].lessons[0].blocks.some(blk => blk.type === 'notebook_link' && blk.metadata.notebookUrl.startsWith('https://notebooklm.google.com/')));
-  console.log('✅ Test 2 Passed: worked example round-trips every course category A to Z.');
+  const quiz = rebuilt.units[0].lessons[0].blocks.find(blk => blk.type === 'quiz');
+  assert.deepStrictEqual(quiz.quiz.questions.map(q => q.type), ['multiple_choice', 'true_false', 'short_answer', 'open'], 'every question type round-trips');
+  assert.strictEqual(parsed.stats.questions, 6);
+  console.log('✅ Test 2 Passed: worked example round-trips every course category A to Z (quizzes and course assessments included).');
 
   // 3. Blank template has no content; export of a blank course is still valid
   const blank = parseCourseSpreadsheet(workbookSheets(buildCourseWorkbookSheets(null)));
@@ -126,7 +158,8 @@ async function run() {
   assert.strictEqual(legacy.draft.course.startDate, '2026-03-02');
   assert.strictEqual(legacy.draft.course.learningOutcomes.length, 3);
   assert.strictEqual(legacy.stats.assessments, 3);
-  const legacyCriteria = legacy.draft.units[0].assessments[0].rubric.map(c => [c.criterionTitle, c.weightPercentage]);
+  assert.strictEqual(legacy.draft.units.length, 0, 'assessments no longer create placeholder units');
+  const legacyCriteria = legacy.draft.assessments[0].rubric.map(c => [c.criterionTitle, c.weightPercentage]);
   assert.deepStrictEqual(legacyCriteria, [['Clarity of data', 30], ['Ecological analysis', 40], ['Conservation recommendations', 30]]);
   assert(legacy.unstructuredText.includes('Week 1: Ocean Chemistry'), 'weekly rows are kept for ✨ AI Assist');
   assert(hasSpreadsheetContent(legacy));
@@ -202,11 +235,11 @@ async function run() {
   const policy = createUrlPolicy(['https://youtu.be/teacher']);
   const teacherUnit = {
     unitCode: 'B1', unitTitle: 'Cells', nominalHours: null, description: '', learningOutcomes: [],
-    lessons: [{ title: 'Cell walls', estimatedMinutes: null, blocks: [{ type: 'youtube_video', title: '', content: 'https://youtu.be/teacher' }] }],
-    assessments: [{ title: 'Quiz', type: '', description: '', dueDate: '', nominalWeight: 40, externalSubmissionLinks: [], rubric: [
-      { criterionTitle: 'Accuracy', weightPercentage: 60, levels: [{ label: 'Low', descriptor: 'Teacher low' }, { label: 'High', descriptor: '' }] }
-    ] }]
+    lessons: [{ title: 'Cell walls', estimatedMinutes: null, blocks: [{ type: 'youtube_video', title: '', content: 'https://youtu.be/teacher' }] }]
   };
+  const teacherTasks = [{ title: 'Quiz', type: '', description: '', dueDate: '', nominalWeight: 40, externalSubmissionLinks: [], unitIndex: 0, rubric: [
+    { criterionTitle: 'Accuracy', weightPercentage: 60, levels: [{ label: 'Low', descriptor: 'Teacher low' }, { label: 'High', descriptor: '' }] }
+  ] }];
   const aiUnit = sanitizeAiUnit({
     unitCode: 'CHANGED', unitTitle: 'Changed title', nominalHours: 30, description: 'AI description',
     learningOutcomes: ['Explain cells'],
@@ -215,14 +248,19 @@ async function run() {
         { type: 'youtube_video', title: 'AI video', content: 'https://youtu.be/teacher' },
         { type: 'youtube_video', title: 'Invented', content: 'https://youtube.com/watch?v=invented' },
         { type: 'text_description', title: 'Reading', content: 'Read https://made-up.example.com/deep/link today.' },
-        { type: 'teacher_guide', title: 'Guide', content: 'Discuss.' }
+        { type: 'teacher_guide', title: 'Guide', content: 'Discuss.' },
+        { type: 'quiz', title: 'AI quiz', content: '', questions: [
+          { type: 'multiple_choice', prompt: 'Cells are…', options: ['tiny', 'huge'], correct: [0] },
+          { type: 'multiple_choice', prompt: 'Broken (one option)', options: ['only'], correct: [0] },
+          { type: 'open', prompt: 'Explain a cell wall.', modelAnswer: 'Rigid outer layer… https://made-up.example.com/x' }
+        ] }
       ] },
       { title: 'Extra AI lesson', estimatedMinutes: 30, blocks: [] }
-    ],
-    assessments: [{ title: 'Quiz', type: 'formative', description: 'AI brief', dueDate: '2026-13-01', nominalWeight: 99, rubric: [
-      { criterionTitle: 'Accuracy', weightPercentage: 10, levels: [{ label: 'Low', descriptor: 'AI low' }, { label: 'High', descriptor: 'AI high' }] }
-    ] }]
+    ]
   }, { isUrlAllowed: policy });
+  const aiTasks = sanitizeAiAssessments([{ title: 'Quiz', unitCode: 'B1', type: 'formative', description: 'AI brief', dueDate: '2026-13-01', nominalWeight: 99, rubric: [
+    { criterionTitle: 'Accuracy', weightPercentage: 10, levels: [{ label: 'Low', descriptor: 'AI low' }, { label: 'High', descriptor: 'AI high' }] }
+  ] }], { isUrlAllowed: policy });
   const merged = mergeUnit(teacherUnit, aiUnit);
   assert.strictEqual(merged.unitCode, 'B1');
   assert.strictEqual(merged.unitTitle, 'Cells');
@@ -233,8 +271,20 @@ async function run() {
   assert.strictEqual(merged.lessons[0].blocks[0].title, 'AI video', 'blank block title filled');
   assert(!JSON.stringify(merged).includes('invented'), 'invented YouTube link dropped');
   assert(!JSON.stringify(merged).includes('https://made-up.example.com'), 'invented deep link removed from text');
-  assert.deepStrictEqual(merged.lessons[0].blocks.map(x => x.type), ['youtube_video', 'text_description', 'teacher_guide'], 'missing block types added once');
-  const mergedQuiz = merged.assessments[0];
+  assert.deepStrictEqual(merged.lessons[0].blocks.map(x => x.type), ['youtube_video', 'text_description', 'teacher_guide', 'quiz'], 'missing block types added once (one AI quiz for a unit without one)');
+  const aiQuiz = merged.lessons[0].blocks[3].quiz.questions;
+  assert.deepStrictEqual(aiQuiz.map(q => q.type), ['multiple_choice', 'open'], 'malformed AI questions are dropped');
+  assert.deepStrictEqual(aiQuiz[0].correctOptionIds, [aiQuiz[0].options[0].id], 'AI correct indexes become answer keys');
+  assert(!aiQuiz[1].modelAnswer.includes('made-up.example.com/x'), 'no invented links in model answers');
+  // A teacher's quiz is never replaced, and Gemini adds no second quiz to a unit that has one.
+  const teacherQuizUnit = { ...teacherUnit, lessons: [{ ...teacherUnit.lessons[0], blocks: [...teacherUnit.lessons[0].blocks, { type: 'quiz', title: 'My quiz', content: '', quiz: { questions: [{ id: 'q1', type: 'open', prompt: 'Mine' }] } }] }] };
+  const keptQuiz = mergeUnit(teacherQuizUnit, aiUnit);
+  const quizzesAfter = keptQuiz.lessons.flatMap(l => l.blocks).filter(x => x.type === 'quiz');
+  assert.strictEqual(quizzesAfter.length, 1);
+  assert.deepStrictEqual(quizzesAfter[0].quiz.questions.map(q => q.prompt), ['Mine'], 'teacher quiz kept as written');
+  const mergedTasks = mergeCourseAssessments(teacherTasks, aiTasks.map(({ unitCode: _code, ...t }) => ({ ...t, unitIndex: 0 })));
+  const mergedQuiz = mergedTasks[0];
+  assert.strictEqual(mergedQuiz.unitIndex, 0);
   assert.strictEqual(mergedQuiz.nominalWeight, 40);
   assert.strictEqual(mergedQuiz.type, 'formative');
   assert.strictEqual(mergedQuiz.dueDate, '', 'invalid AI date rejected');
@@ -243,7 +293,8 @@ async function run() {
   assert.deepStrictEqual(mergeBlocks([], [{ type: 'text_description', title: 'a', content: 'x' }, { type: 'text_description', title: 'b', content: 'y' }]).length, 2);
   assert.deepStrictEqual(normalizeRubricWeights([{ weightPercentage: 1 }, { weightPercentage: 1 }, { weightPercentage: 1 }]).map(c => c.weightPercentage), [34, 33, 33]);
   assert.strictEqual(mergeRubric([], [{ criterionTitle: 'X', weightPercentage: 50, levels: [] }])[0].weightPercentage, 100);
-  console.log('✅ Test 10 Passed: Gemini merge keeps teacher values & structure; invented links never survive.');
+  assert.strictEqual(mergeCourseAssessments([], aiTasks)[0].description, 'AI brief', 'no teacher tasks: Gemini plans them');
+  console.log('✅ Test 10 Passed: Gemini merge keeps teacher values, quizzes & course assessments; invented links never survive.');
 
   // 11. Gemini client: fallback chain, schema simplification, fatal key errors, truncation, fences, abort
   assert.deepStrictEqual(parseJsonFromModelText('```json\n{"a":1}\n```'), { a: 1 });
@@ -281,22 +332,32 @@ async function run() {
   const progress = [];
   fg = fakeGemini((prompt) => {
     if (prompt.includes('Plan the course outline')) {
-      return { title: 'IGNORED', code: 'MAR-AI', category: 'Science', description: 'IGNORED', aqfEquivalenceNotes: 'Equivalent notes', learningOutcomes: ['ignored'], units: [] };
+      return { title: 'IGNORED', code: 'MAR-AI', category: 'Science', description: 'IGNORED', aqfEquivalenceNotes: 'Equivalent notes', learningOutcomes: ['ignored'],
+        units: [{ unitCode: 'MAR1', unitTitle: 'Ocean Systems', nominalHours: 40, description: '', learningOutcomes: [] }] };
+    }
+    if (prompt.includes('Plan the assessment tasks for the WHOLE course')) {
+      assert(prompt.includes('Field Investigation Report'), 'teacher tasks reach the assessments prompt');
+      return { assessments: [
+        { title: 'Field Investigation Report', unitCode: 'MAR1', type: 'summative', description: 'AI brief', dueDate: '', nominalWeight: 50, rubric: [] },
+        { title: 'Mid-Semester Marine Quiz', unitCode: '', type: 'formative', description: '', dueDate: '', nominalWeight: 25, rubric: [{ criterionTitle: 'Accuracy', weightPercentage: 100, levels: [{ label: 'Novice (0-49%)', descriptor: 'n' }, { label: 'Advanced (90-100%)', descriptor: 'a' }] }] },
+        { title: 'Policy Brief Short Answers', unitCode: 'MAR1', type: 'formative', description: '', dueDate: '', nominalWeight: 25, rubric: [] }
+      ] };
     }
     assert(prompt.includes('Build out ONE unit'));
+    assert(!prompt.includes('"assessments"'), 'units are built without assessments');
     assert(prompt.includes('Week 1: Ocean Chemistry'), 'unmapped weekly rows reach the unit prompt');
     return {
       unitCode: 'MAR1', unitTitle: 'Ocean Systems', nominalHours: 40, description: 'Ocean chemistry, reefs and deep sea.', learningOutcomes: ['Explain ocean chemistry'],
       lessons: [{ title: 'Week 1: Ocean Chemistry & Currents', estimatedMinutes: 60, blocks: [
         { type: 'text_description', title: 'Salinity', content: 'Seawater averages 3.5% salinity.' },
         { type: 'google_drive_link', title: 'Slides', content: 'https://slides.example.com/week1' },
-        { type: 'youtube_video', title: 'Made up', content: 'https://www.youtube.com/watch?v=fake' }
-      ] }],
-      assessments: [
-        { title: 'Field Investigation Report', type: 'summative', description: 'AI brief', dueDate: '', nominalWeight: 50, rubric: [] },
-        { title: 'Mid-Semester Marine Quiz', type: 'formative', description: '', dueDate: '', nominalWeight: 25, rubric: [{ criterionTitle: 'Accuracy', weightPercentage: 100, levels: [{ label: 'Novice (0-49%)', descriptor: 'n' }, { label: 'Advanced (90-100%)', descriptor: 'a' }] }] },
-        { title: 'Policy Brief Short Answers', type: 'formative', description: '', dueDate: '', nominalWeight: 25, rubric: [] }
-      ]
+        { type: 'youtube_video', title: 'Made up', content: 'https://www.youtube.com/watch?v=fake' },
+        { type: 'quiz', title: 'Unit quiz', content: 'Answer all questions.', questions: [
+          { type: 'multiple_choice', prompt: 'Average seawater salinity?', options: ['3.5%', '10%', '0.5%'], correct: [0], points: 1 },
+          { type: 'true_false', prompt: 'Corals are animals.', correctAnswer: true },
+          { type: 'open', prompt: 'Why do reefs bleach?', modelAnswer: 'Heat stress expels algae.', points: 5 }
+        ] }
+      ] }]
     };
   });
   const built = await buildCourseFromSpreadsheetWithAI({
@@ -321,11 +382,17 @@ async function run() {
   assert.strictEqual(builtUnit.unitTitle, 'Ocean Systems', 'auto-created unit filled by AI');
   assert(builtUnit.lessons[0].blocks.some(x => x.type === 'google_drive_link' && x.metadata.driveUrl === 'https://slides.example.com/week1'), 'link from the spreadsheet allowed');
   assert(!JSON.stringify(built.course).includes('watch?v=fake'), 'invented video dropped');
-  const fieldReport = builtUnit.assessments.find(x => x.title === 'Field Investigation Report');
+  assert(!('assessments' in builtUnit), 'units hold lessons & blocks only');
+  const builtQuiz = builtUnit.lessons[0].blocks.find(x => x.type === 'quiz');
+  assert.deepStrictEqual(builtQuiz.quiz.questions.map(q => q.type), ['multiple_choice', 'true_false', 'open'], 'Gemini adds a unit quiz with answer keys');
+  assert.strictEqual(builtQuiz.quiz.questions[0].correctOptionIds[0], builtQuiz.quiz.questions[0].options[0].id);
+  assert.deepStrictEqual(built.course.assessments.map(x => x.title), ['Field Investigation Report', 'Mid-Semester Marine Quiz', 'Policy Brief Short Answers'], 'one course-level list, teacher order kept');
+  const fieldReport = built.course.assessments.find(x => x.title === 'Field Investigation Report');
   assert.deepStrictEqual(fieldReport.rubric.map(c => c.criterionTitle), ['Clarity of data', 'Ecological analysis', 'Conservation recommendations'], 'teacher rubric criteria kept');
   assert.strictEqual(fieldReport.dueDate, '2026-04-10', 'teacher due date kept');
-  assert(progress.includes('outline') && progress.includes('units') && progress.includes('finalizing'));
-  console.log('✅ Test 12 Passed: Gemini builds the whole course from spreadsheets; teacher data and links protected.');
+  assert.strictEqual(fieldReport.unitId, builtUnit.id, 'Gemini links a task to the unit it covers');
+  assert(progress.includes('outline') && progress.includes('units') && progress.includes('assessments') && progress.includes('finalizing'));
+  console.log('✅ Test 12 Passed: Gemini builds the whole course (unit quizzes + course assessments); teacher data and links protected.');
 
   // 13. Gemini down -> clear error, nothing charged; Super Admin shows UNL tokens
   fg = fakeGemini(() => httpError(503, 'overloaded'));
@@ -344,7 +411,7 @@ async function run() {
   assert.throws(() => readSpreadsheetBytes(XLSX, { name: 'x.pdf', bytes: new Uint8Array([37, 80, 68, 70]) }), SpreadsheetReadError);
   const win1252 = readSpreadsheetBytes(XLSX, { name: 'w.csv', bytes: new Uint8Array([0x43, 0x61, 0x66, 0xe9]) }).sheets[0].rows[0][0];
   assert.strictEqual(win1252, 'Café', 'Windows-1252 CSV decoded');
-  const rubricBook = workbookSheets(buildRubricWorkbookSheets(example.units[1].assessments[0].rubric, { assessmentTitle: 'ESG' }));
+  const rubricBook = workbookSheets(buildRubricWorkbookSheets(example.assessments[2].rubric, { assessmentTitle: 'ESG' }));
   assert.strictEqual(parseRubricSpreadsheet(rubricBook).rubric.length, 3, 'downloaded rubric re-uploads');
   console.log('✅ Test 14 Passed: reader validation, encodings, and rubric download/upload round trip.');
 
@@ -471,7 +538,76 @@ async function run() {
   assert.deepStrictEqual(unmatched.map(x => [x.title, x.content]), [['', 'https://drive.google.com/file/d/mine/view']], 'no title from a different link');
   console.log('✅ Test 17 Passed: ✨ AI merge pairs link blocks by URL, so multiple links keep the right titles.');
 
-  console.log('\n🎉 All Course Spreadsheet & ✨ AI Assist tests passed (17/17).');
+  // 18. Quiz Questions tab (every type, teacher layouts, warnings) and course-level assessments
+  const quizParsed = parseCourseSpreadsheet([
+    { name: 'Units', rows: [['Unit Code', 'Unit Title', 'Nominal Hours'], ['Q1', 'Quizzes', '10'], ['Q2', 'More', '5']] },
+    { name: 'Lessons', rows: [['Unit Code', 'Lesson #', 'Lesson Title', 'Duration (minutes)'], ['Q1', '1', 'One', '30'], ['Q2', '1', 'Two', '30']] },
+    {
+      name: 'Content Blocks',
+      rows: [
+        ['Unit Code', 'Lesson #', 'Block #', 'Block Type', 'Block Title', 'Text', 'Link URL'],
+        ['Q1', '1', '1', 'Content Description', 'Intro', 'Read.', ''],
+        ['Q1', '1', '2', 'Quiz & Questions', 'Mid-lesson check', 'Try these.', ''],
+        ['Q1', '1', '3', 'Teacher Guide', 'Notes', 'Discuss.', '']
+      ]
+    },
+    {
+      name: 'Quiz Questions',
+      rows: [
+        ['Unit Code', 'Lesson #', 'Quiz Title', 'Question #', 'Question Type', 'Question', 'Options', 'Correct Answer', 'Points', 'Model Answer / Marking Guide'],
+        ['Q1', '1', 'Mid-lesson check', '2', 'True / False', 'The sky is green.', '', 'F', '', ''],
+        ['', '', '', '1', 'Multiple choice', 'Pick the primes.', 'A) 2\nB) 4\nC) 3\nD) 9', 'A, C', '2', ''],
+        ['', '', '', '3', '', 'Capital of France?', '', 'Paris\nParis, France', '', ''],
+        ['', '', '', '4', 'Essay', 'Explain photosynthesis.', '', '', '10', 'Light, CO2 and water make glucose.'],
+        ['', '', '', '5', 'Multiple choice', 'Bad answer', 'Red | Blue', 'Purple', '', ''],
+        ['', '', '', '6', 'Dance', 'Unknown type', '', '', '', ''],
+        ['', '', 'End of lesson quiz', '', 'Multiple choice', 'Two plus two?', '3\n4\n5', '4', '', ''],
+        ['Q2', '1', '', '', 'True/False', 'Water is wet.', '', 'Maybe', '', '']
+      ]
+    },
+    { name: 'Assessments', rows: [['Unit Code', 'Assessment #', 'Assessment Title', 'Type', 'Weighting %'], ['Q1', '1', 'Essay', 'Summative', '40'], ['Q2', '1', 'Report', 'Summative', '60']] },
+    { name: 'Rubrics', rows: [['Unit Code', 'Assessment #', 'Criterion', 'Weight %', 'Low', 'High'], ['Q2', '1', 'Structure', '100', 'weak', 'strong']] }
+  ]);
+  const quizCourse = finalizeCourseDraft(quizParsed.draft, {});
+  const lessonOne = quizCourse.units[0].lessons[0];
+  assert.deepStrictEqual(lessonOne.blocks.map(x => [x.type, x.title]), [
+    ['text_description', 'Intro'], ['quiz', 'Mid-lesson check'], ['teacher_guide', 'Notes'], ['quiz', 'End of lesson quiz']
+  ], 'a Content Blocks row places a quiz; a new Quiz Title adds one at the end of the lesson');
+  const midQuiz = lessonOne.blocks[1].quiz;
+  assert.strictEqual(midQuiz.instructions, 'Try these.');
+  assert.deepStrictEqual(midQuiz.questions.map(q => q.type), ['multiple_choice', 'true_false', 'short_answer', 'open', 'multiple_choice', 'open'], 'ordered by Question #; blank type inferred');
+  const [primes, sky, capital, essay, bad] = midQuiz.questions;
+  assert.deepStrictEqual(primes.options.map(o => o.text), ['2', '4', '3', '9']);
+  assert.deepStrictEqual(primes.correctOptionIds, [primes.options[0].id, primes.options[2].id]);
+  assert.strictEqual(primes.allowMultiple, true);
+  assert.strictEqual(primes.points, 2);
+  assert.strictEqual(sky.correctAnswer, false);
+  assert.deepStrictEqual(capital.acceptedAnswers, ['Paris', 'Paris, France']);
+  assert.deepStrictEqual([essay.points, essay.modelAnswer], [10, 'Light, CO2 and water make glucose.']);
+  assert.deepStrictEqual(bad.correctOptionIds, [], 'an unmatched answer leaves the question for the teacher');
+  const endQuiz = lessonOne.blocks[3].quiz.questions[0];
+  assert.deepStrictEqual(endQuiz.correctOptionIds, [endQuiz.options[1].id], 'correct answer by option text');
+  const q2Quiz = quizCourse.units[1].lessons[0].blocks.find(x => x.type === 'quiz');
+  assert.strictEqual(q2Quiz.quiz.questions[0].correctAnswer, undefined, 'unclear True/False has no key');
+  const quizWarnings = quizParsed.warnings.map(formatImportWarning).join('\n');
+  for (const part of ['Question Type "Dance" was not recognised', 'Correct Answer "Purple" does not match an option', '"Maybe" should be True or False']) {
+    assert(quizWarnings.includes(part), part);
+  }
+  assert.deepStrictEqual(quizParsed.stats.questions, 8);
+  // Older per-unit layout: numbering restarts in each unit and rubrics match within their unit.
+  assert.deepStrictEqual(quizCourse.assessments.map(x => [x.title, x.unitId === quizCourse.units[x.title === 'Essay' ? 0 : 1].id]), [['Essay', true], ['Report', true]]);
+  assert.deepStrictEqual(quizCourse.assessments[1].rubric.map(c => c.criterionTitle), ['Structure'], "unit Q2's rubric attaches to Q2's assessment #1");
+  // Template layout: course numbering, optional Covers Unit, rubrics by Assessment #.
+  const newLayout = finalizeCourseDraft(parseCourseSpreadsheet([
+    { name: 'Units', rows: [['Unit Code', 'Unit Title', 'Nominal Hours'], ['N1', 'First', '10'], ['N2', 'Second', '10']] },
+    { name: 'Assessments', rows: [['Assessment #', 'Assessment Title', 'Type', 'Weighting %', 'Covers Unit'], ['1', 'Whole-course exam', 'Summative', '70', ''], ['2', 'Unit 2 lab', 'Formative', '30', 'N2']] },
+    { name: 'Rubrics', rows: [['Assessment #', 'Criterion', 'Weight %', 'Low', 'High'], ['2', 'Method', '100', 'x', 'y']] }
+  ]).draft, {});
+  assert.deepStrictEqual(newLayout.assessments.map(x => x.unitId), ['', newLayout.units[1].id]);
+  assert.deepStrictEqual(newLayout.assessments[1].rubric.map(c => c.criterionTitle), ['Method']);
+  console.log('✅ Test 18 Passed: Quiz Questions tab (all types, warnings) and course-level assessments from old and new layouts.');
+
+  console.log('\n🎉 All Course Spreadsheet & ✨ AI Assist tests passed (18/18).');
 }
 
 run().then(() => process.exit(0)).catch(err => {

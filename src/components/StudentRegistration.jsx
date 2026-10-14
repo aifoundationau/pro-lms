@@ -14,6 +14,7 @@ import {
   TUITION_METHODS
 } from '../services/studentService';
 import { formatLocalizedDate } from '../services/geminiCourseService';
+import { addMemberToCourseFree } from '../services/courseEnrollmentService';
 
 export default function StudentRegistration({ myCourses = [], onUpdateCourses }) {
   const [students, setStudents] = useState([]);
@@ -115,8 +116,25 @@ export default function StudentRegistration({ myCourses = [], onUpdateCourses })
       return;
     }
 
-    if (onUpdateCourses && newlyAddedCourseIds.length) {
-      onUpdateCourses(newlyAddedCourseIds);
+    if (newlyAddedCourseIds.length) {
+      const studentEmail = studentToSave.personalEmail || studentToSave.email;
+      const studentName = `${studentToSave.legalFirstName || ''} ${studentToSave.legalFamilyName || ''}`.trim() || studentToSave.preferredName || 'Student';
+      if (studentEmail) {
+        for (const cid of newlyAddedCourseIds) {
+          const course = (myCourses || []).find(c => String(c.id) === String(cid));
+          const title = course?.title || 'Course';
+          addMemberToCourseFree({
+            courseId: cid,
+            courseTitle: title,
+            memberName: studentName,
+            memberEmail: studentEmail,
+            memberRole: 'student'
+          }).catch(err => console.warn('Student registration course member link note:', err));
+        }
+      }
+      if (onUpdateCourses) {
+        onUpdateCourses(newlyAddedCourseIds);
+      }
     }
   };
 

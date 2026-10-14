@@ -19,7 +19,7 @@ import StudentLearningPanel from './components/student/StudentLearningPanel';
 import { createBlankCourse, generateEntityId, createBlankUnit, createBlankLesson } from './types/courseBuilderTypes';
 import { confirmCheckoutSession } from './services/stripeService';
 import { getUserTokenBalance } from './services/tokenService';
-import { listMyEnrolments } from './services/courseEnrollmentService';
+import { listMyEnrolments, subscribeToMyEnrolments } from './services/courseEnrollmentService';
 import { sendMessage, SUPERADMIN_INBOX } from './services/messageService';
 import { formatTokenBalance } from './services/rolePrivileges';
 import { ALL_GLOBAL_COURSES } from './services/globalCoursesData';
@@ -28,14 +28,15 @@ import {
   handleAuthRedirect,
   logoutUser,
   subscribeToAuth,
-  resolvePrivileges
+  resolvePrivileges,
+  updateUserToStudentRole
 } from './services/authService';
 import './App.css';
 
 const IMGBB_API_KEY = import.meta.env.VITE_IMGBB_API_KEY || '';
 
 // Tabs only staff (teachers, admins, Super Admin) can open.
-const STAFF_TABS = ['my-courses', 'students', 'global'];
+const STAFF_TABS = ['my-courses', 'students'];
 
 async function uploadToImgbb(file) {
   if (!IMGBB_API_KEY) throw new Error('Image uploads are not configured (VITE_IMGBB_API_KEY missing).');
@@ -82,7 +83,16 @@ function App() {
   const [userTokenBalance, setUserTokenBalance] = useState(0);
   const [showFrontPage, setShowFrontPage] = useState(false);
 
-  const privileges = resolvePrivileges(userProfile || (authUser ? { email: authUser.email } : null));
+  // Student panel: courses this account is enrolled in (found by sign-in email)
+  const [enrolledCourses, setEnrolledCourses] = useState([]);
+  const [isLoadingEnrolments, setIsLoadingEnrolments] = useState(false);
+  const [enrolmentsError, setEnrolmentsError] = useState('');
+  const [enrolmentsVersion, setEnrolmentsVersion] = useState(0);
+
+  const privileges = resolvePrivileges(
+    userProfile || (authUser ? { email: authUser.email } : null),
+    enrolledCourses.length
+  );
   const isLoggedIn = !!authUser;
   const tokenBalanceLabel = formatTokenBalance(userTokenBalance, userProfile || (authUser ? { email: authUser.email } : null));
 
@@ -92,12 +102,6 @@ function App() {
   // Message board: other panels can ask the dock to start a message
   const messageDockRef = useRef(null);
   const requestCompose = (to, extra = {}) => messageDockRef.current?.compose({ to, ...extra });
-
-  // Student panel: courses this account is enrolled in (found by sign-in email)
-  const [enrolledCourses, setEnrolledCourses] = useState([]);
-  const [isLoadingEnrolments, setIsLoadingEnrolments] = useState(false);
-  const [enrolmentsError, setEnrolmentsError] = useState('');
-  const [enrolmentsVersion, setEnrolmentsVersion] = useState(0);
 
   // Teacher tools
   const [submissionsCourse, setSubmissionsCourse] = useState(null);
@@ -268,29 +272,71 @@ function App() {
     if (!privileges.isStaff && STAFF_TABS.includes(activeTab)) setActiveTab('learning');
   }, [authUser, userProfile, privileges.isStaff, activeTab]);
 
-  // Enrolled courses (student panel + "message my teacher")
+  // Enrolled courses (real-time listener: student panel + "message my teacher")
   useEffect(() => {
     if (!authUser?.email) return undefined;
     let cancelled = false;
-    (async () => {
-      setIsLoadingEnrolments(true);
-      setEnrolmentsError('');
-      try {
-        const enrolments = await listMyEnrolments(authUser.email);
-        const courses = await Promise.all(enrolments.slice(0, 60).map(e => getLmsCourseById(e.courseId).catch(() => null)));
-        if (cancelled) return;
-        setEnrolledCourses(courses.filter(Boolean).filter(c => !c.archived));
-      } catch (err) {
-        console.warn('Enrolled courses could not be loaded:', err);
+    setIsLoadingEnrolments(true);
+    setEnrolmentsError('');
+
+    const unsubscribe = subscribeToMyEnrolments(
+      authUser.email,
+      async (enrolments) => {
+        try {
+          const courses = await Promise.all(
+            (enrolments || []).slice(0, 60).map(async (e) => {
+              const fromRepo = await getLmsCourseById(e.courseId).catch(() => null);
+              if (fromRepo) return fromRepo;
+              // Fallback to myCourses or local state if created locally
+              const fromMy = myCourses.find(c => String(c.id) === String(e.courseId));
+              if (fromMy) return fromMy;
+              // Fallback object so the student can immediately see and access the enrolled course
+              return {
+                id: e.courseId,
+                title: e.courseTitle || 'Course',
+                authorName: e.addedByName || 'Course Teacher',
+                authorEmail: '',
+                units: [],
+                assessments: [],
+                tag: 'lms'
+              };
+            })
+          );
+          if (cancelled) return;
+          const activeCourses = courses.filter(Boolean).filter(c => !c.archived);
+          setEnrolledCourses(activeCourses);
+
+          // If the logged in person has supporter status, upgrade to student as soon as they are enrolled!
+          if (activeCourses.length > 0) {
+            setUserProfile(prev => {
+              if (prev && String(prev.role || '').toLowerCase() === 'supporter') {
+                return { ...prev, role: 'student', classification: 'student' };
+              }
+              return prev;
+            });
+            if (authUser?.uid && String(userProfile?.role || '').toLowerCase() === 'supporter') {
+              updateUserToStudentRole(authUser.uid).catch(() => {});
+            }
+          }
+        } catch (err) {
+          console.warn('Enrolled courses could not be processed:', err);
+          if (!cancelled) setEnrolmentsError('Your courses could not be loaded. Check your connection.');
+        } finally {
+          if (!cancelled) setIsLoadingEnrolments(false);
+        }
+      },
+      (err) => {
+        console.warn('Real-time enrolment listener notice:', err);
         if (!cancelled) setEnrolmentsError('Your courses could not be loaded. Check your connection.');
-      } finally {
-        if (!cancelled) setIsLoadingEnrolments(false);
+        setIsLoadingEnrolments(false);
       }
-    })();
+    );
+
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [authUser, enrolmentsVersion]);
+  }, [authUser?.email, enrolmentsVersion, myCourses]);
 
   // Courses this person may manage: their own (plus unowned legacy courses); the Super Admin sees all.
   const visibleMyCourses = privileges.isSuperadmin
@@ -955,10 +1001,11 @@ function App() {
             unitTitle: m.unitName || m.title || `Unit ${mIdx + 1}`,
             nominalHours: 40,
             description: m.description || '',
-            lessons: [createBlankLesson(0, 'Lesson 1: Core Concepts')],
-            assessments: editingCourse.assessments || []
+            lessons: [createBlankLesson(0, 'Lesson 1: Core Concepts')]
           })) : [createBlankUnit('UNIT-101', 'Unit 1: Foundation Knowledge')]
-        )
+        ),
+        // One Assessments & Rubrics section per course (never copied into each unit).
+        assessments: Array.isArray(editingCourse.assessments) ? editingCourse.assessments : []
       };
 
       return (
@@ -1001,6 +1048,7 @@ function App() {
             userProfile={userProfile}
             teachingCourses={visibleMyCourses}
             enrolledCourses={enrolledCourses}
+            networkCourses={networkCourses}
             ref={messageDockRef}
             onBalanceChanged={() => authUser?.uid && getUserTokenBalance(authUser.uid).then(bal => setUserTokenBalance(bal || 0))}
           />
@@ -1431,13 +1479,13 @@ function App() {
             )}
             {(!privileges.isStaff || enrolledCourses.length > 0) && (
               <button className={`nav-btn ${activeTab === 'learning' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('learning'); setIsMobileMenuOpen(false); }}>
-                🎓 My Learning{enrolledCourses.length ? ` (${enrolledCourses.length})` : ''}
+                🎓 Student Panel{enrolledCourses.length ? ` (${enrolledCourses.length})` : ''}
               </button>
             )}
             {privileges.isStaff && (
               <button className={`nav-btn ${activeTab === 'students' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('students'); setIsMobileMenuOpen(false); }}>Student Registration</button>
             )}
-            {privileges.isStaff && (
+            {(privileges.isStaff || privileges.canViewGlobalCourses) && (
               <button className={`nav-btn ${activeTab === 'global' ? 'primary' : 'secondary'}`} onClick={() => { openGlobalSearch(); setIsMobileMenuOpen(false); }}>Global Search</button>
             )}
 
@@ -1540,6 +1588,9 @@ function App() {
               loading={isLoadingEnrolments}
               error={enrolmentsError}
               onRetry={() => setEnrolmentsVersion(v => v + 1)}
+              tokenBalanceLabel={tokenBalanceLabel}
+              onBrowseGlobalCourses={openGlobalSearch}
+              onContactTeacher={(email) => requestCompose(email || SUPERADMIN_INBOX)}
               onMessageTeacher={(course) => requestCompose(course.authorEmail, {
                 toName: course.authorName,
                 courseId: course.id,
@@ -1557,23 +1608,25 @@ function App() {
                 {/* Square block: Create Course is ALWAYS first block */}
                 <div className="glass card create-course-card">
                   <div>
-                    <div className="card-icon card-icon-gradient">✨</div>
-                    <h3 style={{color: '#fef08a', margin: '0 0 10px 0'}}>Create Course</h3>
-                    <p style={{fontSize: '0.9rem', color: 'var(--text-secondary)', margin: 0}}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                      <div className="card-icon card-icon-gradient" style={{ margin: 0 }}>✨</div>
+                      <h3 style={{ color: '#fef08a', margin: 0, fontSize: '0.98rem' }}>Create Course</h3>
+                    </div>
+                    <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.35 }}>
                       Start a blank course or upload a Google Sheet to auto-fill modules & assessments with AI.
                     </p>
                   </div>
-                  <div style={{display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '20px'}}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: 'auto', width: '100%' }}>
                     <button 
                       className="nav-btn primary" 
-                      style={{width: '100%', fontWeight: '700', padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'}}
+                      style={{ width: '100%', fontWeight: '700', padding: '8px 12px', fontSize: '0.84rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
                       onClick={handleUploadSheetClick}
                     >
                       ⚡ Upload Sheet (AI)
                     </button>
                     <button 
                       className="nav-btn secondary" 
-                      style={{width: '100%', fontWeight: '600', padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'}}
+                      style={{ width: '100%', fontWeight: '600', padding: '8px 12px', fontSize: '0.84rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
                       onClick={handleCreateBlankCourse}
                     >
                       + Create Course
@@ -1587,91 +1640,98 @@ function App() {
                   return (
                     <div key={course.id} className={`glass card ${isDraft ? 'course-card-draft' : 'course-card-published'}`}>
                       {/* Top Status Header */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                         {isDraft ? (
-                          <span className="course-status-badge draft">
+                          <span className="course-status-badge draft" style={{ fontSize: '0.72rem', padding: '2px 7px' }}>
                             📝 Draft
                           </span>
                         ) : (
-                          <span className="course-status-badge published">
+                          <span className="course-status-badge published" style={{ fontSize: '0.72rem', padding: '2px 7px' }}>
                             🌐 Published
                           </span>
                         )}
                         {course.category && (
                           <span style={{
-                            fontSize: '0.72rem',
+                            fontSize: '0.7rem',
                             color: isDraft ? '#fde68a' : 'var(--text-secondary)',
                             background: isDraft ? 'rgba(245, 158, 11, 0.2)' : 'rgba(255,255,255,0.08)',
-                            padding: '2px 8px',
-                            borderRadius: '6px'
+                            padding: '2px 6px',
+                            borderRadius: '6px',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            maxWidth: '120px'
                           }}>
                             {course.category}
                           </span>
                         )}
                       </div>
 
-                      <div className="card-icon">{isDraft ? '📝' : '📚'}</div>
-                      <h3 style={{ color: isDraft ? '#fef08a' : '#e2e8f0', margin: '0 0 8px 0' }}>{course.title}</h3>
-
-                      {isDraft && (
-                        <div style={{ marginBottom: '12px' }}>
-                          <span className="draft-pill-indicator">
-                            🔒 Private Draft • Hidden from students & other teachers
-                          </span>
-                        </div>
-                      )}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                        <div className="card-icon" style={{ margin: 0 }}>{isDraft ? '📝' : '📚'}</div>
+                        <h3 style={{ color: isDraft ? '#fef08a' : '#e2e8f0', margin: 0, flex: 1 }}>{course.title}</h3>
+                      </div>
 
                       {course.startDate && (
-                        <p style={{fontSize: '0.85rem', color: isDraft ? '#fbbf24' : 'var(--accent-hover)', margin: '0 0 6px 0', fontWeight: '500'}}>
+                        <p style={{fontSize: '0.75rem', color: isDraft ? '#fbbf24' : 'var(--accent-hover)', margin: '0 0 2px 0', fontWeight: '500'}}>
                           📅 Starts: {formatLocalizedDate(course.startDate)}
                         </p>
                       )}
-                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '4px 0 8px 0'}}>
-                        <p style={{margin: 0, fontSize: '0.88rem'}}>{isDraft ? 'Draft Status (Private)' : `Active Students: ${course.students}`}</p>
+                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '2px 0 6px 0'}}>
+                        <p style={{margin: 0, fontSize: '0.76rem'}}>{isDraft ? 'Draft Status (Private)' : `Students: ${course.students}`}</p>
                         <span style={{
                           background: isDraft ? 'rgba(245, 158, 11, 0.25)' : 'rgba(245, 158, 11, 0.2)',
                           border: isDraft ? '1px solid rgba(245, 158, 11, 0.6)' : '1px solid rgba(245, 158, 11, 0.45)',
                           color: '#fef08a',
-                          fontSize: '0.82rem',
+                          fontSize: '0.72rem',
                           fontWeight: 700,
-                          padding: '3px 9px',
-                          borderRadius: '8px'
+                          padding: '2px 6px',
+                          borderRadius: '6px'
                         }}>
                           🪙 {course.token_cost !== undefined ? `${course.token_cost} Tokens` : '10 Tokens'}
                         </span>
                       </div>
-                      <div style={{display: 'flex', gap: '8px', marginTop: '16px', flexWrap: 'wrap'}}>
+
+                      <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr',
+                        gap: '6px',
+                        marginTop: 'auto',
+                        width: '100%'
+                      }}>
                         {course.sourceCourseId && (
-                          <span style={{ flex: '1 1 100%', fontSize: '0.75rem', color: '#a5b4fc' }}>
-                            📋 Copied from Global Search{course.copiedAt ? ` on ${formatLocalizedDate(String(course.copiedAt).slice(0, 10))}` : ''}
+                          <span style={{ gridColumn: 'span 2', fontSize: '0.7rem', color: '#a5b4fc', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            📋 Copied{course.copiedAt ? ` on ${formatLocalizedDate(String(course.copiedAt).slice(0, 10))}` : ''}
                           </span>
                         )}
                         {!course.authorId && (
-                          <span style={{ flex: '1 1 100%', fontSize: '0.75rem', color: '#fcd34d' }} title="Created before course ownership was recorded. Saving it makes you the owner.">
-                            ⚠️ Unassigned course — save it to claim ownership
+                          <span style={{ gridColumn: 'span 2', fontSize: '0.7rem', color: '#fcd34d', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title="Created before course ownership was recorded. Saving it makes you the owner.">
+                            ⚠️ Unassigned course
                           </span>
                         )}
                         <button
                           className="nav-btn primary"
                           style={{
-                            flex: '1 1 100%',
                             background: 'linear-gradient(135deg, #059669, #10b981)',
                             color: '#fff',
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            gap: '6px',
-                            fontSize: '0.85rem',
-                            padding: '9px 12px'
+                            gap: '4px',
+                            fontSize: '0.76rem',
+                            padding: '6px 4px',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis'
                           }}
                           onClick={() => setManagingPeopleCourse(course)}
-                          title="Add students by email — one at a time, in bulk, or from a spreadsheet (0 tokens)"
+                          title="Add students by email (Students & People)"
                         >
-                          👥 Students & People (0 Tokens)
+                          👥 Students & People
                         </button>
                         <button
                           className="nav-btn secondary"
-                          style={{ flex: '1 1 100%', fontSize: '0.85rem', padding: '8px 12px' }}
+                          style={{ fontSize: '0.76rem', padding: '6px 4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                           onClick={() => setSubmissionsCourse(course)}
                           title="View and grade students' assessment submissions"
                         >
@@ -1680,16 +1740,32 @@ function App() {
                         <button 
                           className="nav-btn secondary" 
                           style={{
-                            flex: 1, 
-                            fontSize: '0.85rem',
+                            fontSize: '0.76rem',
+                            padding: '6px 4px',
                             borderColor: isDraft ? 'rgba(245, 158, 11, 0.5)' : undefined,
-                            color: isDraft ? '#fef08a' : undefined
+                            color: isDraft ? '#fef08a' : undefined,
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis'
                           }} 
                           onClick={() => setEditingCourse(course)}
                         >
                           {isDraft ? '✏️ Edit Draft' : 'Manage'}
                         </button>
-                        <button className="nav-btn primary" style={{background: '#e11d48', border: 'none', color: 'white', padding: '8px 14px', fontSize: '0.85rem'}} onClick={() => handleDeleteCourse(course)}>Delete</button>
+                        <button
+                          className="nav-btn primary"
+                          style={{
+                            background: '#e11d48',
+                            border: 'none',
+                            color: 'white',
+                            padding: '6px 4px',
+                            fontSize: '0.76rem',
+                            whiteSpace: 'nowrap'
+                          }}
+                          onClick={() => handleDeleteCourse(course)}
+                        >
+                          Delete
+                        </button>
                       </div>
                     </div>
                   );
@@ -1712,11 +1788,13 @@ function App() {
                       archivedCourses.map(course => {
                         const daysLeft = 28 - Math.floor((Date.now() - course.archivedAt) / (1000 * 60 * 60 * 24));
                         return (
-                          <div key={course.id} className="glass card" style={{opacity: 0.8}}>
-                            <div className="card-icon" style={{filter: 'grayscale(1)'}}>🗑️</div>
-                            <h3 style={{textDecoration: 'line-through'}}>{course.title}</h3>
-                            <p style={{color: '#f87171', fontWeight: 'bold'}}>Deletes in {daysLeft} days</p>
-                            <button className="nav-btn secondary" style={{marginTop: '16px', width: '100%'}} onClick={() => handleRestoreCourse(course)}>Restore Course</button>
+                          <div key={course.id} className="glass card" style={{ opacity: 0.85, justifyContent: 'space-between' }}>
+                            <div>
+                              <div className="card-icon" style={{ filter: 'grayscale(1)', marginBottom: '6px' }}>🗑️</div>
+                              <h3 style={{ textDecoration: 'line-through', fontSize: '0.92rem' }}>{course.title}</h3>
+                              <p style={{ color: '#f87171', fontWeight: 'bold', fontSize: '0.78rem' }}>Deletes in {daysLeft} days</p>
+                            </div>
+                            <button className="nav-btn secondary" style={{ marginTop: 'auto', width: '100%', padding: '7px 10px', fontSize: '0.8rem' }} onClick={() => handleRestoreCourse(course)}>Restore Course</button>
                           </div>
                         )
                       })
@@ -1734,7 +1812,7 @@ function App() {
             />
           )}
 
-          {activeTab === 'global' && privileges.isStaff && (
+          {activeTab === 'global' && (privileges.isStaff || privileges.canViewGlobalCourses) && (
             <div className="admin-section">
               <div className="global-search-header-bar">
                 <div>
@@ -1801,14 +1879,38 @@ function App() {
                             <p className="global-course-author"><span>✍️</span><strong>{course.authorName || 'OzEdu teacher'}</strong></p>
                             <p className="global-course-students">📚 {(course.units || []).length} units • 👥 {Number(course.students) || 0} enrolled</p>
                           </div>
-                          <button
-                            className="nav-btn primary"
-                            style={{ width: '100%', fontSize: '0.88rem', padding: '10px 14px', background: copied ? 'rgba(52, 211, 153, 0.25)' : undefined }}
-                            onClick={() => handleCopyCourse(course)}
-                            disabled={copied || own || Boolean(copyingCourseIds[String(course.id)])}
-                          >
-                            {own ? 'Your course' : copied ? '✓ In My Courses' : copyingCourseIds[String(course.id)] ? 'Copying…' : '+ Copy to My Courses'}
-                          </button>
+                          {privileges.isStaff ? (
+                            <button
+                              className="nav-btn primary"
+                              style={{ width: '100%', fontSize: '0.82rem', padding: '8px 10px', marginTop: 'auto', background: copied ? 'rgba(52, 211, 153, 0.25)' : undefined }}
+                              onClick={() => handleCopyCourse(course)}
+                              disabled={copied || own || Boolean(copyingCourseIds[String(course.id)])}
+                            >
+                              {own ? 'Your course' : copied ? '✓ In My Courses' : copyingCourseIds[String(course.id)] ? 'Copying…' : '+ Copy to My Courses'}
+                            </button>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', marginTop: 'auto' }}>
+                              <div className="sl-enrol-badge" style={{ fontSize: '0.74rem', textAlign: 'center', padding: '3px 6px', borderRadius: '6px', background: 'rgba(255, 255, 255, 0.08)', color: 'var(--text-secondary)' }}>
+                                🔒 Enrolment by Teacher Only
+                              </div>
+                              <button
+                                type="button"
+                                className="nav-btn primary"
+                                style={{ width: '100%', fontSize: '0.8rem', padding: '7px 10px' }}
+                                onClick={() => {
+                                  requestCompose(course.authorEmail || SUPERADMIN_INBOX, {
+                                    toName: course.authorName || 'Teacher',
+                                    courseId: course.id,
+                                    courseTitle: course.title,
+                                    subject: `Enrolment request: ${course.title}`,
+                                    body: `Hi ${course.authorName || 'Teacher'},\n\nI am interested in taking "${course.title}" and would like to be enrolled in your course.\n\nThank you!\n${authUser?.displayName || authUser?.email || ''}`
+                                  });
+                                }}
+                              >
+                                💬 Contact Teacher to Enrol
+                              </button>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -1838,19 +1940,44 @@ function App() {
                       </p>
                     </div>
 
-                    <button
-                      className="nav-btn primary"
-                      style={{
-                        width: '100%',
-                        fontSize: '0.88rem',
-                        padding: '10px 14px',
-                        background: isCopiedByMe(course) ? 'rgba(52, 211, 153, 0.25)' : undefined
-                      }}
-                      onClick={() => handleCopyCourse(course)}
-                      disabled={isCopiedByMe(course) || Boolean(copyingCourseIds[String(course.id)])}
-                    >
-                      {isCopiedByMe(course) ? '✓ In My Courses' : copyingCourseIds[String(course.id)] ? 'Copying…' : '+ Copy to My Courses'}
-                    </button>
+                    {privileges.isStaff ? (
+                      <button
+                        className="nav-btn primary"
+                        style={{
+                          width: '100%',
+                          fontSize: '0.82rem',
+                          padding: '8px 10px',
+                          marginTop: 'auto',
+                          background: isCopiedByMe(course) ? 'rgba(52, 211, 153, 0.25)' : undefined
+                        }}
+                        onClick={() => handleCopyCourse(course)}
+                        disabled={isCopiedByMe(course) || Boolean(copyingCourseIds[String(course.id)])}
+                      >
+                        {isCopiedByMe(course) ? '✓ In My Courses' : copyingCourseIds[String(course.id)] ? 'Copying…' : '+ Copy to My Courses'}
+                      </button>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '100%', marginTop: 'auto' }}>
+                        <div className="sl-enrol-badge" style={{ fontSize: '0.74rem', textAlign: 'center', padding: '3px 6px', borderRadius: '6px', background: 'rgba(255, 255, 255, 0.08)', color: 'var(--text-secondary)' }}>
+                          🔒 Enrolment by Teacher Only
+                        </div>
+                        <button
+                          type="button"
+                          className="nav-btn secondary"
+                          style={{ width: '100%', fontSize: '0.8rem', padding: '7px 10px' }}
+                          onClick={() => {
+                            requestCompose(SUPERADMIN_INBOX, {
+                              toName: 'Super Admin',
+                              courseId: course.id,
+                              courseTitle: course.title,
+                              subject: `Course inquiry: ${course.title}`,
+                              body: `Hi,\n\nI am interested in taking the catalog course "${course.title}". Could a teacher offer this course or enrol me?\n\nThank you!\n${authUser?.displayName || authUser?.email || ''}`
+                            });
+                          }}
+                        >
+                          💬 Inquire About Course
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1979,6 +2106,7 @@ function App() {
           <CourseAddPeopleModal
             course={managingPeopleCourse}
             currentUser={authUser}
+            userProfile={userProfile}
             onClose={() => setManagingPeopleCourse(null)}
             onMemberAdded={(courseId, delta = 1) => {
               setMyCourses(prev => prev.map(c => c.id === courseId ? { ...c, students: Math.max(0, (Number(c.students) || 0) + delta) } : c));
@@ -2006,6 +2134,7 @@ function App() {
           userProfile={userProfile}
           teachingCourses={privileges.isStaff ? visibleMyCourses : []}
           enrolledCourses={enrolledCourses}
+          networkCourses={networkCourses}
           ref={messageDockRef}
           onBalanceChanged={() => authUser?.uid && getUserTokenBalance(authUser.uid).then(bal => setUserTokenBalance(bal || 0))}
         />
@@ -2132,11 +2261,11 @@ function App() {
           </p>
         </div>
 
-        <div className="cards-grid">
+        <div className="cards-grid front-cards-grid">
           {cards.map((card, index) => (
             <div 
               key={index} 
-              className={`glass card animate-fade-in-up delay-${index + 1}`}
+              className={`glass card front-card animate-fade-in-up delay-${index + 1}`}
             >
               <div className="card-icon">{card.icon}</div>
               <h3>{card.title}</h3>

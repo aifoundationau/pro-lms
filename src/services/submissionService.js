@@ -35,23 +35,67 @@ export function validateSubmission({ text = '', linkUrl = '' }) {
   return { text: answer, linkUrl: link };
 }
 
+/** Validates a draft submission before saving (allows partial answers). */
+export function validateDraftSubmission({ text = '', linkUrl = '' }) {
+  const answer = String(text || '').trim();
+  const link = String(linkUrl || '').trim();
+  if (!answer && !link) throw submissionError('Type some notes or add a link to save a draft.', 'EMPTY_DRAFT');
+  if (answer.length > MAX_SUBMISSION_CHARS) throw submissionError(`Answers can be up to ${MAX_SUBMISSION_CHARS.toLocaleString()} characters.`, 'TOO_LONG');
+  if (link && !isHttpUrl(link)) throw submissionError('Links must start with https:// (e.g. a Google Drive or Docs share link).', 'INVALID_LINK');
+  return { text: answer, linkUrl: link };
+}
+
 function toSubmission(snapshot) {
   const data = snapshot.data() || {};
   return {
     id: snapshot.id,
     ...data,
     submittedAtMs: data.submittedAt?.toMillis?.() || Date.parse(data.submittedAtIso || '') || 0,
+    draftSavedAtMs: data.draftSavedAt?.toMillis?.() || Date.parse(data.draftSavedAtIso || '') || 0,
     gradedAtMs: data.gradedAt?.toMillis?.() || Date.parse(data.gradedAtIso || '') || 0
   };
 }
 
+/** LocalStorage helpers for reliable draft retention across sessions / offline */
+function localDraftKey(courseId, assessmentId, uid) {
+  return `ozedu_draft_${String(courseId)}__${String(assessmentId)}__${String(uid)}`;
+}
+
+export function saveLocalDraft(courseId, assessmentId, uid, draftData) {
+  try {
+    if (typeof localStorage !== 'undefined' && courseId && assessmentId && uid) {
+      localStorage.setItem(localDraftKey(courseId, assessmentId, uid), JSON.stringify({ ...draftData, localSavedAt: Date.now() }));
+    }
+  } catch {}
+}
+
+export function getLocalDraft(courseId, assessmentId, uid) {
+  try {
+    if (typeof localStorage !== 'undefined' && courseId && assessmentId && uid) {
+      const raw = localStorage.getItem(localDraftKey(courseId, assessmentId, uid));
+      return raw ? JSON.parse(raw) : null;
+    }
+  } catch {}
+  return null;
+}
+
+export function clearLocalDraft(courseId, assessmentId, uid) {
+  try {
+    if (typeof localStorage !== 'undefined' && courseId && assessmentId && uid) {
+      localStorage.removeItem(localDraftKey(courseId, assessmentId, uid));
+    }
+  } catch {}
+}
+
 /**
  * Submission document fields (pure; the caller adds server timestamps and the attempt counter).
- * Shared by submitAssessment and the security-rules tests.
+ * Shared by submitAssessment, saveDraftAssessment and the security-rules tests.
  */
-export function buildSubmissionPayload({ course, assessment, unit, user, text, linkUrl, nowIso = new Date().toISOString() }) {
-  const clean = validateSubmission({ text, linkUrl });
-  return {
+export function buildSubmissionPayload({ course, assessment, unit, user, text, linkUrl, isDraft = false, nowIso = new Date().toISOString() }) {
+  const clean = isDraft
+    ? validateDraftSubmission({ text, linkUrl })
+    : validateSubmission({ text, linkUrl });
+  const payload = {
     courseId: String(course.id),
     courseTitle: String(course.title || '').slice(0, 300),
     teacherUid: String(course.authorId || ''),
@@ -64,18 +108,58 @@ export function buildSubmissionPayload({ course, assessment, unit, user, text, l
     studentName: String(user.displayName || user.email.split('@')[0]).slice(0, 120),
     text: clean.text,
     linkUrl: clean.linkUrl,
-    status: 'submitted',
-    submittedAtIso: nowIso,
+    status: isDraft ? 'draft' : 'submitted',
     tag: 'lms'
   };
+  if (isDraft) {
+    payload.isDraft = true;
+    payload.draftSavedAtIso = nowIso;
+  } else {
+    payload.isDraft = false;
+    payload.submittedAtIso = nowIso;
+  }
+  return payload;
 }
 
-/** Student submits (or resubmits) an assessment. */
+/** Student saves their assessment answer as a draft without officially submitting to teacher. */
+export async function saveDraftAssessment({ course, assessment, unit, user, text, linkUrl }) {
+  if (!user?.uid || !user?.email) throw submissionError('Please sign in to save a draft.', 'NOT_SIGNED_IN');
+  if (!course?.id || !assessment?.id) throw submissionError('This assessment cannot accept drafts.', 'INVALID_ASSESSMENT');
+  const fields = buildSubmissionPayload({ course, assessment, unit, user, text, linkUrl, isDraft: true });
+  const id = submissionDocId(course.id, assessment.id, user.uid);
+
+  // Always save locally first so user never loses work
+  saveLocalDraft(course.id, assessment.id, user.uid, fields);
+
+  if (!db) {
+    return { id, ...fields, draftSavedAtMs: Date.now(), isLocalOnly: true };
+  }
+
+  const ref = doc(db, SUBMISSIONS_COLLECTION, id);
+  const existing = await getDoc(ref).catch(() => null);
+  if (existing?.exists?.() && existing.data()?.status === 'graded') {
+    throw submissionError('This assessment has already been graded and cannot be drafted.', 'ALREADY_GRADED');
+  }
+
+  const payload = { ...fields, draftSavedAt: serverTimestamp() };
+  try {
+    await setDoc(ref, payload, { merge: true });
+  } catch (err) {
+    if (err?.code === 'permission-denied') {
+      throw submissionError('You are not enrolled in this course with your sign-in email, so this draft was not saved in the cloud.', 'NOT_ENROLLED');
+    }
+    // Saved locally, report offline cloud warning gracefully
+    return { id, ...fields, draftSavedAtMs: Date.now(), isLocalOnly: true };
+  }
+  return { id, ...payload, draftSavedAtMs: Date.now() };
+}
+
+/** Student submits (or resubmits) an assessment for marking. */
 export async function submitAssessment({ course, assessment, unit, user, text, linkUrl }) {
   if (!db) throw submissionError('Submissions are unavailable right now (database offline).', 'DB_UNAVAILABLE');
   if (!user?.uid || !user?.email) throw submissionError('Please sign in to submit.', 'NOT_SIGNED_IN');
   if (!course?.id || !assessment?.id) throw submissionError('This assessment cannot accept submissions yet.', 'INVALID_ASSESSMENT');
-  const fields = buildSubmissionPayload({ course, assessment, unit, user, text, linkUrl });
+  const fields = buildSubmissionPayload({ course, assessment, unit, user, text, linkUrl, isDraft: false });
 
   const id = submissionDocId(course.id, assessment.id, user.uid);
   const ref = doc(db, SUBMISSIONS_COLLECTION, id);
@@ -87,6 +171,7 @@ export async function submitAssessment({ course, assessment, unit, user, text, l
   const payload = { ...fields, submittedAt: serverTimestamp(), attempts: increment(1) };
   try {
     await setDoc(ref, payload, { merge: true });
+    clearLocalDraft(course.id, assessment.id, user.uid);
   } catch (err) {
     if (err?.code === 'permission-denied') {
       throw submissionError('You are not enrolled in this course with your sign-in email, so this submission was not accepted.', 'NOT_ENROLLED');
@@ -98,19 +183,20 @@ export async function submitAssessment({ course, assessment, unit, user, text, l
 
 /** The signed-in student's submissions for a course, keyed by assessment id. */
 export async function listMySubmissions(courseId, uid) {
-  if (!db || !courseId || !uid) return {};
-  try {
-    const snap = await getDocs(query(collection(db, SUBMISSIONS_COLLECTION), where('studentUid', '==', uid), where('courseId', '==', String(courseId))));
-    const byAssessment = {};
-    snap.forEach(d => {
-      const s = toSubmission(d);
-      byAssessment[s.assessmentId] = s;
-    });
-    return byAssessment;
-  } catch (err) {
-    console.warn('Could not load your submissions:', err?.code || err);
-    return {};
+  if (!courseId || !uid) return {};
+  const byAssessment = {};
+  if (db) {
+    try {
+      const snap = await getDocs(query(collection(db, SUBMISSIONS_COLLECTION), where('studentUid', '==', uid), where('courseId', '==', String(courseId))));
+      snap.forEach(d => {
+        const s = toSubmission(d);
+        byAssessment[s.assessmentId] = s;
+      });
+    } catch (err) {
+      console.warn('Could not load your submissions:', err?.code || err);
+    }
   }
+  return byAssessment;
 }
 
 /** All submissions for a course (teacher / staff view), newest first. */

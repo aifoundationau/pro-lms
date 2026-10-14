@@ -65,7 +65,16 @@ export function CategoryTag({ category, small = false }) {
  * @param {object[]} teachingCourses courses the user teaches (for "message my students")
  * @param {object[]} enrolledCourses courses the user studies in (for "message my teacher")
  */
-export default function MessageDock({ ref, currentUser, userProfile, teachingCourses = [], enrolledCourses = [], onBalanceChanged }) {
+export default function MessageDock({
+  ref,
+  currentUser,
+  userProfile,
+  teachingCourses = [],
+  enrolledCourses = [],
+  networkCourses = [],
+  registeredTeachers = [],
+  onBalanceChanged
+}) {
   const privileges = resolvePrivileges(userProfile || { email: currentUser?.email });
   const myEmail = normalizeEmail(currentUser?.email);
   const isSuperadmin = privileges.isSuperadmin;
@@ -143,6 +152,8 @@ export default function MessageDock({ ref, currentUser, userProfile, teachingCou
       const list = await loadContacts({
         teachingCourses: privileges.isStaff ? teachingCourses : [],
         enrolledCourses,
+        networkCourses,
+        registeredTeachers,
         listMembers: listCourseMembers,
         selfEmail: myEmail
       });
@@ -167,7 +178,7 @@ export default function MessageDock({ ref, currentUser, userProfile, teachingCou
     ensureContacts();
   };
 
-  // Other panels start a message with dockRef.current.compose({ to, toName, courseId, courseTitle, subject }).
+  // Other panels start a message with dockRef.current.compose({ to, toName, courseId, courseTitle, subject, body }).
   useImperativeHandle(ref, () => ({
     compose(request) {
       const to = normalizeEmail(request?.to);
@@ -175,7 +186,7 @@ export default function MessageDock({ ref, currentUser, userProfile, teachingCou
       setIsOpen(true);
       setView('compose');
       setComposeSubject(request.subject || '');
-      setComposeBody('');
+      setComposeBody(request.body || '');
       setComposeEmail(to);
       setContacts(prev => {
         const list = prev ? prev.slice() : [{ email: SUPERADMIN_INBOX, name: '🛡️ Super Admin', kind: 'superadmin', courses: [] }];
@@ -478,13 +489,13 @@ export default function MessageDock({ ref, currentUser, userProfile, teachingCou
                           {c.name}{c.email !== SUPERADMIN_INBOX ? ` — ${c.email}` : ''}{c.courses?.length ? ` (${c.courses.map(x => x.title).join(', ').slice(0, 60)})` : ''}
                         </option>
                       ))}
-                      {isSuperadmin && <option value="__typed__">✉️ Another registered email…</option>}
+                      <option value="__typed__">✉️ Other registered teacher / email…</option>
                     </select>
-                    {contactsLoading && <small className="md-sub">Loading your students and teachers…</small>}
-                    {!privileges.isStaff && <small className="md-sub">You can message the Super Admin and the teachers of your courses.</small>}
-                    {privileges.isStaff && !isSuperadmin && <small className="md-sub">You can message the Super Admin and students enrolled in your courses.</small>}
+                    {contactsLoading && <small className="md-sub">Loading registered teachers and contacts…</small>}
+                    {!privileges.isStaff && <small className="md-sub">You can message the Super Admin and any registered teacher.</small>}
+                    {privileges.isStaff && !isSuperadmin && <small className="md-sub">You can message the Super Admin, teachers, and students enrolled in your courses.</small>}
                     {composeTo === '__typed__' && (
-                      <input type="email" className="form-input" placeholder="person@example.com" value={composeEmail} onChange={e => setComposeEmail(e.target.value)} aria-label="Recipient email" required />
+                      <input type="email" className="form-input" placeholder="teacher@example.com" value={composeEmail} onChange={e => setComposeEmail(e.target.value)} aria-label="Recipient email" required />
                     )}
                     <label className="md-label" htmlFor="md-subject">Subject (optional)</label>
                     <input id="md-subject" className="form-input" maxLength={150} value={composeSubject} onChange={e => setComposeSubject(e.target.value)} />

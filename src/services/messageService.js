@@ -337,6 +337,83 @@ export function postTeacherApplicationMessage({ sender, senderProfile, applicati
   return sendMessage({ sender, senderProfile, to: SUPERADMIN_INBOX, category: 'application', subject, body, meta });
 }
 
+/** Subject and body of the welcome a newly enrolled person receives (pure; exported for tests). */
+export function buildEnrolmentWelcome({ course, memberName = '', memberEmail = '', memberRole = 'student', senderName = '' }) {
+  const title = String(course?.title || 'your new course').slice(0, 200);
+  const greetingName = String(memberName || '').trim().split(/\s+/)[0] || 'there';
+  const who = String(senderName || '').trim() || 'Your teacher';
+  const roleLine = memberRole === 'teacher'
+    ? `You have been added as a co-teacher.`
+    : memberRole === 'guest' ? 'You have been added as a guest.' : '';
+  const lines = [
+    `Hi ${greetingName}, welcome to "${title}"! 🎓`,
+    '',
+    `${who} has enrolled you in this course.${roleLine ? ` ${roleLine}` : ''}`,
+    course?.startDate ? `The course starts on ${course.startDate}.` : '',
+    '',
+    'How to start:',
+    `1. Sign in to OzEdu with Google using ${normalizeEmail(memberEmail) || 'this email address'}.`,
+    '2. Open 🎓 Student Panel to see the course content, assessments and submission boxes.',
+    '3. Questions? Reply to this message in 💬 Messages.',
+    '',
+    'You can also email support@aifoundation.net.au.'
+  ];
+  return {
+    subject: `Welcome to ${title}`.slice(0, MAX_SUBJECT_CHARS),
+    body: lines.join('\n').replace(/\n{3,}/g, '\n\n').slice(0, MAX_MESSAGE_CHARS)
+  };
+}
+
+/**
+ * Teacher / Super Admin -> each newly enrolled person: a welcome message (a few at a time).
+ * Never throws: enrolment has already succeeded, so failures are reported, not raised.
+ * @returns {Promise<{ sent: string[], failed: string[] }>}
+ */
+export async function sendEnrolmentWelcomes({ sender, senderProfile, course, members, concurrency = 4 }) {
+  const senderEmail = normalizeEmail(sender?.email);
+  const seen = new Set();
+  const queue = [];
+  for (const m of Array.isArray(members) ? members : []) {
+    const email = normalizeEmail(m?.email);
+    if (!isValidEmail(email) || email === senderEmail || seen.has(email)) continue;
+    seen.add(email);
+    queue.push({ email, name: m?.name || '', role: m?.role || 'student' });
+  }
+  const sent = [];
+  const failed = [];
+  const worker = async () => {
+    while (queue.length) {
+      const member = queue.shift();
+      try {
+        const { subject, body } = buildEnrolmentWelcome({
+          course,
+          memberName: member.name,
+          memberEmail: member.email,
+          memberRole: member.role,
+          senderName: sender?.displayName || senderEmail
+        });
+        await sendMessage({
+          sender,
+          senderProfile,
+          to: member.email,
+          toName: member.name,
+          subject,
+          body,
+          courseId: course?.id || '',
+          courseTitle: course?.title || '',
+          meta: { enrolmentWelcome: true }
+        });
+        sent.push(member.email);
+      } catch (err) {
+        console.warn('Enrolment welcome not sent:', member.email, err?.code || err);
+        failed.push(member.email);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), queue.length) }, worker));
+  return { sent, failed };
+}
+
 /** Super Admin -> recipient: token grant notice. */
 export function notifyTokenGrant({ sender, senderProfile, recipientEmail, recipientName, amount, newBalance, note = '' }) {
   return sendMessage({
@@ -361,19 +438,76 @@ export function notifyTokenGrant({ sender, senderProfile, recipientEmail, recipi
  * @param {Array} args.enrolledCourses courses the user is enrolled in (with authorEmail/authorName)
  * @param {(courseId: string) => Promise<Array>} args.listMembers roster loader
  */
-export async function loadContacts({ teachingCourses = [], enrolledCourses = [], listMembers, selfEmail = '' }) {
+export async function loadContacts({
+  teachingCourses = [],
+  enrolledCourses = [],
+  networkCourses = [],
+  registeredTeachers = [],
+  listMembers,
+  selfEmail = ''
+}) {
   const me = normalizeEmail(selfEmail);
   const contacts = new Map();
   contacts.set(SUPERADMIN_INBOX, { email: SUPERADMIN_INBOX, name: '🛡️ Super Admin', kind: 'superadmin', courses: [] });
 
-  for (const course of enrolledCourses) {
-    const email = normalizeEmail(course.authorEmail);
+  // Any explicit registered teachers passed in
+  for (const teacher of registeredTeachers || []) {
+    const email = normalizeEmail(teacher.email);
     if (!email || email === me || !isValidEmail(email)) continue;
-    const entry = contacts.get(email) || { email, name: course.authorName || email, kind: 'teacher', courses: [] };
-    entry.courses.push({ id: String(course.id), title: course.title || 'Course' });
+    const entry = contacts.get(email) || { email, name: teacher.name || teacher.displayName || email, kind: 'teacher', courses: [] };
+    if (Array.isArray(teacher.courses)) {
+      for (const c of teacher.courses) {
+        if (c && !entry.courses.some(x => x.id === String(c.id))) entry.courses.push({ id: String(c.id), title: c.title || 'Course' });
+      }
+    }
     contacts.set(email, entry);
   }
 
+  // Registered teachers who have published global network courses
+  for (const course of networkCourses || []) {
+    const email = normalizeEmail(course.authorEmail);
+    if (!email || email === me || !isValidEmail(email)) continue;
+    const entry = contacts.get(email) || { email, name: course.authorName || email, kind: 'teacher', courses: [] };
+    if (course.id && !entry.courses.some(x => x.id === String(course.id))) {
+      entry.courses.push({ id: String(course.id), title: course.title || 'Course' });
+    }
+    contacts.set(email, entry);
+  }
+
+  // Teachers of courses this student is enrolled in
+  for (const course of enrolledCourses || []) {
+    const email = normalizeEmail(course.authorEmail);
+    if (!email || email === me || !isValidEmail(email)) continue;
+    const entry = contacts.get(email) || { email, name: course.authorName || email, kind: 'teacher', courses: [] };
+    if (course.id && !entry.courses.some(x => x.id === String(course.id))) {
+      entry.courses.push({ id: String(course.id), title: course.title || 'Course' });
+    }
+    contacts.set(email, entry);
+  }
+
+  // Query registered teachers directly from Firestore if online and accessible
+  if (db) {
+    try {
+      const q = query(collection(db, 'users'), where('role', 'in', ['teacher', 'Teacher', 'TEACHER']), limit(50));
+      const snap = await getDocs(q);
+      for (const d of snap.docs) {
+        const u = d.data();
+        const email = normalizeEmail(u.email);
+        if (!email || email === me || !isValidEmail(email)) continue;
+        const entry = contacts.get(email) || {
+          email,
+          name: u.displayName || u.name || email,
+          kind: 'teacher',
+          courses: []
+        };
+        contacts.set(email, entry);
+      }
+    } catch {
+      // Offline fallback: rely on networkCourses and enrolledCourses
+    }
+  }
+
+  // For teaching staff: students enrolled in their courses
   if (typeof listMembers === 'function') {
     const courses = teachingCourses.filter(c => c && c.id).slice(0, 40);
     const rosters = await Promise.all(courses.map(c => listMembers(c.id).then(list => ({ c, list })).catch(() => ({ c, list: [] }))));

@@ -32,10 +32,12 @@ import {
   collection,
   getDocs,
   query,
-  increment
+  increment,
+  onSnapshot
 } from 'firebase/firestore';
 import { auth, db, getOrInitAuth } from '../firebase.js';
 import { ALLOWED_ROLES, resolvePrivileges, isOwnerEmail } from './rolePrivileges.js';
+import { listMyEnrolments } from './courseEnrollmentService.js';
 import { readEnv } from './env.js';
 
 export { ALLOWED_ROLES, resolvePrivileges };
@@ -78,7 +80,10 @@ export async function syncUserToFirestore(user) {
       // Newly registered user: assign default classification and role "supporter"
       // If user is the Firebase project owner/admin (support@aifoundation.net.au), automatically grant superadmin
       const isFirebaseOwner = isOwnerEmail(user.email);
-      const initialRole = isFirebaseOwner ? 'superadmin' : 'supporter';
+      // Check if user was already enrolled in any course prior to registering
+      const priorEnrolments = user.email ? await listMyEnrolments(user.email).catch(() => []) : [];
+      const hasPriorEnrolments = priorEnrolments.length > 0;
+      const initialRole = isFirebaseOwner ? 'superadmin' : (hasPriorEnrolments ? 'student' : 'supporter');
       const newProfile = {
         uid: user.uid,
         email: user.email || '',
@@ -97,19 +102,35 @@ export async function syncUserToFirestore(user) {
       await setDoc(userRef, newProfile);
       return newProfile;
     } else {
-      // Existing user: increment login_count and update last_login_at without overwriting role
+      // Existing user: increment login_count and update last_login_at without overwriting role unless supporter with enrolments
       const existing = snap.data();
+      const isSupporter = String(existing.role || '').toLowerCase() === 'supporter';
+      let promotedRole = null;
+      if (isSupporter && user.email) {
+        const enrolments = await listMyEnrolments(user.email).catch(() => []);
+        if (enrolments.length > 0) {
+          promotedRole = 'student';
+        }
+      }
       const updates = {
         displayName: user.displayName || existing.displayName || '',
         photoURL: user.photoURL || existing.photoURL || '',
         last_login_at: nowIso,
         login_count: increment(1),
-        tag: 'lms'
+        tag: 'lms',
+        ...(promotedRole ? {
+          role: 'student',
+          classification: 'student',
+          role_updated_at: nowIso,
+          role_updated_by: 'system_enrolment'
+        } : {})
       };
       await updateDoc(userRef, updates);
       return {
         ...existing,
         ...updates,
+        role: promotedRole || existing.role || 'supporter',
+        classification: promotedRole || existing.classification || 'supporter',
         login_count: (Number(existing.login_count) || 1) + 1,
         last_login_at: nowIso
       };
@@ -343,7 +364,33 @@ export async function logoutUser() {
 }
 
 /**
- * Subscribes to auth state changes and syncs Firestore profile
+ * Upgrades a user from 'supporter' role to 'student' in Firestore.
+ */
+export async function updateUserToStudentRole(uid) {
+  if (!db || !uid) return false;
+  try {
+    const userRef = doc(db, 'users', uid);
+    const snap = await getDoc(userRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      if (String(data.role || '').toLowerCase() === 'supporter') {
+        await updateDoc(userRef, {
+          role: 'student',
+          classification: 'student',
+          role_updated_at: new Date().toISOString(),
+          role_updated_by: 'system_enrolment'
+        });
+        return true;
+      }
+    }
+  } catch (err) {
+    console.warn('Error upgrading supporter to student in Firestore:', err?.code || err);
+  }
+  return false;
+}
+
+/**
+ * Subscribes to auth state changes and syncs Firestore profile in real time
  */
 export function subscribeToAuth(onAuthChanged) {
   const activeAuth = auth || getOrInitAuth();
@@ -352,7 +399,14 @@ export function subscribeToAuth(onAuthChanged) {
     return () => {};
   }
 
-  return onAuthStateChanged(activeAuth, async (firebaseUser) => {
+  let userDocUnsubscribe = null;
+
+  const authUnsubscribe = onAuthStateChanged(activeAuth, async (firebaseUser) => {
+    if (userDocUnsubscribe) {
+      userDocUnsubscribe();
+      userDocUnsubscribe = null;
+    }
+
     if (firebaseUser) {
       try {
         let profile = await fetchUserProfile(firebaseUser.uid);
@@ -360,6 +414,22 @@ export function subscribeToAuth(onAuthChanged) {
           profile = await syncUserToFirestore(firebaseUser);
         }
         onAuthChanged(firebaseUser, profile);
+
+        // Real-time listener on user profile doc: role updates by teacher or admin appear instantly
+        if (db) {
+          try {
+            userDocUnsubscribe = onSnapshot(doc(db, 'users', firebaseUser.uid), (docSnap) => {
+              if (docSnap.exists()) {
+                const updatedProfile = docSnap.data();
+                onAuthChanged(firebaseUser, updatedProfile);
+              }
+            }, (err) => {
+              console.warn('Real-time user profile listener note:', err?.code || err);
+            });
+          } catch (snapErr) {
+            console.warn('Could not attach profile snapshot:', snapErr);
+          }
+        }
       } catch (err) {
         console.error('Auth state profile fetch failed:', err);
         onAuthChanged(firebaseUser, {
@@ -374,4 +444,15 @@ export function subscribeToAuth(onAuthChanged) {
       onAuthChanged(null, null);
     }
   });
+
+  return () => {
+    if (userDocUnsubscribe) {
+      try {
+        userDocUnsubscribe();
+      } catch {
+        // detached
+      }
+    }
+    authUnsubscribe();
+  };
 }

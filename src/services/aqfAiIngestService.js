@@ -16,9 +16,10 @@ import {
   createUrlPolicy,
   sanitizeAiUnit,
   sanitizeAiCourseFields,
+  sanitizeAiAssessments,
   normalizeRubricWeights
 } from './aiCourseShared.js';
-import { extractUrls } from './courseSpreadsheetSchema.js';
+import { extractUrls, normalizeKey } from './courseSpreadsheetSchema.js';
 import { finalizeCourseDraft } from './courseSpreadsheetImport.js';
 
 export { buildStandardsGuidance };
@@ -48,6 +49,8 @@ Source Material to Ingest:
 """
 ${syllabusText.slice(0, 15000)}
 """
+
+Structure: units hold lessons and content blocks only. The course has ONE "assessments" list (nominalWeight = % of the course grade, all tasks add up to 100; "unitCode" = the unit a task mainly assesses, or "" for the whole course). End each unit's last lesson with one "quiz" block of 4-6 questions ("multiple_choice" with "options" and zero-based "correct" indexes, "true_false" with "correctAnswer", "short_answer" with "acceptedAnswers", and one "open" question with a "modelAnswer").
 
 Links: never invent URLs. Only use URLs that appear in the source material. Create "youtube_video" (YouTube Video), "google_drive_link" (Google Drive Resource) or "notebook_link" (Gemini Notebook) blocks only for such URLs, one block per link (a lesson may have several of each); otherwise suggest videos or resources inside the teacher_guide text.
 
@@ -85,13 +88,27 @@ The JSON MUST follow this exact structure:
               "type": "teacher_guide",
               "title": "Educator Facilitation & Pedagogy Tips",
               "content": "Pedagogical guidance, recommended discussion prompts, suggested video search terms, and classroom safety notices..."
+            },
+            {
+              "type": "quiz",
+              "title": "Unit quiz",
+              "content": "Answer every question.",
+              "questions": [
+                { "type": "multiple_choice", "prompt": "Question text", "options": ["Option A", "Option B", "Option C"], "correct": [1], "points": 1 },
+                { "type": "true_false", "prompt": "Statement", "correctAnswer": true, "points": 1 },
+                { "type": "short_answer", "prompt": "Question", "acceptedAnswers": ["Expected answer"], "points": 1 },
+                { "type": "open", "prompt": "Question", "modelAnswer": "What a good answer includes", "points": 5 }
+              ]
             }
           ]
         }
-      ],
-      "assessments": [
+      ]
+    }
+  ],
+  "assessments": [
         {
           "title": "Formative Knowledge Check",
+          "unitCode": "UNIT401",
           "type": "formative",
           "description": "Short scenario-based task assessing immediate comprehension of unit principles.",
           "dueDate": "",
@@ -121,14 +138,13 @@ The JSON MUST follow this exact structure:
         },
         {
           "title": "Summative Capstone Workplace Project",
+          "unitCode": "",
           "type": "summative",
           "description": "Comprehensive practical demonstration of competence satisfying all performance criteria.",
           "dueDate": "",
           "nominalWeight": 80,
           "rubric": []
         }
-      ]
-    }
   ]
 }`;
 }
@@ -171,19 +187,29 @@ function generateFallbackAqfCourse(syllabusText, targetAqfLevel) {
                 type: 'teacher_guide',
                 title: 'Instructor Pedagogy & Timing Recommendations',
                 content: 'Dedicate the first 15 minutes to class discussion. Scaffold technical terminology using real-world case studies.'
+              },
+              {
+                type: 'quiz',
+                title: 'Unit quiz',
+                content: 'Answer every question. Your teacher releases the results.',
+                questions: [
+                  { type: 'true_false', prompt: 'This unit introduces the foundational principles of the course.', correctAnswer: true, points: 1 },
+                  { type: 'open', prompt: 'Explain one principle from this lesson and how you would apply it at work.', modelAnswer: 'Names a principle from the lesson, explains it accurately and gives a realistic workplace application.', points: 5 }
+                ]
               }
             ]
           }
-        ],
-        assessments: [
-          {
-            title: 'Assessment Task 1: Practical Demonstration & Portfolio',
-            type: 'summative',
-            description: 'Learners apply core principles in a realistic simulation and submit evidence of competency.',
-            nominalWeight: 100,
-            rubric: createDefaultRubric()
-          }
         ]
+      }
+    ],
+    assessments: [
+      {
+        title: 'Assessment Task 1: Practical Demonstration & Portfolio',
+        unitCode: '',
+        type: 'summative',
+        description: 'Learners apply core principles in a realistic simulation and submit evidence of competency.',
+        nominalWeight: 100,
+        rubric: createDefaultRubric()
       }
     ]
   };
@@ -251,10 +277,18 @@ export async function ingestCourseSyllabusWithAI({
   // 3. Validate & normalise into the full Course schema with unique IDs (links: only those in the syllabus)
   const isUrlAllowed = createUrlPolicy(extractUrls(syllabusText));
   const fields = sanitizeAiCourseFields(generatedData, { isUrlAllowed });
-  const units = generatedData.units.slice(0, 30)
-    .map(u => sanitizeAiUnit(u, { isUrlAllowed }))
-    .filter(Boolean)
-    .map(u => ({ ...u, assessments: u.assessments.map(a => ({ ...a, rubric: normalizeRubricWeights(a.rubric) })) }));
+  const rawUnits = generatedData.units.slice(0, 30);
+  const units = rawUnits.map(u => sanitizeAiUnit(u, { isUrlAllowed })).filter(Boolean);
+  // One course-level Assessments & Rubrics list (tasks Gemini still put inside units are lifted up).
+  const unitIndexByCode = new Map(units.map((u, i) => [normalizeKey(u.unitCode), i]).filter(([key]) => key));
+  const assessments = [
+    ...sanitizeAiAssessments(generatedData.assessments, { isUrlAllowed }),
+    ...rawUnits.flatMap(u => sanitizeAiAssessments(u?.assessments, { isUrlAllowed }).map(a => ({ ...a, unitCode: a.unitCode || u?.unitCode || '' })))
+  ].map(({ unitCode, ...task }) => ({
+    ...task,
+    unitIndex: unitIndexByCode.get(normalizeKey(unitCode)) ?? -1,
+    rubric: normalizeRubricWeights(task.rubric)
+  }));
   const targetLevel = Number(targetAqfLevel);
   const level = Number.isInteger(targetLevel) && targetLevel >= 0 && targetLevel <= 9 ? targetLevel : (fields.aqfLevel ?? 0);
 
@@ -268,7 +302,8 @@ export async function ingestCourseSyllabusWithAI({
       aqfEquivalenceNotes: fields.aqfEquivalenceNotes,
       learningOutcomes: fields.learningOutcomes
     },
-    units
+    units,
+    assessments
   }, {
     id: generateEntityId('course'),
     authorId: currentUser.uid,

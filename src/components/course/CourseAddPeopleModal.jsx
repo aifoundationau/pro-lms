@@ -10,6 +10,7 @@ import {
   MAX_BULK_MEMBERS
 } from '../../services/courseEnrollmentService.js';
 import { listSiteStudents } from '../../services/lmsRepository.js';
+import { sendEnrolmentWelcomes } from '../../services/messageService.js';
 import { readSpreadsheetFiles, SPREADSHEET_FILE_ACCEPT } from '../../services/spreadsheetReader.js';
 import { buildXlsxWorkbook, downloadFile, safeFileStem, XLSX_STYLE } from '../../services/xlsxWriter.js';
 
@@ -32,6 +33,7 @@ function mergeMemberLists(...lists) {
 export default function CourseAddPeopleModal({
   course,
   currentUser,
+  userProfile = null,
   onClose,
   onMemberAdded
 }) {
@@ -84,6 +86,16 @@ export default function CourseAddPeopleModal({
     }
   };
 
+  /** Sends each newly enrolled person a welcome message; returns a sentence for the notice. */
+  const welcomeNewMembers = async (members) => {
+    const list = (members || []).filter(m => m?.email);
+    if (!list.length) return '';
+    const { sent, failed } = await sendEnrolmentWelcomes({ sender: currentUser, senderProfile: userProfile, course, members: list });
+    if (!failed.length) return `📨 Welcome message sent to ${sent.length === 1 ? sent[0] : `${sent.length} people`}.`;
+    if (!sent.length) return '⚠️ The welcome message could not be sent (they can still see the course in their Student Panel).';
+    return `📨 Welcome message sent to ${sent.length}; ${failed.length} could not be sent.`;
+  };
+
   const handleAddMember = async (e) => {
     if (e) e.preventDefault();
     if (!name.trim() && !email.trim()) {
@@ -105,9 +117,12 @@ export default function CourseAddPeopleModal({
         addedByName: currentUser?.displayName || currentUser?.email || 'Teacher'
       });
 
+      const welcome = !result.alreadyEnrolled
+        ? await welcomeNewMembers([{ email: result.member.memberEmail, name: result.member.memberName, role: result.member.memberRole }])
+        : '';
       setNotice({
         type: 'success',
-        message: result.message
+        message: [result.message, welcome].filter(Boolean).join(' ')
       });
       setName('');
       setEmail('');
@@ -143,9 +158,12 @@ export default function CourseAddPeopleModal({
         addedByName: currentUser?.displayName || currentUser?.email || 'Teacher'
       });
 
+      const welcome = !result.alreadyEnrolled
+        ? await welcomeNewMembers([{ email: result.member.memberEmail, name: result.member.memberName, role: 'student' }])
+        : '';
       setNotice({
         type: 'success',
-        message: `Added ${fullName} to ${course.title} at 0 tokens!`
+        message: [result.alreadyEnrolled ? result.message : `Added ${fullName} to ${course.title} at 0 tokens!`, welcome].filter(Boolean).join(' ')
       });
       await loadRoster();
       if (onMemberAdded) onMemberAdded(course.id);
@@ -227,6 +245,8 @@ export default function CourseAddPeopleModal({
       if (result.alreadyEnrolled.length) parts.push(`${result.alreadyEnrolled.length} already enrolled.`);
       if (result.failed.length) parts.push(`${result.failed.length} could not be saved — try again.`);
       if (!result.persisted) parts.push('(Saved on this device only — the database could not be reached.)');
+      const welcome = await welcomeNewMembers(result.addedMembers);
+      if (welcome) parts.push(welcome);
       setNotice({ type: result.failed.length ? 'error' : 'success', message: parts.join(' ') });
       if (result.failed.length === 0) {
         setBulkText('');
@@ -497,7 +517,7 @@ export default function CourseAddPeopleModal({
               </button>
             </div>
             <p style={{ margin: 0, fontSize: '0.78rem', color: '#94a3b8' }}>
-              Students sign in with Google using these emails, and the course appears in their 🎓 My Learning panel.
+              Students sign in with Google using these emails, and the course appears in their 🎓 Student Panel. Each new person also gets a welcome message.
             </p>
           </div>
         )}

@@ -30,9 +30,16 @@ export function isOwnerEmail(email) {
 }
 
 /** Resolves administrative and Super Admin privileges from Firestore role attributes. */
-export function resolvePrivileges(profile) {
+export function resolvePrivileges(profile, enrolledCoursesCount = 0) {
   const isFirebaseAdmin = isOwnerEmail(profile?.email);
-  const rawRole = String(profile?.role || '').trim().toLowerCase();
+  let rawRole = String(profile?.role || '').trim().toLowerCase();
+
+  // If a user has 'supporter' status (or unset) and is enrolled in one or more courses,
+  // they automatically become a student!
+  if ((!rawRole || rawRole === 'supporter') && enrolledCoursesCount > 0) {
+    rawRole = 'student';
+  }
+
   const role = rawRole || (isFirebaseAdmin ? 'superadmin' : 'supporter');
   const isSuperadmin = role === 'superadmin' || isFirebaseAdmin;
   const isAdminStaff = isSuperadmin || role === 'ceo' || role === 'coo' || role === 'admin staff';
@@ -44,7 +51,9 @@ export function resolvePrivileges(profile) {
 
   return {
     role: isSuperadmin ? 'superadmin' : role,
-    classification: profile?.classification ? String(profile.classification).toLowerCase() : (isSuperadmin ? 'superadmin' : 'supporter'),
+    classification: profile?.classification
+      ? String(profile.classification).toLowerCase()
+      : (isSuperadmin ? 'superadmin' : (isStudent ? 'student' : 'supporter')),
     isSuperadmin,
     isAdminStaff,
     isFinancial,
@@ -59,7 +68,9 @@ export function resolvePrivileges(profile) {
     canEditCourse: isStaff,
     canArchiveCourse: isStaff,
     canEnrolStudents: isStaff,
-    canViewAllStudents: isStaff
+    canViewAllStudents: isStaff,
+    canViewDraftCourses: isStudent || isStaff,
+    canViewGlobalCourses: isStaff || isStudent || isSupporter
   };
 }
 

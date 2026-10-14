@@ -21,7 +21,8 @@ import {
   where,
   updateDoc,
   writeBatch,
-  serverTimestamp
+  serverTimestamp,
+  onSnapshot
 } from 'firebase/firestore';
 import { db } from '../firebase.js';
 import { incrementCourseEnrolments } from './lmsRepository.js';
@@ -235,6 +236,39 @@ function cacheMember(record) {
 }
 
 /**
+ * If the enrolled email belongs to a registered user with 'supporter' role,
+ * promotes them to 'student' in Firestore so their role becomes active immediately.
+ */
+export async function promoteEnrolledSupporterToStudent({ email, addedByUid = 'teacher' }) {
+  const cleanEmail = normalizeMemberEmail(email);
+  if (!cleanEmail || !db) return false;
+  try {
+    const q = query(collection(db, 'users'), where('email', '==', cleanEmail));
+    const snap = await getDocs(q);
+    if (!snap.empty) {
+      let promotedAny = false;
+      for (const d of snap.docs) {
+        const udata = d.data() || {};
+        const currentRole = String(udata.role || '').toLowerCase();
+        if (!currentRole || currentRole === 'supporter') {
+          await updateDoc(doc(db, 'users', d.id), {
+            role: 'student',
+            classification: 'student',
+            role_updated_at: new Date().toISOString(),
+            role_updated_by: String(addedByUid || 'teacher')
+          }).catch(err => console.warn('Could not update user role to student:', err?.code || err));
+          promotedAny = true;
+        }
+      }
+      return promotedAny;
+    }
+  } catch (err) {
+    console.warn('Supporter to student promotion check note:', err?.code || err);
+  }
+  return false;
+}
+
+/**
  * Teachers can add ANY student, teacher, or person to any course.
  * Token Cost: STRICTLY 0 TOKENS (Free Teacher Grant).
  */
@@ -265,9 +299,21 @@ export async function addMemberToCourseFree({
   // 1. Local cache for instant display
   cacheMember(newMemberRecord);
 
+  // Dispatch local event for same-window / cross-component responsiveness
+  if (typeof window !== 'undefined') {
+    try {
+      window.dispatchEvent(new CustomEvent('ozedu:enrolment-changed', {
+        detail: { email: cleanEmail, courseId }
+      }));
+    } catch {
+      // Non-blocking in non-browser envs
+    }
+  }
+
   // 2. Persist to Firestore if available (idempotent: same email = same document)
   let persisted = false;
   let alreadyEnrolled = false;
+  let promotedFromSupporter = false;
   if (db) {
     try {
       const memberRef = doc(db, COURSE_MEMBERS_COLLECTION, newMemberRecord.id);
@@ -279,6 +325,7 @@ export async function addMemberToCourseFree({
         await incrementCourseEnrolments([courseId], 1).catch(err => {
           console.warn('Enrolment counter increment note:', err);
         });
+        promotedFromSupporter = await promoteEnrolledSupporterToStudent({ email: cleanEmail, addedByUid }).catch(() => false);
       }
     } catch (dbErr) {
       console.warn('Firestore member persistence warning (cached locally):', dbErr);
@@ -290,10 +337,11 @@ export async function addMemberToCourseFree({
     member: newMemberRecord,
     persisted,
     alreadyEnrolled,
+    promotedFromSupporter,
     tokenCost: 0,
     message: alreadyEnrolled
       ? `${newMemberRecord.memberName} is already enrolled in "${courseTitle}".`
-      : `🎉 Successfully enrolled ${newMemberRecord.memberName} (${newMemberRecord.memberRole}) into "${courseTitle}" at 0 tokens (Teacher Grant Privilege)!`
+      : `🎉 Successfully enrolled ${newMemberRecord.memberName} (${newMemberRecord.memberRole}) into "${courseTitle}" at 0 tokens (Teacher Grant Privilege)!${promotedFromSupporter ? ' Status upgraded from Supporter to Student.' : ''}`
   };
 }
 
@@ -332,6 +380,16 @@ export async function bulkEnrolMembers({ course, members, memberRole = 'student'
 
   records.forEach(cacheMember);
 
+  if (typeof window !== 'undefined') {
+    try {
+      window.dispatchEvent(new CustomEvent('ozedu:enrolment-changed', {
+        detail: { courseId: course.id }
+      }));
+    } catch {
+      // Non-blocking
+    }
+  }
+
   let persisted = false;
   const failed = [];
   if (db && records.length) {
@@ -354,9 +412,15 @@ export async function bulkEnrolMembers({ course, members, memberRole = 'student'
     if (written > 0) {
       await incrementCourseEnrolments([course.id], written).catch(err => console.warn('Enrolment counter note:', err));
     }
+    // Promote any supporter accounts to students
+    Promise.allSettled(records.map(r => promoteEnrolledSupporterToStudent({ email: r.memberEmail, addedByUid }))).catch(() => {});
   }
 
-  return { added: records.length - failed.length, alreadyEnrolled, failed, persisted };
+  const failedSet = new Set(failed);
+  const addedMembers = (persisted || !db)
+    ? records.filter(r => !failedSet.has(r.memberEmail)).map(r => ({ email: r.memberEmail, name: r.memberName, role: r.memberRole }))
+    : [];
+  return { added: records.length - failed.length, addedMembers, alreadyEnrolled, failed, persisted };
 }
 
 /**
@@ -410,6 +474,80 @@ export async function listMyEnrolments(email) {
     console.warn('Could not load enrolments:', err?.code || err);
     return fromCache;
   }
+}
+
+/**
+ * Real-time listener for courses the signed-in person is enrolled in.
+ * Emits immediately from local cache, listens to window events, and attaches Firestore onSnapshot.
+ * @returns {() => void} unsubscribe function
+ */
+export function subscribeToMyEnrolments(email, onEnrolments, onError) {
+  const me = normalizeMemberEmail(email);
+  if (!me) {
+    onEnrolments([]);
+    return () => {};
+  }
+
+  const emitFromCache = () => {
+    const fromCache = readCache().filter(m => m.memberEmail === me && m.status !== 'removed');
+    const byCourse = new Map();
+    for (const m of fromCache) byCourse.set(String(m.courseId), m);
+    onEnrolments(Array.from(byCourse.values()));
+  };
+
+  // Immediate cached emit
+  emitFromCache();
+
+  // Local window listeners for cross-component and tab updates
+  const handleLocalChange = () => emitFromCache();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('ozedu:enrolment-changed', handleLocalChange);
+    window.addEventListener('storage', handleLocalChange);
+  }
+
+  if (!db) {
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('ozedu:enrolment-changed', handleLocalChange);
+        window.removeEventListener('storage', handleLocalChange);
+      }
+    };
+  }
+
+  let unsubscribeFirestore = () => {};
+  try {
+    const q = query(collection(db, COURSE_MEMBERS_COLLECTION), where('memberEmail', '==', me));
+    unsubscribeFirestore = onSnapshot(
+      q,
+      snap => {
+        const dbList = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(m => m.status !== 'removed');
+        const byCourse = new Map();
+        // Merge with cache: DB wins
+        const localList = readCache().filter(m => m.memberEmail === me && m.status !== 'removed');
+        for (const m of localList) byCourse.set(String(m.courseId), m);
+        for (const m of dbList) byCourse.set(String(m.courseId), m);
+        onEnrolments(Array.from(byCourse.values()));
+      },
+      err => {
+        console.warn('Real-time enrolment listener note:', err?.code || err);
+        onError?.(err);
+      }
+    );
+  } catch (err) {
+    console.warn('Failed to attach real-time enrolment listener:', err);
+  }
+
+  return () => {
+    try {
+      unsubscribeFirestore();
+    } catch {
+      // already detached
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('ozedu:enrolment-changed', handleLocalChange);
+      window.removeEventListener('storage', handleLocalChange);
+    }
+  };
 }
 
 /**

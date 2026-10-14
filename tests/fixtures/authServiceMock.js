@@ -37,6 +37,10 @@ export async function updateUserCharityStatus() {
   throw new Error('Firestore is unavailable.');
 }
 
+export async function updateUserToStudentRole() {
+  return false;
+}
+
 export async function listAllUsers() {
   return [];
 }

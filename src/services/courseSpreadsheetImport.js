@@ -20,8 +20,11 @@ import {
   MAX_RUBRIC_LEVELS,
   LINK_BLOCK_METADATA_KEYS,
   isGoogleNotebookUrl,
-  defaultLevelPoints
+  defaultLevelPoints,
+  createQuizQuestion,
+  QUIZ_LIMITS
 } from '../types/courseBuilderTypes.js';
+import { normalizeQuiz } from './quizModel.js';
 import { sanitizeStandardIds } from './curriculumStandards.js';
 import {
   SPREADSHEET_TEMPLATE_VERSION,
@@ -42,14 +45,20 @@ import {
   parseStandards,
   isHttpUrl,
   extractUrls,
-  splitListCell
+  splitListCell,
+  QUESTION_TYPE_OPTIONS,
+  parseQuestionType,
+  parseOptionsCell,
+  parseTrueFalse,
+  splitAnswerList,
+  parseCorrectOptions
 } from './courseSpreadsheetSchema.js';
 
 export const IMPORT_LIMITS = Object.freeze({
   units: 60,
   lessonsPerUnit: 80,
   blocksPerLesson: 40,
-  assessmentsPerUnit: 30,
+  assessments: 60,
   criteria: 100,
   outcomes: 60,
   text: 20000,
@@ -233,7 +242,6 @@ function newUnitDraft(init = {}) {
     learningOutcomes: [],
     order: null,
     lessons: [],
-    assessments: [],
     _seq: 0,
     ...init
   };
@@ -512,16 +520,6 @@ function lessonAt(unit, ref) {
   }
   const key = normalizeKey(ref);
   return unit.lessons.find(l => key && normalizeKey(l.title) === key) || null;
-}
-
-function assessmentAt(unit, ref) {
-  const number = parseRefNumber(ref);
-  if (number !== null) {
-    const hit = unit.assessments.find(a => a.number === number);
-    if (hit) return hit;
-  }
-  const key = normalizeKey(ref);
-  return unit.assessments.find(a => key && normalizeKey(a.title) === key) || null;
 }
 
 /** Explicit numbers are kept; unnumbered items get the next free number in row order. */
@@ -928,6 +926,11 @@ function processBlocks(state) {
       type = linkTypeForUrl(candidate) || type;
     }
 
+    if (type === 'quiz') {
+      add({ type, title, content: text(rawContent, 5000), fileName: '', quiz: { questions: [] } });
+      continue;
+    }
+
     if (!LINK_BLOCK_METADATA_KEYS[type]) {
       // Content Description / Teacher Guide. A Link URL on a text row is kept at the end of the text.
       let content = text(rawContent);
@@ -967,6 +970,65 @@ function processBlocks(state) {
   }
 }
 
+/** An existing unit for a reference (code, title or number); never creates one. */
+function findUnit(state, raw) {
+  const ref = String(raw ?? '').trim();
+  const key = normalizeKey(ref);
+  if (!key) return null;
+  const direct = state.unitByCode.get(key) || state.unitByTitle.get(key);
+  if (direct) return direct;
+  const number = parseRefNumber(ref);
+  return number !== null ? unitAtNumber(state, number) : null;
+}
+
+/**
+ * The (optional) unit an Assessments / Rubrics row refers to. Older layouts start with a Unit Code
+ * that fills down and restart numbering in every unit ("scoped"); the template's Covers Unit column
+ * does not fill down and a blank cell means the whole course.
+ * @returns {{ unit: object|null, scoped: boolean }}
+ */
+function assessmentUnitForRow(state, row) {
+  const { section } = row;
+  const map = section.map;
+  if (!section.warnedUnits) section.warnedUnits = new Set();
+  const warnUnknown = (ref) => {
+    const key = normalizeKey(ref);
+    if (section.warnedUnits.has(key)) return;
+    section.warnedUnits.add(key);
+    state.ctx.warn(row.sheet, row.row, `Unit "${ref}" is not on the Units tab — the assessment covers the whole course.`);
+  };
+  if (map.unitRef !== undefined) {
+    let ref = cellAt(row, map.unitRef);
+    if (ref) {
+      if (normalizeKey(ref) !== normalizeKey(section.last.unitRef)) section.last.assessmentRef = undefined;
+      section.last.unitRef = ref;
+    } else {
+      ref = section.last.unitRef || '';
+    }
+    const unit = ref ? findUnit(state, ref) : null;
+    if (ref && !unit) warnUnknown(ref);
+    return { unit, scoped: true };
+  }
+  if (map.coversUnit !== undefined) {
+    const ref = cellAt(row, map.coversUnit);
+    const unit = ref ? findUnit(state, ref) : null;
+    if (ref && !unit) warnUnknown(ref);
+    return { unit, scoped: false };
+  }
+  return { unit: null, scoped: false };
+}
+
+function findAssessment(list, ref) {
+  const number = parseRefNumber(ref);
+  if (number !== null) {
+    const hit = list.find(a => a.number === number);
+    if (hit) return hit;
+  }
+  const key = normalizeKey(ref);
+  return list.find(a => key && normalizeKey(a.title) === key) || null;
+}
+
+/** Course-level assessments (one Assessments & Rubrics list per course). */
 function processAssessments(state) {
   const { ctx } = state;
   for (const row of state.rows.assessments) {
@@ -982,16 +1044,17 @@ function processAssessments(state) {
     const rubricCell = cellAt(row, map.rubricSummary);
     if (!numberCell && !title && !typeCell && !description && !details && !weightCell && !dueCell && !linkCell && !rubricCell) continue;
 
-    const unit = unitForRow(state, row);
-    if (!unit) continue;
+    const { unit, scoped } = assessmentUnitForRow(state, row);
+    const scope = scoped ? unit : null;
     let number = parseRefNumber(numberCell);
     if (numberCell && number === null && !title) title = text(numberCell, IMPORT_LIMITS.title);
-    if (number !== null && unit.assessments.some(a => a.number === number)) {
-      ctx.warn(row.sheet, row.row, `Assessment ${number} appears twice in unit ${unit.unitCode || unit.unitTitle || ''} — this row was skipped.`);
+    if (number !== null && state.assessments.some(a => a._scope === scope && a.number === number)) {
+      const where = scope ? ` in unit ${scope.unitCode || scope.unitTitle || ''}` : '';
+      ctx.warn(row.sheet, row.row, `Assessment ${number} appears twice${where} — this row was skipped.`);
       continue;
     }
-    if (unit.assessments.length >= IMPORT_LIMITS.assessmentsPerUnit) {
-      ctx.warn(row.sheet, row.row, `Only ${IMPORT_LIMITS.assessmentsPerUnit} assessments per unit are supported.`);
+    if (state.assessments.length >= IMPORT_LIMITS.assessments) {
+      ctx.warn(row.sheet, row.row, `Only ${IMPORT_LIMITS.assessments} assessments per course are supported.`);
       continue;
     }
 
@@ -1039,41 +1102,57 @@ function processAssessments(state) {
       rubric
     });
     assessment._seq = state.seq++;
-    unit.assessments.push(assessment);
+    assessment._scope = scope;
+    assessment._unit = unit;
+    state.assessments.push(assessment);
   }
-  for (const unit of state.units) numberItems(unit.assessments);
+  // Unnumbered tasks take the next free number in their scope; row order is kept.
+  for (const scope of new Set(state.assessments.map(a => a._scope))) {
+    const items = state.assessments.filter(a => a._scope === scope);
+    let next = items.reduce((max, a) => Math.max(max, a.number || 0), 0);
+    for (const a of items) {
+      if (a.number === null) a.number = ++next;
+    }
+  }
 }
 
-function assessmentForRow(state, unit, row) {
+/** The course assessment a Rubrics row belongs to (older layouts match within the row's unit first). */
+function assessmentForRow(state, row) {
   const { section } = row;
+  const { unit, scoped } = assessmentUnitForRow(state, row);
   let ref = section.map.assessmentRef !== undefined ? cellAt(row, section.map.assessmentRef) : '';
   if (ref) section.last.assessmentRef = ref;
   else if (section.last.assessmentRef) ref = section.last.assessmentRef;
+  const inScope = scoped ? state.assessments.filter(a => a._scope === unit) : [];
 
   if (!ref) {
-    if (unit.assessments.length === 0) {
+    if (state.assessments.length === 0) {
       const assessment = newAssessmentDraft({ number: 1 });
       assessment._seq = state.seq++;
-      unit.assessments.push(assessment);
+      assessment._scope = scoped ? unit : null;
+      assessment._unit = unit;
+      state.assessments.push(assessment);
       return assessment;
     }
-    if (unit.assessments.length > 1 && !section.warnedNoAssessment) {
+    if (state.assessments.length > 1 && !section.warnedNoAssessment) {
       section.warnedNoAssessment = true;
-      state.ctx.warn(row.sheet, row.row, 'No Assessment # given — criteria were added to the first assessment of the unit.');
+      state.ctx.warn(row.sheet, row.row, 'No Assessment # given — criteria were added to the first assessment.');
     }
-    return unit.assessments[0];
+    return inScope[0] || state.assessments[0];
   }
 
-  const existing = assessmentAt(unit, ref);
+  const existing = findAssessment(inScope, ref) || findAssessment(state.assessments, ref);
   if (existing) return existing;
-  if (unit.assessments.length >= IMPORT_LIMITS.assessmentsPerUnit) return null;
+  if (state.assessments.length >= IMPORT_LIMITS.assessments) return null;
   const number = parseRefNumber(ref);
+  const scope = scoped ? unit : null;
   const assessment = newAssessmentDraft(number !== null
     ? { number }
-    : { title: text(ref, IMPORT_LIMITS.title), number: unit.assessments.reduce((m, a) => Math.max(m, a.number || 0), 0) + 1 });
+    : { title: text(ref, IMPORT_LIMITS.title), number: state.assessments.filter(a => a._scope === scope).reduce((m, a) => Math.max(m, a.number || 0), 0) + 1 });
   assessment._seq = state.seq++;
-  unit.assessments.push(assessment);
-  unit.assessments.sort((a, b) => a.number - b.number || a._seq - b._seq);
+  assessment._scope = scope;
+  assessment._unit = unit;
+  state.assessments.push(assessment);
   state.ctx.warn(row.sheet, row.row, `Assessment "${ref}" is not on the Assessments tab — it was added.`);
   return assessment;
 }
@@ -1083,9 +1162,7 @@ function processRubrics(state) {
   const groups = [];
   let current = null;
   for (const row of state.rows.rubrics) {
-    const unit = unitForRow(state, row);
-    if (!unit) continue;
-    const assessment = assessmentForRow(state, unit, row);
+    const assessment = assessmentForRow(state, row);
     if (!assessment) continue;
     if (!current || current.assessment !== assessment || current.section !== row.section) {
       current = { assessment, section: row.section, rows: [] };
@@ -1109,6 +1186,126 @@ function processRubrics(state) {
   }
 }
 
+/** Assessments in course order: older per-unit layouts by unit, then by number; otherwise by number. */
+function orderedAssessments(state) {
+  const unitOrder = new Map(state.units.map((u, i) => [u, i]));
+  return state.assessments.slice().sort((a, b) =>
+    (unitOrder.get(a._scope) ?? -1) - (unitOrder.get(b._scope) ?? -1) || a.number - b.number || a._seq - b._seq);
+}
+
+// ---------- quiz questions (Quiz Questions tab) ----------
+
+function newQuizBlockDraft(state, title) {
+  return { type: 'quiz', title: text(title, IMPORT_LIMITS.title), content: '', fileName: '', order: null, quiz: { questions: [] }, _seq: state.seq++ };
+}
+
+/** The quiz a question row belongs to: by title (or "Quiz 2" = the 2nd quiz), else a new one at the end. */
+function quizForRow(state, lesson, row) {
+  const { section } = row;
+  let ref = section.map.quizTitle !== undefined ? cellAt(row, section.map.quizTitle) : '';
+  if (ref) section.last.quiz = { lesson, ref };
+  else if (section.last.quiz?.lesson === lesson) ref = section.last.quiz.ref;
+  const quizzes = lesson.blocks.filter(b => b.type === 'quiz');
+  if (!ref && quizzes.length) return quizzes[0];
+  const key = normalizeKey(ref);
+  let hit = key ? quizzes.find(b => normalizeKey(b.title) === key) : null;
+  const ordinal = /^quiz\s*#?\s*(\d{1,2})$/i.exec(String(ref).trim());
+  if (!hit && ordinal) hit = quizzes[Number(ordinal[1]) - 1] || null;
+  if (hit) return hit;
+  if (lesson.blocks.length >= IMPORT_LIMITS.blocksPerLesson) {
+    state.ctx.warn(row.sheet, row.row, `Only ${IMPORT_LIMITS.blocksPerLesson} blocks per lesson are supported — this quiz was not added.`);
+    return null;
+  }
+  const block = newQuizBlockDraft(state, ref || 'Quiz');
+  lesson.blocks.push(block);
+  return block;
+}
+
+function buildImportedQuestion(state, row, cells) {
+  const { ctx } = state;
+  const where = [row.sheet, row.row];
+  const options = parseOptionsCell(cells.options).slice(0, QUIZ_LIMITS.options);
+  const inferred = options.length ? 'multiple_choice'
+    : parseTrueFalse(cells.correct) !== null ? 'true_false'
+      : cells.correct ? 'short_answer' : 'open';
+  let type = inferred;
+  if (cells.type) {
+    const parsed = parseQuestionType(cells.type);
+    if (parsed.recognized) type = parsed.type;
+    else ctx.warn(...where, `Question Type "${cells.type.slice(0, 40)}" was not recognised — used ${QUESTION_TYPE_OPTIONS.find(o => o.type === inferred).label}.`);
+  }
+  const question = createQuizQuestion(type);
+  question.prompt = text(cells.prompt, QUIZ_LIMITS.prompt);
+  if (!question.prompt) ctx.warn(...where, 'This question has no text.');
+  if (cells.points) {
+    const points = Number(String(cells.points).replace(',', '.').replace(/[^\d.]/g, ''));
+    if (Number.isFinite(points) && points >= 0 && points <= QUIZ_LIMITS.points && /\d/.test(cells.points)) question.points = points;
+    else ctx.warn(...where, `Points "${cells.points}" should be a number from 0 to ${QUIZ_LIMITS.points}.`);
+  }
+
+  if (type === 'multiple_choice') {
+    if (options.length < 2) ctx.warn(...where, 'Multiple choice questions need at least 2 options (one per line).');
+    question.options = (options.length ? options : ['', '']).map(optionText => ({ id: generateEntityId('opt'), text: text(optionText, QUIZ_LIMITS.option) }));
+    const { indexes, unmatched } = parseCorrectOptions(cells.correct, options);
+    if (unmatched.length) ctx.warn(...where, `Correct Answer "${unmatched.join(', ').slice(0, 60)}" does not match an option — use the letter (A, B, C …).`);
+    question.correctOptionIds = indexes.map(i => question.options[i].id);
+    question.allowMultiple = indexes.length > 1;
+    if (!indexes.length && !unmatched.length) ctx.warn(...where, 'No Correct Answer — this question will be marked by the teacher.');
+  } else if (type === 'true_false') {
+    const value = parseTrueFalse(cells.correct);
+    if (value === null) {
+      delete question.correctAnswer;
+      ctx.warn(...where, cells.correct
+        ? `Correct Answer "${cells.correct.slice(0, 30)}" should be True or False — this question will be marked by the teacher.`
+        : 'No Correct Answer — this question will be marked by the teacher.');
+    } else {
+      question.correctAnswer = value;
+    }
+  } else if (type === 'short_answer') {
+    question.acceptedAnswers = splitAnswerList(cells.correct).map(a => text(a, QUIZ_LIMITS.option)).slice(0, 20);
+  } else {
+    question.modelAnswer = text(cells.modelAnswer || cells.correct, QUIZ_LIMITS.answer);
+  }
+  return question;
+}
+
+function processQuizzes(state) {
+  const touched = new Set();
+  for (const row of state.rows.quizzes) {
+    const map = row.section.map;
+    const cells = {
+      prompt: cellAt(row, map.prompt),
+      type: cellAt(row, map.qType),
+      options: cellAt(row, map.options),
+      correct: cellAt(row, map.correct),
+      points: cellAt(row, map.points),
+      modelAnswer: cellAt(row, map.modelAnswer)
+    };
+    const hasQuestion = Object.values(cells).some(Boolean);
+    if (!hasQuestion && !cellAt(row, map.quizTitle)) continue;
+
+    const unit = unitForRow(state, row);
+    if (!unit) continue;
+    const lesson = lessonForRow(state, unit, row);
+    if (!lesson) continue;
+    const quizBlock = quizForRow(state, lesson, row);
+    if (!quizBlock || !hasQuestion) continue;
+    if (quizBlock.quiz.questions.length >= QUIZ_LIMITS.questions) {
+      state.ctx.warn(row.sheet, row.row, `Only ${QUIZ_LIMITS.questions} questions per quiz are supported.`);
+      continue;
+    }
+    const question = buildImportedQuestion(state, row, cells);
+    question._order = parseIntegerInRange(cellAt(row, map.questionNo), 0, 100000, 'Question #').value ?? null;
+    question._seq = state.seq++;
+    quizBlock.quiz.questions.push(question);
+    touched.add(quizBlock);
+  }
+  for (const block of touched) {
+    block.quiz.questions.sort((a, b) => (a._order ?? Infinity) - (b._order ?? Infinity) || a._seq - b._seq);
+    block.quiz.questions = block.quiz.questions.map(({ _order, _seq, ...question }) => question);
+  }
+}
+
 function buildUnstructuredText(groups) {
   let out = '';
   for (const group of groups) {
@@ -1124,12 +1321,20 @@ function buildUnstructuredText(groups) {
   return out.trim();
 }
 
-function countStats(course, units) {
+function countStats(course, units, assessments = []) {
   const lessons = units.reduce((n, u) => n + u.lessons.length, 0);
-  const blocks = units.reduce((n, u) => n + u.lessons.reduce((m, l) => m + l.blocks.length, 0), 0);
-  const assessments = units.reduce((n, u) => n + u.assessments.length, 0);
-  const criteria = units.reduce((n, u) => n + u.assessments.reduce((m, a) => m + a.rubric.length, 0), 0);
-  return { outcomes: course.learningOutcomes.length, units: units.length, lessons, blocks, assessments, criteria };
+  const allBlocks = units.flatMap(u => u.lessons.flatMap(l => l.blocks));
+  const quizzes = allBlocks.filter(b => b.type === 'quiz');
+  return {
+    outcomes: course.learningOutcomes.length,
+    units: units.length,
+    lessons,
+    blocks: allBlocks.length,
+    quizzes: quizzes.length,
+    questions: quizzes.reduce((n, b) => n + (b.quiz?.questions?.length || 0), 0),
+    assessments: assessments.length,
+    criteria: assessments.reduce((n, a) => n + a.rubric.length, 0)
+  };
 }
 
 /**
@@ -1144,7 +1349,8 @@ export function parseCourseSpreadsheet(sheets) {
     units: [],
     unitByCode: new Map(),
     unitByTitle: new Map(),
-    rows: { courseRow: [], outcomes: [], units: [], lessons: [], blocks: [], assessments: [], rubrics: [] },
+    rows: { courseRow: [], outcomes: [], units: [], lessons: [], blocks: [], quizzes: [], assessments: [], rubrics: [] },
+    assessments: [],
     unstructured: [],
     recognized: new Set(),
     sourceUrls: new Set(),
@@ -1167,6 +1373,7 @@ export function parseCourseSpreadsheet(sheets) {
   processLessons(state);
   processBlocks(state);
   appendLessonLinks(state);
+  processQuizzes(state);
   processAssessments(state);
   processRubrics(state);
 
@@ -1179,20 +1386,29 @@ export function parseCourseSpreadsheet(sheets) {
     lessons: unit.lessons.map(lesson => ({
       title: lesson.title,
       estimatedMinutes: lesson.estimatedMinutes,
-      blocks: lesson.blocks.map(b => ({ type: b.type, title: b.title, content: b.content, fileName: b.fileName }))
-    })),
-    assessments: unit.assessments.map(a => ({
-      title: a.title,
-      type: a.type,
-      description: a.description,
-      dueDate: a.dueDate,
-      nominalWeight: a.nominalWeight,
-      externalSubmissionLinks: a.externalSubmissionLinks,
-      rubric: a.rubric.map(c => ({
-        criterionTitle: c.criterionTitle,
-        weightPercentage: c.weightPercentage,
-        levels: c.levels.map(l => ({ label: l.label, descriptor: l.descriptor }))
+      blocks: lesson.blocks.map(b => ({
+        type: b.type,
+        title: b.title,
+        content: b.content,
+        fileName: b.fileName,
+        ...(b.type === 'quiz' ? { quiz: { questions: b.quiz?.questions || [] } } : {})
       }))
+    }))
+  }));
+  // One Assessments & Rubrics list for the course; unitIndex links a task to the unit it covers.
+  const unitIndex = new Map(state.units.map((u, i) => [u, i]));
+  const assessments = orderedAssessments(state).map(a => ({
+    title: a.title,
+    type: a.type,
+    description: a.description,
+    dueDate: a.dueDate,
+    nominalWeight: a.nominalWeight,
+    externalSubmissionLinks: a.externalSubmissionLinks,
+    unitIndex: a._unit ? unitIndex.get(a._unit) ?? -1 : -1,
+    rubric: a.rubric.map(c => ({
+      criterionTitle: c.criterionTitle,
+      weightPercentage: c.weightPercentage,
+      levels: c.levels.map(l => ({ label: l.label, descriptor: l.descriptor }))
     }))
   }));
 
@@ -1206,10 +1422,10 @@ export function parseCourseSpreadsheet(sheets) {
   }
 
   return {
-    draft: { course, units },
+    draft: { course, units, assessments },
     warnings: ctx.warnings,
     warningsTruncated: ctx.truncated,
-    stats: countStats(course, units),
+    stats: countStats(course, units, assessments),
     recognizedSheets,
     unstructuredSheets,
     skippedSheets: skipped,
@@ -1223,7 +1439,7 @@ export function hasSpreadsheetContent(parsed) {
   if (!parsed) return false;
   const c = parsed.draft?.course || {};
   const hasCourse = Boolean(c.title || c.code || c.description || c.learningOutcomes?.length || c.category || c.year);
-  return hasCourse || (parsed.draft?.units?.length || 0) > 0 || (parsed.unstructuredText || '').length >= 15;
+  return hasCourse || (parsed.draft?.units?.length || 0) > 0 || (parsed.draft?.assessments?.length || 0) > 0 || (parsed.unstructuredText || '').length >= 15;
 }
 
 // ---------- finalisation ----------
@@ -1275,6 +1491,13 @@ export function finalizeRubricCriteria(criteria, { fallbackLabels = DEFAULT_RUBR
 }
 
 function finalizeBlock(draft, index) {
+  if (draft?.type === 'quiz') {
+    // Quiz & Questions: the draft's text is the quiz instructions; questions keep their answer keys.
+    const block = createBlankContentBlock('quiz', index);
+    block.title = text(draft.title, IMPORT_LIMITS.title);
+    block.quiz = normalizeQuiz({ instructions: text(draft.quiz?.instructions ?? draft.content, 5000), questions: draft.quiz?.questions });
+    return block;
+  }
   const type = LINK_BLOCK_METADATA_KEYS[draft.type] || draft.type === 'text_description' || draft.type === 'teacher_guide'
     ? draft.type
     : 'text_description';
@@ -1323,9 +1546,22 @@ function finalizeUnit(draft, index) {
         tag: 'lms',
         blocks: (lesson.blocks || []).slice(0, IMPORT_LIMITS.blocksPerLesson).map(finalizeBlock)
       };
-    }),
-    assessments: (draft.assessments || []).slice(0, IMPORT_LIMITS.assessmentsPerUnit).map(finalizeAssessment)
+    })
   };
+}
+
+/**
+ * Course-level assessment drafts. Drafts in the older shape (assessments inside each unit) are lifted
+ * up, remembering their unit, so every caller ends with one Assessments & Rubrics list.
+ */
+function draftAssessments(draft) {
+  const list = Array.isArray(draft?.assessments) ? draft.assessments.filter(a => a && typeof a === 'object') : [];
+  (Array.isArray(draft?.units) ? draft.units : []).forEach((unit, unitIndex) => {
+    for (const a of Array.isArray(unit?.assessments) ? unit.assessments : []) {
+      if (a && typeof a === 'object') list.push({ ...a, unitIndex: Number.isInteger(a.unitIndex) ? a.unitIndex : unitIndex });
+    }
+  });
+  return list;
 }
 
 /**
@@ -1337,6 +1573,16 @@ export function finalizeCourseDraft(draft, baseCourse = {}) {
   const base = baseCourse && typeof baseCourse === 'object' ? baseCourse : {};
   const pick = (value, fallback) => (value !== undefined && value !== null && value !== '' ? value : fallback);
   const units = Array.isArray(draft?.units) ? draft.units : [];
+  const finalUnits = units.length ? units.slice(0, IMPORT_LIMITS.units).map(finalizeUnit) : (Array.isArray(base.units) ? base.units : []);
+  const unitIds = new Set(finalUnits.map(u => u?.id).filter(Boolean));
+  const tasks = draftAssessments(draft);
+  // Spreadsheet assessments replace the base course's; otherwise the base course keeps its own.
+  const assessments = tasks.length
+    ? tasks.slice(0, IMPORT_LIMITS.assessments).map((a, i) => ({
+      ...finalizeAssessment(a, i),
+      unitId: (units.length && Number.isInteger(a.unitIndex) && a.unitIndex >= 0 ? finalUnits[a.unitIndex]?.id : '') || ''
+    }))
+    : (Array.isArray(base.assessments) ? base.assessments : []).map(a => (a && a.unitId && !unitIds.has(a.unitId) ? { ...a, unitId: '' } : a));
 
   return {
     ...base,
@@ -1357,7 +1603,8 @@ export function finalizeCourseDraft(draft, baseCourse = {}) {
     learningOutcomes: c.learningOutcomes?.length
       ? c.learningOutcomes.slice(0, IMPORT_LIMITS.outcomes)
       : (Array.isArray(base.learningOutcomes) ? base.learningOutcomes : []),
-    units: units.length ? units.slice(0, IMPORT_LIMITS.units).map(finalizeUnit) : (Array.isArray(base.units) ? base.units : []),
+    units: finalUnits,
+    assessments,
     tag: 'lms',
     tags: Array.from(new Set([...(Array.isArray(base.tags) ? base.tags : []), 'lms'])),
     updatedAt: Date.now()

@@ -3,12 +3,14 @@
  *
  * Guarantees (enforced in code after every Gemini response, not just requested in the prompt):
  * 1. Every value the teacher typed is kept exactly; Gemini only fills blanks and empty sections.
- * 2. The teacher's structure (units, lessons, assessments, rubric criteria) and order are kept.
+ * 2. The teacher's structure (units, lessons, quizzes, the course's assessments, rubric criteria)
+ *    and order are kept. Units hold lessons & blocks; assessments are one course-level list.
  * 3. Gemini never adds links: link blocks need a URL that already appears in the spreadsheet.
  *
  * Reliability:
- * - One call for the outline (when needed) plus one call per unit (bounded concurrency), so large
- *   courses never exceed model output limits and one failed unit does not lose the rest.
+ * - One call for the outline (when needed), one call per unit (bounded concurrency) and one for the
+ *   course assessments, so large courses never exceed model output limits and one failed call does
+ *   not lose the rest.
  * - The AI Assist fee is charged once, only after Gemini returns usable content. If Gemini is
  *   unavailable the build stops with no charge, and the teacher can import without AI.
  */
@@ -24,9 +26,11 @@ import {
   createUrlPolicy,
   sanitizeAiUnit,
   sanitizeAiCourseFields,
+  sanitizeAiAssessments,
   normalizeRubricWeights,
   UNIT_RESPONSE_SCHEMA,
-  OUTLINE_RESPONSE_SCHEMA
+  OUTLINE_RESPONSE_SCHEMA,
+  ASSESSMENTS_RESPONSE_SCHEMA
 } from './aiCourseShared.js';
 import { finalizeCourseDraft, hasSpreadsheetContent } from './courseSpreadsheetImport.js';
 import { normalizeKey, isHttpUrl } from './courseSpreadsheetSchema.js';
@@ -90,10 +94,25 @@ function linkKey(block) {
   return LINK_BLOCK_METADATA_KEYS[block?.type] && isHttpUrl(url) ? url.replace(/[#/]+$/, '') : '';
 }
 
-export function mergeBlocks(teacherBlocks, aiBlocks) {
+/**
+ * @param {{ allowNewQuiz?: boolean, quizAdded?: boolean }} [quizBudget] shared per unit: Gemini adds at
+ *   most one quiz to a unit, and only when the teacher's unit has none.
+ */
+export function mergeBlocks(teacherBlocks, aiBlocks, quizBudget = { allowNewQuiz: true }) {
   const teacher = teacherBlocks || [];
-  const ai = aiBlocks || [];
-  if (!teacher.length) return ai.slice();
+  const allowQuiz = () => quizBudget.allowNewQuiz && !quizBudget.quizAdded;
+  const ai = (aiBlocks || []).filter(b => b?.type !== 'quiz' || teacher.some(t => t?.type === 'quiz') || allowQuiz());
+  if (!teacher.length) {
+    const added = [];
+    for (const b of ai) {
+      if (b.type === 'quiz') {
+        if (!allowQuiz()) continue;
+        quizBudget.quizAdded = true;
+      }
+      added.push(b);
+    }
+    return added;
+  }
   const used = new Set();
   const merged = teacher.map(block => {
     const link = linkKey(block);
@@ -110,15 +129,21 @@ export function mergeBlocks(teacherBlocks, aiBlocks) {
     if (index < 0) return block;
     used.add(index);
     const match = ai[index];
-    return { ...block, title: pick(block.title, match.title), content: pick(block.content, match.content) };
+    const merged = { ...block, title: pick(block.title, match.title), content: pick(block.content, match.content) };
+    // A teacher's quiz is kept as written; an empty quiz the teacher placed takes Gemini's questions.
+    if (block.type === 'quiz') merged.quiz = block.quiz?.questions?.length ? block.quiz : (match.quiz || block.quiz);
+    return merged;
   });
   // Add block types the teacher's lesson lacks (e.g. a teacher guide), one of each.
   const present = new Set(merged.map(b => b.type));
   ai.forEach((candidate, i) => {
-    if (!used.has(i) && !present.has(candidate.type)) {
-      merged.push(candidate);
-      present.add(candidate.type);
+    if (used.has(i) || present.has(candidate.type)) return;
+    if (candidate.type === 'quiz') {
+      if (!allowQuiz()) return;
+      quizBudget.quizAdded = true;
     }
+    merged.push(candidate);
+    present.add(candidate.type);
   });
   return merged;
 }
@@ -149,6 +174,7 @@ function mergeAssessment(teacher, ai) {
   if (!ai) return teacher;
   return {
     ...teacher,
+    unitIndex: Number.isInteger(teacher.unitIndex) && teacher.unitIndex >= 0 ? teacher.unitIndex : (ai.unitIndex ?? -1),
     title: pick(teacher.title, ai.title),
     type: teacher.type || ai.type,
     description: pick(teacher.description, ai.description),
@@ -159,21 +185,22 @@ function mergeAssessment(teacher, ai) {
   };
 }
 
-function mergeLesson(teacher, ai) {
+function mergeLesson(teacher, ai, quizBudget) {
   if (!ai) return teacher;
   return {
     ...teacher,
     title: pick(teacher.title, ai.title),
     estimatedMinutes: teacher.estimatedMinutes ?? ai.estimatedMinutes ?? null,
-    blocks: mergeBlocks(teacher.blocks, ai.blocks)
+    blocks: mergeBlocks(teacher.blocks, ai.blocks, quizBudget)
   };
 }
 
-/** Merges Gemini's unit into the teacher's unit: teacher values and structure win. */
+/** Merges Gemini's unit into the teacher's unit (lessons & blocks): teacher values and structure win. */
 export function mergeUnit(teacher, ai) {
   if (!ai) return teacher;
   const lessonPairs = pairItems(teacher.lessons || [], ai.lessons || [], l => normalizeKey(l.title));
-  const assessmentPairs = pairItems(teacher.assessments || [], ai.assessments || [], a => normalizeKey(a.title));
+  const teacherHasQuiz = (teacher.lessons || []).some(l => (l.blocks || []).some(b => b?.type === 'quiz'));
+  const quizBudget = { allowNewQuiz: !teacherHasQuiz, quizAdded: false };
   return {
     ...teacher,
     unitCode: pick(teacher.unitCode, ai.unitCode),
@@ -182,12 +209,18 @@ export function mergeUnit(teacher, ai) {
     description: pick(teacher.description, ai.description),
     learningOutcomes: teacher.learningOutcomes?.length ? teacher.learningOutcomes : (ai.learningOutcomes || []),
     lessons: teacher.lessons?.length
-      ? teacher.lessons.map((lesson, i) => mergeLesson(lesson, lessonPairs[i]))
-      : (ai.lessons || []),
-    assessments: teacher.assessments?.length
-      ? teacher.assessments.map((a, i) => mergeAssessment(a, assessmentPairs[i]))
-      : (ai.assessments || []).map(a => ({ ...a, rubric: normalizeRubricWeights(a.rubric) }))
+      ? teacher.lessons.map((lesson, i) => mergeLesson(lesson, lessonPairs[i], quizBudget))
+      : (ai.lessons || []).map(lesson => ({ ...lesson, blocks: mergeBlocks([], lesson.blocks, quizBudget) }))
   };
+}
+
+/** Merges Gemini's course assessments into the teacher's list: teacher tasks, values and order win. */
+export function mergeCourseAssessments(teacherList, aiList) {
+  const teacher = Array.isArray(teacherList) ? teacherList : [];
+  const ai = Array.isArray(aiList) ? aiList : [];
+  if (!teacher.length) return ai.map(a => ({ ...a, rubric: normalizeRubricWeights(a.rubric) }));
+  const pairs = pairItems(teacher, ai, a => normalizeKey(a.title));
+  return teacher.map((a, i) => mergeAssessment(a, pairs[i]));
 }
 
 // ---------- prompts ----------
@@ -207,22 +240,31 @@ function unitForPrompt(unit) {
     lessons: (unit.lessons || []).map(l => ({
       title: l.title || '',
       estimatedMinutes: l.estimatedMinutes ?? null,
-      blocks: (l.blocks || []).map(b => ({ type: b.type, title: b.title || '', content: b.content || '' }))
-    })),
-    assessments: (unit.assessments || []).map(a => ({
-      title: a.title || '',
-      type: a.type || '',
-      description: a.description || '',
-      dueDate: a.dueDate || '',
-      nominalWeight: a.nominalWeight ?? null,
-      externalSubmissionLinks: a.externalSubmissionLinks || [],
-      rubric: (a.rubric || []).map(c => ({
-        criterionTitle: c.criterionTitle || '',
-        weightPercentage: c.weightPercentage ?? null,
-        levels: (c.levels || []).map(l => ({ label: l.label, descriptor: l.descriptor || '' }))
+      blocks: (l.blocks || []).map(b => ({
+        type: b.type,
+        title: b.title || '',
+        content: b.content || '',
+        ...(b.type === 'quiz' ? { questions: (b.quiz?.questions || []).length } : {})
       }))
     }))
   };
+}
+
+function assessmentsForPrompt(assessments, units) {
+  return (assessments || []).map(a => ({
+    title: a.title || '',
+    unitCode: Number.isInteger(a.unitIndex) && a.unitIndex >= 0 ? units[a.unitIndex]?.unitCode || '' : '',
+    type: a.type || '',
+    description: a.description || '',
+    dueDate: a.dueDate || '',
+    nominalWeight: a.nominalWeight ?? null,
+    externalSubmissionLinks: a.externalSubmissionLinks || [],
+    rubric: (a.rubric || []).map(c => ({
+      criterionTitle: c.criterionTitle || '',
+      weightPercentage: c.weightPercentage ?? null,
+      levels: (c.levels || []).map(l => ({ label: l.label, descriptor: l.descriptor || '' }))
+    }))
+  }));
 }
 
 function courseForPrompt(course) {
@@ -267,12 +309,8 @@ RULES
 Return only a JSON object: {"title","code","category","description","aqfEquivalenceNotes","learningOutcomes":[],"units":[{"unitCode","unitTitle","nominalHours","description","learningOutcomes":[]}]}`;
 }
 
-export function buildUnitPrompt({ course, unit, index, units, unstructuredText, aqfLevel, guidance, levelLabels, standardsActive }) {
+export function buildUnitPrompt({ course, unit, index, units, unstructuredText, aqfLevel, guidance }) {
   const unitList = units.map((u, i) => `${i + 1}. ${u.unitCode || '(no code)'} — ${u.unitTitle || '(untitled)'}`).join('\n');
-  const labels = (levelLabels && levelLabels.length ? levelLabels : DEFAULT_RUBRIC_LEVEL_LABELS).join(' | ');
-  const labelRule = standardsActive && !(levelLabels && levelLabels.length)
-    ? `use the tier labels required by the curriculum standards above (4 levels); if they define none, use exactly: ${labels}`
-    : `label the levels exactly: ${labels}`;
   const unstructured = String(unstructuredText || '').slice(0, MAX_PROMPT_UNSTRUCTURED_CHARS);
 
   return `You are an expert curriculum designer for OzEdu, an Australian online learning platform.
@@ -299,24 +337,63 @@ ${unstructured}
 """
 ` : ''}
 RULES
-1. Keep every lesson, content block, assessment and rubric criterion in the teacher's draft, in the same order. Copy every non-blank value exactly (titles, text, links, weights, level labels). Write content only for blank values.
+1. Keep every lesson and content block in the teacher's draft, in the same order. Copy every non-blank value exactly (titles, text, links). Write content only for blank values. A unit has lessons and blocks only — the course's assessments are planned separately.
 2. If "lessons" is empty, design 3-6 lessons that cover the unit description and outcomes. Every lesson needs a "text_description" block with accurate, engaging instructional content (150-350 words; simple Markdown allowed) and a "teacher_guide" block (facilitation steps, timings, discussion prompts, common misconceptions). Add those two block types to any teacher lesson that lacks them.
 3. Links: never invent URLs. Only use URLs that already appear in the teacher's draft or the spreadsheet content. Link blocks are "youtube_video" (YouTube Video), "google_drive_link" (Google Drive Resource) and "notebook_link" (Gemini Notebook): one block per link, and a lesson may have several of each — keep every one of the teacher's link blocks with its own URL. Do not create link blocks (or "file_upload" blocks) without such a URL; suggest video or resource search terms inside the teacher_guide text instead.
-4. If "assessments" is empty, create one formative and one summative assessment with clear task briefs (what to submit, length or duration, conditions). nominalWeight is the percentage of the unit grade and the unit's weights add up to 100. dueDate is "YYYY-MM-DD" after the course start date, or "" when no start date is set.
-5. Every assessment needs a rubric. Keep the teacher's criteria and level labels and fill only blank descriptors. For a new rubric write 3-5 criteria aligned to the task with weights adding up to 100, and ${labelRule}. Each descriptor describes observable performance at that level.
-6. Fill blank unit fields: 3-6 measurable learningOutcomes, realistic nominalHours, and a clear description.
+4. Unit quiz: never change the teacher's "quiz" blocks. If no lesson in this unit has a "quiz" block, add ONE "quiz" block at the end of the unit's last lesson: title (e.g. "Unit quiz"), content = one line of instructions, and "questions": 4-6 questions that check the unit's learning outcomes — mostly "multiple_choice" ("options": 3-5 answer texts, "correct": zero-based indexes of the right options), "true_false" ("correctAnswer": true or false) and "short_answer" ("acceptedAnswers": 1-3 short accepted answers), plus exactly one "open" question with a "modelAnswer" (seen by teachers only). Give each question "points" (1 for closed questions, 5 for the open one).
+5. Fill blank unit fields: 3-6 measurable learningOutcomes, realistic nominalHours, and a clear description.
 
-Return only a JSON object: {"unitCode","unitTitle","nominalHours","description","learningOutcomes":[],"lessons":[{"title","estimatedMinutes","blocks":[{"type","title","content"}]}],"assessments":[{"title","type","description","dueDate","nominalWeight","externalSubmissionLinks":[],"rubric":[{"criterionTitle","weightPercentage","levels":[{"label","descriptor"}]}]}]}`;
+Return only a JSON object: {"unitCode","unitTitle","nominalHours","description","learningOutcomes":[],"lessons":[{"title","estimatedMinutes","blocks":[{"type","title","content","questions":[{"type","prompt","options":[],"correct":[],"correctAnswer","acceptedAnswers":[],"modelAnswer","points"}]}]}]}`;
+}
+
+export function buildAssessmentsPrompt({ course, units, assessments, unstructuredText, aqfLevel, guidance, levelLabels, standardsActive }) {
+  const unitList = units.length
+    ? units.map((u, i) => `${i + 1}. unitCode: ${JSON.stringify(u.unitCode || '')}, unitTitle: ${JSON.stringify(u.unitTitle || '')}, outcomes: ${(u.learningOutcomes || []).join('; ') || '(blank)'}`).join('\n')
+    : '(none)';
+  const labels = (levelLabels && levelLabels.length ? levelLabels : DEFAULT_RUBRIC_LEVEL_LABELS).join(' | ');
+  const labelRule = standardsActive && !(levelLabels && levelLabels.length)
+    ? `use the tier labels required by the curriculum standards above (4 levels); if they define none, use exactly: ${labels}`
+    : `label the levels exactly: ${labels}`;
+  const unstructured = String(unstructuredText || '').slice(0, MAX_PROMPT_UNSTRUCTURED_CHARS);
+  return `You are an expert assessment designer for OzEdu, an Australian online learning platform.
+Plan the assessment tasks for the WHOLE course "${course.title || 'Untitled course'}"${course.code ? ` (${course.code})` : ''}. A course has ONE Assessments & Rubrics list; units have only lessons and quizzes.
+
+${levelHeader(aqfLevel)}
+
+${guidance}
+
+COURSE CONTEXT (read-only)
+- Description: ${course.description || '(blank)'}
+- Course learning outcomes: ${(course.learningOutcomes || []).join('; ') || '(blank)'}
+- Course start date: ${course.startDate || 'not set'}
+- Units:
+${unitList}
+
+THE TEACHER'S ASSESSMENT TASKS (authoritative; "", null and [] are blanks to fill):
+${JSON.stringify(assessmentsForPrompt(assessments, units))}
+${unstructured ? `
+SPREADSHEET CONTENT THE IMPORTER COULD NOT MAP (use any assessment details in it):
+"""
+${unstructured}
+"""
+` : ''}
+RULES
+1. Keep every teacher task and rubric criterion, in the same order, and copy every non-blank value exactly (titles, text, links, weights, level labels). Write content only for blank values.
+2. If there are no teacher tasks, design 2-4 tasks for the whole course (at least one "formative" and one "summative") with clear task briefs (what to submit, length or duration, conditions) that together cover the course learning outcomes.
+3. nominalWeight is the percentage of the COURSE grade; all tasks together add up to 100. dueDate is "YYYY-MM-DD" after the course start date, or "" when no start date is set.
+4. unitCode: the unit a task mainly assesses (copy its unitCode exactly), or "" when it covers the whole course.
+5. Every task needs a rubric. Keep the teacher's criteria and level labels and fill only blank descriptors. For a new rubric write 3-5 criteria aligned to the task with weights adding up to 100, and ${labelRule}. Each descriptor describes observable performance at that level.
+6. Never invent URLs: only use links that already appear in the teacher's tasks or the spreadsheet content.
+
+Return only a JSON object: {"assessments":[{"title","unitCode","type","description","dueDate","nominalWeight","externalSubmissionLinks":[],"rubric":[{"criterionTitle","weightPercentage","levels":[{"label","descriptor"}]}]}]}`;
 }
 
 // ---------- orchestration ----------
 
-function firstTeacherLevelLabels(units) {
-  for (const unit of units) {
-    for (const a of unit.assessments || []) {
-      const labels = (a.rubric?.[0]?.levels || []).map(l => l.label).filter(Boolean);
-      if (labels.length >= 2) return labels;
-    }
+function firstTeacherLevelLabels(assessments) {
+  for (const a of assessments || []) {
+    const labels = (a.rubric?.[0]?.levels || []).map(l => l.label).filter(Boolean);
+    if (labels.length >= 2) return labels;
   }
   return null;
 }
@@ -327,7 +404,7 @@ function courseNeedsOutline(course, units) {
 }
 
 function emptyUnitDraft(init) {
-  return { unitCode: '', unitTitle: '', nominalHours: null, description: '', learningOutcomes: [], lessons: [], assessments: [], ...init };
+  return { unitCode: '', unitTitle: '', nominalHours: null, description: '', learningOutcomes: [], lessons: [], ...init };
 }
 
 function friendlyError(err) {
@@ -393,6 +470,7 @@ export async function buildCourseFromSpreadsheetWithAI({
   };
 
   const draft = JSON.parse(JSON.stringify(parsed.draft));
+  if (!Array.isArray(draft.assessments)) draft.assessments = [];
   const aqfLevel = Number.isInteger(draft.course.aqfLevel)
     ? draft.course.aqfLevel
     : (Number.isInteger(Number(targetAqfLevel)) ? Number(targetAqfLevel) : (Number.isInteger(Number(baseCourse.aqfLevel)) ? Number(baseCourse.aqfLevel) : 0));
@@ -402,7 +480,7 @@ export async function buildCourseFromSpreadsheetWithAI({
   const guidance = buildStandardsGuidance(standards, aqfLevel, skillTexts);
   const standardsActive = !guidance.startsWith('Curriculum Standards: none apply');
   const isUrlAllowed = createUrlPolicy(parsed.sourceUrls);
-  const levelLabels = firstTeacherLevelLabels(draft.units);
+  const levelLabels = firstTeacherLevelLabels(draft.assessments);
 
   const controller = new AbortController();
   const forwardAbort = () => controller.abort();
@@ -445,6 +523,7 @@ export async function buildCourseFromSpreadsheetWithAI({
   const warnings = [];
   try {
     // 1. Outline: course details and, when the spreadsheet has no units, the unit list.
+    let outlineError = null;
     if (courseNeedsOutline(draft.course, draft.units)) {
       report('outline', 0, 1, 'Planning the course outline…');
       try {
@@ -458,18 +537,21 @@ export async function buildCourseFromSpreadsheetWithAI({
         draft.course = mergeCourseFields(draft.course, outlineCourse);
         if (!draft.units.length) {
           const outlineUnits = (Array.isArray(data.units) ? data.units : []).slice(0, 20)
-            .map(u => sanitizeAiUnit({ ...u, lessons: [], assessments: [] }, { isUrlAllowed }))
+            .map(u => sanitizeAiUnit({ ...u, lessons: [] }, { isUrlAllowed }))
             .filter(u => u && (u.unitTitle || u.unitCode))
             .map(u => emptyUnitDraft({ unitCode: u.unitCode, unitTitle: u.unitTitle, nominalHours: u.nominalHours, description: u.description, learningOutcomes: u.learningOutcomes }));
           draft.units = outlineUnits;
         }
       } catch (err) {
         if (isFatal(err)) throw err;
+        outlineError = err;
         warnings.push(`Course outline: ${friendlyError(err)}.`);
       }
       if (!draft.units.length) {
-        const err = new Error('Gemini could not plan the course units from this spreadsheet. No tokens were charged — try again, or add a Units tab.');
-        err.code = 'AI_ASSIST_NO_UNITS';
+        const err = outlineError && successes === 0
+          ? new Error(`Gemini could not build the course right now (${friendlyError(outlineError)}). No tokens were charged — try again, or import the spreadsheet without AI.`)
+          : new Error('Gemini could not plan the course units from this spreadsheet. No tokens were charged — try again, or add a Units tab.');
+        err.code = outlineError && successes === 0 ? 'AI_ASSIST_UNAVAILABLE' : 'AI_ASSIST_NO_UNITS';
         throw err;
       }
     }
@@ -489,9 +571,7 @@ export async function buildCourseFromSpreadsheetWithAI({
             units: draft.units,
             unstructuredText: parsed.unstructuredText,
             aqfLevel,
-            guidance,
-            levelLabels,
-            standardsActive
+            guidance
           }),
           UNIT_RESPONSE_SCHEMA,
           `unit ${index + 1}`,
@@ -528,6 +608,33 @@ export async function buildCourseFromSpreadsheetWithAI({
       warnings.push(`Unit ${unit.unitCode || unit.unitTitle || i + 1}: ${friendlyError(result?.error)} — your spreadsheet content was kept.`);
       return unit;
     });
+
+    // 3. The course's one Assessments & Rubrics list.
+    report('assessments', total, total, 'Planning the course assessments…');
+    try {
+      const data = await callGemini(
+        buildAssessmentsPrompt({
+          course: draft.course,
+          units: draft.units,
+          assessments: draft.assessments,
+          unstructuredText: parsed.unstructuredText,
+          aqfLevel,
+          guidance,
+          levelLabels,
+          standardsActive
+        }),
+        ASSESSMENTS_RESPONSE_SCHEMA,
+        'course assessments',
+        32768
+      );
+      const unitIndexByCode = new Map(draft.units.map((u, i) => [normalizeKey(u.unitCode), i]).filter(([key]) => key));
+      const aiTasks = sanitizeAiAssessments(data?.assessments, { isUrlAllowed })
+        .map(({ unitCode, ...task }) => ({ ...task, unitIndex: unitIndexByCode.get(normalizeKey(unitCode)) ?? -1 }));
+      draft.assessments = mergeCourseAssessments(draft.assessments, aiTasks);
+    } catch (err) {
+      if (isFatal(err)) throw err;
+      warnings.push(`Course assessments: ${friendlyError(err)} — your spreadsheet tasks were kept.`);
+    }
 
     report('finalizing', total, total, 'Finishing…');
     draft.course.aqfLevel = aqfLevel;

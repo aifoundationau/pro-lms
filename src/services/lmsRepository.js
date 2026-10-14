@@ -10,6 +10,9 @@ import {
 import { ALL_GLOBAL_COURSES, LMS_CATEGORIES } from './globalCoursesData.js';
 import { sanitizeStandardIds } from './curriculumStandards.js';
 import { readEnv } from './env.js';
+import { moveUnitAssessmentsToCourse } from '../types/courseBuilderTypes.js';
+import { stripQuizAnswerKeys, extractQuizAnswerKeys, mergeQuizAnswerKeys, buildQuizKeysDoc } from './quizModel.js';
+import { QUIZ_KEYS_COLLECTION, loadQuizAnswerKeys } from './quizService.js';
 
 export const LMS_SITE_ID = String(readEnv(() => import.meta.env.VITE_LMS_SITE_ID, 'VITE_LMS_SITE_ID') || 'lms').trim();
 
@@ -30,7 +33,7 @@ async function readLegacy(name) {
   if (!LEGACY_READ_ENABLED) return [];
   try {
     const snap = await getDocs(collection(db, name));
-    return snap.docs.map(d => ({ id: d.id, ...d.data(), _legacy: true }));
+    return snap.docs.map(d => moveUnitAssessmentsToCourse({ id: d.id, ...d.data(), _legacy: true }));
   } catch (err) {
     console.warn(`Legacy read of "${name}" skipped:`, err?.code || err);
     return [];
@@ -110,8 +113,17 @@ function sanitizeArrayOfObjects(arr, maxItems = 200) {
   return Array.isArray(arr) ? stripUndefined(arr.slice(0, maxItems)).filter(x => x && typeof x === 'object') : [];
 }
 
-/** Normalises any course-like object into the lms_courses shape. */
-export function normalizeCourse(input = {}) {
+/** A stored course as the app uses it: assessments at course level (older courses are upgraded). */
+export function courseFromDoc(id, data) {
+  return moveUnitAssessmentsToCourse({ id, ...data });
+}
+
+/**
+ * Normalises any course-like object into the lms_courses shape: assessments at course level and
+ * no quiz answer keys (those are stored in the staff-only lms_quiz_keys collection).
+ */
+export function normalizeCourse(rawInput = {}) {
+  const input = stripQuizAnswerKeys(moveUnitAssessmentsToCourse(rawInput || {})) || {};
   const isPublished = Boolean(input.isPublished || input.status === 'published');
   const isDraft = !isPublished && (input.isDraft !== false);
 
@@ -178,7 +190,7 @@ export function newCourseId() {
 export async function listSiteCourses() {
   return withRetry(async () => {
     const snap = await getDocs(query(collection(db, LMS_COLLECTIONS.courses), where('siteId', '==', LMS_SITE_ID)));
-    const lms = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const lms = snap.docs.map(d => courseFromDoc(d.id, d.data()));
     const legacy = await readLegacy(LEGACY_COLLECTIONS.courses);
     return { courses: mergeById(lms, legacy) };
   });
@@ -188,13 +200,16 @@ export async function listSiteCourses() {
 export async function listNetworkCourses() {
   return withRetry(async () => {
     const snap = await getDocs(query(collection(db, LMS_COLLECTIONS.courses), where('visibility', '==', 'network')));
-    const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const all = snap.docs.map(d => courseFromDoc(d.id, d.data()));
     // Draft courses must NEVER be visible to other teachers and students
     return all.filter(c => !c.isDraft && c.status !== 'draft' && !c.tags?.includes('Draft'));
   });
 }
 
-/** Creates or fully updates a course (merge). */
+/**
+ * Creates or fully updates a course (merge). Quiz answer keys in the course are written to
+ * /lms_quiz_keys/<id> in the same atomic batch, never into the course document itself.
+ */
 export async function saveCourse(id, course, { isNew = false } = {}) {
   if (!id) throw new Error('saveCourse requires an id');
   // First write into lms_courses (new course, or a not-yet-migrated legacy course).
@@ -209,7 +224,15 @@ export async function saveCourse(id, course, { isNew = false } = {}) {
   };
   // Never overwrite the live counter from a stale client copy.
   if (!firstWrite) delete payload.students;
-  return withRetry(() => setDoc(doc(db, LMS_COLLECTIONS.courses, String(id)), payload, { merge: true }));
+  const keys = extractQuizAnswerKeys(course);
+  return withRetry(() => {
+    const courseRef = doc(db, LMS_COLLECTIONS.courses, String(id));
+    if (!Object.keys(keys).length) return setDoc(courseRef, payload, { merge: true });
+    const batch = writeBatch(db);
+    batch.set(courseRef, payload, { merge: true });
+    batch.set(doc(db, QUIZ_KEYS_COLLECTION, String(id)), { ...buildQuizKeysDoc(id, keys), siteId: LMS_SITE_ID, updatedAt: serverTimestamp() }, { merge: true });
+    return batch.commit();
+  });
 }
 
 /** Archives/restores using the full course payload, so legacy courses migrate intact. */
@@ -278,7 +301,8 @@ export async function copyCourseForTeacher(sourceCourse, teacher) {
   const nowIso = new Date().toISOString();
   const sourceId = sourceCourse.id;
   const siteId = sourceCourse.siteId;
-  const copy = buildCourseCopy(sourceCourse, teacher, nowIso);
+  const sourceKeys = sourceId ? await loadQuizAnswerKeys(sourceId) : { keys: {} };
+  const copy = mergeQuizAnswerKeys(buildCourseCopy(sourceCourse, teacher, nowIso), sourceKeys.keys);
   await saveCourse(id, copy, { isNew: true });
 
   const record = {
@@ -556,7 +580,7 @@ export async function getLmsCourseById(courseId) {
     if (db) {
       const snap = await getDoc(doc(db, LMS_COLLECTIONS.courses, cid));
       if (snap.exists()) {
-        return { id: snap.id, ...snap.data(), tag: 'lms' };
+        return { ...courseFromDoc(snap.id, snap.data()), tag: 'lms' };
       }
     }
   } catch (err) {
