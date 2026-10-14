@@ -14,7 +14,8 @@ import {
   listAllTeacherApplications,
   approveTeacherApplication,
   rejectTeacherApplication,
-  isValidDocumentUrl
+  isValidDocumentUrl,
+  formatProposedTokenRate
 } from '../services/teacherApplicationService';
 import { hasVerifiedScore } from '../services/idVerificationService';
 import { ALLOWED_ROLES, listAllUsers, updateMemberRole, updateUserCharityStatus } from '../services/authService';
@@ -24,6 +25,12 @@ import {
   normalizeAiAssistCost,
   updateAiAssistCostTokens
 } from '../services/aiAssistTokenService';
+
+/** " (FREE)" or " (🪙 N Tokens)" after a proposed course title ('' when no price was recorded). */
+function proposedPriceNote(rate) {
+  const price = formatProposedTokenRate(rate);
+  return price ? ` (${price})` : '';
+}
 
 export default function SuperAdminTokenPanel({ currentUser, userProfile, isOpen, onClose }) {
   const [activeTab, setActiveTab] = useState('grant'); // 'grant' | 'tokens' | 'redistribute' | 'teachers' | 'roles'
@@ -713,9 +720,10 @@ export default function SuperAdminTokenPanel({ currentUser, userProfile, isOpen,
                           </div>
 
                           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', fontSize: '0.88rem', marginBottom: '12px' }}>
-                            <div>
+                            {/* Dark text: the app's default text colour is white, and this card is white */}
+                            <div style={{ color: '#1e293b' }}>
                               <div><strong>Specialty:</strong> {app.subject_specialty}</div>
-                              <div><strong>Proposed Course:</strong> {app.proposed_course_title} (🪙 {app.proposed_token_rate} Tokens)</div>
+                              <div><strong>Proposed Course:</strong> {app.proposed_course_title}{proposedPriceNote(app.proposed_token_rate)}</div>
                               <div style={{ marginTop: '6px', color: '#475569', fontSize: '0.82rem' }}>
                                 "{app.teaching_bio}"
                               </div>

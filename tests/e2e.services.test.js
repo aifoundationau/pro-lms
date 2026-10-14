@@ -159,7 +159,7 @@ async function run() {
       subject_specialty: 'Marine Biology',
       teaching_bio: 'Ten years teaching marine science.',
       proposed_course_title: 'Reef Ecology',
-      proposed_token_rate: 5,
+      proposed_token_rate: 0, // a FREE course
       // An old client's full-size photo (~2 MB) is no longer stored, so this cannot hit Firestore's 1 MiB limit.
       id_document_preview: 'data:image/jpeg;base64,' + 'A'.repeat(2 * 1024 * 1024),
       id_document_url: documentUrl,
@@ -169,6 +169,7 @@ async function run() {
     assert.strictEqual(stored.id_document_url, documentUrl);
     assert.strictEqual(stored.id_document_preview, undefined, 'no photo stored');
     assert.strictEqual(stored.ai_id_verification.id_number_masked, '****567');
+    assert.strictEqual(stored.proposed_token_rate, 0, 'a FREE course is stored as 0 tokens, not 10');
     const sent = await messages.postTeacherApplicationMessage({ sender: user, senderProfile: { role: 'Supporter', email: user.email }, application });
     assert.strictEqual(sent.category, 'application');
 
@@ -176,6 +177,7 @@ async function run() {
     const inbox = await messages.fetchInboxOnce({ email: owner.email, isSuperadmin: true });
     const appMsg = inbox.find(m => m.category === 'application');
     assert(appMsg && appMsg.body.includes('Reef Ecology') && appMsg.body.includes('Ten years teaching'), 'application details in the message');
+    assert(appMsg.body.includes('Proposed course: Reef Ecology (FREE to enrol)'), 'the price reads FREE on the message board');
     assert(appMsg.body.includes(`Original document link: ${documentUrl}`) && appMsg.body.includes('93% confidence'), 'ID check and link reach the Super Admin');
     assert.strictEqual(appMsg.meta.documentUrl, documentUrl);
     const list = await apps.listAllTeacherApplications(owner.uid);

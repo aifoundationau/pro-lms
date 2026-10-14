@@ -59,6 +59,8 @@ import {
   buildTeacherApplicationPayload,
   validateDocumentUrl,
   isFirestoreSizeError,
+  normalizeProposedTokenRate,
+  formatProposedTokenRate,
   APPLICATION_TEXT_LIMITS
 } from '../src/services/teacherApplicationService.js';
 import { analyzeIdentificationDocument, sanitizeIdVerification, maskIdNumber, hasVerifiedScore } from '../src/services/idVerificationService.js';
@@ -320,6 +322,18 @@ async function run() {
   assert(noCheck.includes('ID check (AI): no document was uploaded') && noCheck.includes('Original document link: not provided'));
   const unverified = buildTeacherApplicationMessage({ ...optional, ai_id_verification: { verified: false, confidence_score: null, verification_notes: 'AI unavailable.' } }).body;
   assert(unverified.includes('not verified — manual review needed') && !/\d+% confidence/.test(unverified), 'no score when not verified');
+  // Proposed course price: 0 tokens is FREE (never turned into 10); unusable values fall back to 10.
+  assert.strictEqual(buildTeacherApplicationPayload({ applicant_uid: 'u3', proposed_token_rate: 0 }).proposed_token_rate, 0, '0 tokens stays 0');
+  assert.strictEqual(buildTeacherApplicationPayload({ applicant_uid: 'u3', proposed_token_rate: '0' }).proposed_token_rate, 0, '"0" from the form stays 0');
+  assert.strictEqual(optional.proposed_token_rate, 10, 'no price given: the form default of 10');
+  assert.deepStrictEqual(['', '  ', null, undefined, -5, 'abc', true, Infinity].map(normalizeProposedTokenRate), [10, 10, 10, 10, 10, 10, 10, 10]);
+  assert.deepStrictEqual([12, '25', 7.9].map(normalizeProposedTokenRate), [12, 25, 7], 'whole tokens');
+  assert.deepStrictEqual([0, '0', 0.4, 1, 5, '12', '', undefined, -1].map(formatProposedTokenRate),
+    ['FREE', 'FREE', 'FREE', '🪙 1 Token', '🪙 5 Tokens', '🪙 12 Tokens', '', '', ''], 'FREE replaces 0; "Token" for 1');
+  const freeMsg = buildTeacherApplicationMessage({ ...optional, proposed_course_title: 'Reef Ecology', proposed_token_rate: 0 }).body;
+  assert(freeMsg.includes('Proposed course: Reef Ecology (FREE to enrol)') && !/🪙\s*0/.test(freeMsg), freeMsg.slice(0, 300));
+  const paidMsg = buildTeacherApplicationMessage({ ...optional, proposed_course_title: 'Reef Ecology', proposed_token_rate: 5 }).body;
+  assert(paidMsg.includes('Proposed course: Reef Ecology (🪙 5 Tokens to enrol)'), paidMsg.slice(0, 300));
   // Message links are clickable only for http(s)
   assert.deepStrictEqual(splitTextLinks(`See ${docLink}. Thanks`), [{ text: 'See ' }, { text: docLink, href: docLink }, { text: '. Thanks' }]);
   assert.deepStrictEqual(splitTextLinks('(https://en.wikipedia.org/wiki/Coral_(film))').map(p => p.href).filter(Boolean), ['https://en.wikipedia.org/wiki/Coral_(film)']);

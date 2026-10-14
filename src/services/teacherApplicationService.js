@@ -30,6 +30,29 @@ export const APPLICATION_TEXT_LIMITS = Object.freeze({
 });
 export const MAX_DOCUMENT_URL_CHARS = 2000;
 
+/** Proposed course price used when none is given (the application form starts at 10 tokens). */
+export const DEFAULT_PROPOSED_TOKEN_RATE = 10;
+
+/** Whole tokens (0 or more), or null for a blank, negative or non-numeric value. */
+function wholeTokens(value) {
+  if (value === null || value === undefined || typeof value === 'boolean' || String(value).trim() === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+}
+
+/** The proposed course price to store: 0 means FREE and stays 0; unusable values become 10. */
+export function normalizeProposedTokenRate(value) {
+  return wholeTokens(value) ?? DEFAULT_PROPOSED_TOKEN_RATE;
+}
+
+/** How a proposed price reads: "FREE" for 0 tokens, otherwise "🪙 N Tokens" ('' when none was recorded). */
+export function formatProposedTokenRate(value) {
+  const tokens = wholeTokens(value);
+  if (tokens === null) return '';
+  if (tokens === 0) return 'FREE';
+  return `🪙 ${tokens} ${tokens === 1 ? 'Token' : 'Tokens'}`;
+}
+
 function applicationError(message, code) {
   const err = new Error(message);
   err.code = code;
@@ -72,7 +95,7 @@ export function buildTeacherApplicationPayload(applicationData, nowIso = new Dat
     subject_specialty: textOf('subject_specialty'),
     teaching_bio: textOf('teaching_bio'),
     proposed_course_title: textOf('proposed_course_title'),
-    proposed_token_rate: Number(data.proposed_token_rate) || 10,
+    proposed_token_rate: normalizeProposedTokenRate(data.proposed_token_rate),
     postal_address_text: textOf('postal_address_text', 'OzEdu Academic Registry, Sydney NSW'),
     id_document_url: validateDocumentUrl(data.id_document_url),
     ai_id_verification: sanitizeIdVerification(data.ai_id_verification),

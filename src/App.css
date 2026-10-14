@@ -179,6 +179,7 @@
 }
 
 /* Front Website Postcards - Centered on Website & Fully Responsive */
+.cards-grid.front-cards-grid,
 .front-cards-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -189,7 +190,8 @@
   justify-content: center;
 }
 
-@media (max-width: 1120px) {
+@media (max-width: 1120px) and (min-width: 769px) {
+  .cards-grid.front-cards-grid,
   .front-cards-grid {
     grid-template-columns: repeat(2, minmax(240px, 340px));
     max-width: 720px;
@@ -199,24 +201,9 @@
   }
 }
 
-@media (max-width: 640px) {
-  .front-cards-grid {
-    grid-template-columns: minmax(230px, 340px);
-    max-width: 360px;
-    gap: 16px;
-    margin: 0 auto 36px auto;
-    justify-content: center;
-  }
-}
-
-@media (max-width: 380px) {
-  .front-cards-grid {
-    grid-template-columns: 1fr;
-    max-width: 100%;
-    padding: 0 12px;
-  }
-}
-
+/* Desktop & Laptop card appearance: icon, heading, and full paragraph text */
+.front-cards-grid .front-card,
+.cards-grid .card.front-card,
 .front-card {
   aspect-ratio: 1 / 1;
   min-height: 250px;
@@ -236,12 +223,16 @@
   transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+.front-cards-grid .front-card:hover,
+.cards-grid .card.front-card:hover,
 .front-card:hover {
   transform: translateY(-6px) scale(1.02);
   border-color: rgba(250, 204, 21, 0.6);
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), 0 0 24px rgba(52, 211, 153, 0.25);
 }
 
+.front-cards-grid .front-card .card-icon,
+.cards-grid .card.front-card .card-icon,
 .front-card .card-icon {
   margin: 0 auto 12px auto;
   width: 44px;
@@ -256,6 +247,8 @@
   flex-shrink: 0;
 }
 
+.front-cards-grid .front-card h3,
+.cards-grid .card.front-card h3,
 .front-card h3 {
   font-size: 1.05rem;
   font-weight: 700;
@@ -264,9 +257,12 @@
   line-height: 1.25;
   text-align: center;
   width: 100%;
-  display: block;
+  display: block !important;
 }
 
+/* Desktop / laptop: always display paragraph text */
+.front-cards-grid .front-card p,
+.cards-grid .card.front-card p,
 .front-card p {
   font-size: 0.82rem;
   color: var(--text-secondary);
@@ -274,27 +270,110 @@
   margin: 0;
   text-align: center;
   width: 100%;
+  display: block !important;
 }
 
-@media (max-width: 640px) {
+/* Android / iPhone / Mobile viewports:
+   Show only the 4 postcards with icons and headings, no paragraph text anywhere on the front page */
+@media (max-width: 768px) {
+  .hero-text {
+    margin: 0 auto 20px auto !important;
+  }
+
+  .hero-text h2 {
+    font-size: 1.95rem !important;
+    line-height: 1.2 !important;
+    margin-bottom: 0 !important;
+  }
+
+  /* No paragraph text on mobile front page */
+  .hero-text p {
+    display: none !important;
+  }
+
+  .cards-grid.front-cards-grid,
+  .front-cards-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+    max-width: 440px !important;
+    gap: 12px !important;
+    margin: 0 auto 24px auto !important;
+    padding: 0 12px !important;
+    justify-content: center;
+  }
+
+  .front-cards-grid .front-card,
+  .cards-grid .card.front-card,
   .front-card {
-    padding: 18px 16px;
-    min-height: 230px;
-    border-radius: 16px;
+    aspect-ratio: 1 / 1 !important;
+    min-height: 120px !important;
+    padding: 14px 10px !important;
+    border-radius: 16px !important;
+    justify-content: center !important;
+    align-items: center !important;
+    text-align: center !important;
+    display: flex !important;
+    flex-direction: column !important;
   }
+
+  .front-cards-grid .front-card .card-icon,
+  .cards-grid .card.front-card .card-icon,
   .front-card .card-icon {
-    width: 38px;
-    height: 38px;
-    font-size: 1.35rem;
-    margin-bottom: 8px;
+    width: 38px !important;
+    height: 38px !important;
+    font-size: 1.35rem !important;
+    margin: 0 auto 8px auto !important;
   }
+
+  .front-cards-grid .front-card h3,
+  .cards-grid .card.front-card h3,
   .front-card h3 {
-    font-size: 0.98rem;
-    margin-bottom: 6px;
+    font-size: 0.88rem !important;
+    line-height: 1.25 !important;
+    margin: 0 !important;
+    display: block !important;
   }
+
+  /* Hide paragraph text completely on Android / iPhone */
+  .front-cards-grid .front-card p,
+  .cards-grid .card.front-card p,
   .front-card p {
-    font-size: 0.8rem;
-    line-height: 1.4;
+    display: none !important;
+  }
+}
+
+@media (max-width: 360px) {
+  .hero-text h2 {
+    font-size: 1.65rem !important;
+  }
+
+  .cards-grid.front-cards-grid,
+  .front-cards-grid {
+    gap: 8px !important;
+    padding: 0 8px !important;
+  }
+
+  .front-cards-grid .front-card,
+  .cards-grid .card.front-card,
+  .front-card {
+    min-height: 105px !important;
+    padding: 10px 6px !important;
+    border-radius: 12px !important;
+  }
+
+  .front-cards-grid .front-card .card-icon,
+  .cards-grid .card.front-card .card-icon,
+  .front-card .card-icon {
+    width: 32px !important;
+    height: 32px !important;
+    font-size: 1.15rem !important;
+    margin-bottom: 5px !important;
+  }
+
+  .front-cards-grid .front-card h3,
+  .cards-grid .card.front-card h3,
+  .front-card h3 {
+    font-size: 0.78rem !important;
+    line-height: 1.2 !important;
   }
 }
 
@@ -2205,4 +2284,50 @@ details.info-box[open] summary::after {
 
 .network-course-card {
   border-color: rgba(250, 204, 21, 0.35) !important;
+}
+
+/* ---- Android / iPhone portrait: course postcards fit the screen ----
+   Square postcards with a minimum height were stretched wider than their column, so they
+   overlapped each other and pushed the page past the right edge of the screen. On phones they
+   now fit their column (two across, one across on the narrowest screens) and grow to fit their
+   content. Covers Global Search, My Courses (and its archive) and the Student Panel; the front
+   page's postcards keep their own rules. */
+@media (max-width: 600px) {
+  .global-cards-grid-4x6 > .global-course-card,
+  .cards-grid:not(.front-cards-grid) > .card {
+    aspect-ratio: auto;
+    min-width: 0;
+    min-height: 0;
+    padding: 10px;
+    border-radius: 12px;
+  }
+
+  .global-cards-grid-4x6 > .global-course-card {
+    gap: 8px;
+  }
+
+  /* The search box and subject filter fit the screen (they have fixed inline widths) */
+  .global-filter-row > .search-input,
+  .global-filter-row > .filter-select {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  /* Pagination: the buttons wrap instead of running off the right edge */
+  .global-pagination-bar {
+    padding: 14px;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .pagination-actions {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .pagination-page-indicator,
+  .pagination-arrow-btn {
+    white-space: nowrap;
+  }
 }

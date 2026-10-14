@@ -28,6 +28,7 @@ import {
 import { db } from '../firebase.js';
 import { resolvePrivileges } from './rolePrivileges.js';
 import { hasVerifiedScore } from './idVerificationService.js';
+import { formatProposedTokenRate } from './teacherApplicationService.js';
 
 export const CHAT_COLLECTION = 'chat_interactions';
 /** Participant marker for the shared Super Admin inbox. */
@@ -304,11 +305,12 @@ function idCheckLines(app) {
 /** Subject, body and meta of the application message (the body always fits the 4,000-character limit). */
 export function buildTeacherApplicationMessage(application, sender = null) {
   const app = application || {};
+  const price = formatProposedTokenRate(app.proposed_token_rate); // "FREE" or "🪙 N Tokens"
   const head = [
     `New teacher application from ${app.applicant_name || sender?.displayName || ''} (${normalizeEmail(app.applicant_email || sender?.email)}).`,
     '',
     `Subject specialty: ${app.subject_specialty || '—'}`,
-    `Proposed course: ${app.proposed_course_title || '—'} (🪙 ${Number(app.proposed_token_rate) || 0} tokens to enrol)`,
+    `Proposed course: ${app.proposed_course_title || '—'}${price ? ` (${price} to enrol)` : ''}`,
     '',
     ...idCheckLines(app),
     '',

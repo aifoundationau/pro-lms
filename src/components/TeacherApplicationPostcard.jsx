@@ -4,6 +4,8 @@ import {
   submitTeacherApplication,
   getUserTeacherApplication,
   isValidDocumentUrl,
+  normalizeProposedTokenRate,
+  formatProposedTokenRate,
   APPLICATION_TEXT_LIMITS,
   MAX_DOCUMENT_URL_CHARS
 } from '../services/teacherApplicationService';
@@ -62,6 +64,7 @@ export default function TeacherApplicationPostcard({ currentUser, userProfile, o
   const [messageNotice, setMessageNotice] = useState('');
   const uploadSeq = useRef(0);
   const documentUrlInvalid = documentUrl.trim() !== '' && !isValidDocumentUrl(documentUrl);
+  const isFreeCourse = formatProposedTokenRate(proposedTokenRate) === 'FREE';
 
   useEffect(() => {
     if (currentUser?.uid) {
@@ -135,7 +138,7 @@ export default function TeacherApplicationPostcard({ currentUser, userProfile, o
         subject_specialty: subjectSpecialty.trim(),
         teaching_bio: teachingBio.trim(),
         proposed_course_title: proposedCourseTitle.trim(),
-        proposed_token_rate: Number(proposedTokenRate) || 10,
+        proposed_token_rate: normalizeProposedTokenRate(proposedTokenRate), // 0 = FREE
         postal_address_text: 'OzEdu Academic Secretariat, 100 University Avenue, Sydney NSW 2000',
         id_document_url: link,
         ai_id_verification: aiVerification
@@ -170,6 +173,7 @@ export default function TeacherApplicationPostcard({ currentUser, userProfile, o
 
   // If user already applied and is pending or approved
   if (existingApp) {
+    const proposedPrice = formatProposedTokenRate(existingApp.proposed_token_rate); // "FREE" or "🪙 N Tokens"
     return (
       <div className="postcard-container animate-fade-in-up" style={{ maxWidth: '960px', margin: '2rem auto' }}>
         {submitSuccess && (
@@ -222,8 +226,8 @@ export default function TeacherApplicationPostcard({ currentUser, userProfile, o
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '2rem' }}>
-              {/* Left Column: Postcard Message */}
-              <div style={{ borderRight: '1px solid #e2e8f0', paddingRight: '1.5rem' }}>
+              {/* Left Column: Postcard Message (dark text: the app's default text colour is white) */}
+              <div style={{ borderRight: '1px solid #e2e8f0', paddingRight: '1.5rem', color: '#1e293b' }}>
                 <p style={{ fontStyle: 'italic', color: '#64748b', fontSize: '0.9rem', margin: '0 0 12px 0' }}>
                   Postmarked: {new Date(existingApp.submitted_at || Date.now()).toLocaleDateString(undefined, { dateStyle: 'long' })}
                 </p>
@@ -234,7 +238,7 @@ export default function TeacherApplicationPostcard({ currentUser, userProfile, o
                   <strong style={{ color: '#334155' }}>Subject Specialty:</strong> {existingApp.subject_specialty}
                 </div>
                 <div style={{ marginBottom: '14px' }}>
-                  <strong style={{ color: '#334155' }}>Proposed Course:</strong> {existingApp.proposed_course_title || 'N/A'} (🪙 {existingApp.proposed_token_rate} Tokens)
+                  <strong style={{ color: '#334155' }}>Proposed Course:</strong> {existingApp.proposed_course_title || 'N/A'}{proposedPrice ? ` (${proposedPrice})` : ''}
                 </div>
                 <div style={{ marginBottom: '14px', background: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                   <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569', marginBottom: '4px' }}>Teaching Statement & Bio:</div>
@@ -379,24 +383,36 @@ export default function TeacherApplicationPostcard({ currentUser, userProfile, o
               </div>
 
               <div style={{ marginBottom: '14px' }}>
-                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
+                <label htmlFor="proposed-token-rate" style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
                   Course Token Cost for Students (🪙 Tokens to Enroll)
                 </label>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                   <input
+                    id="proposed-token-rate"
                     type="number"
                     min="0"
                     step="1"
                     required
                     value={proposedTokenRate}
                     onChange={(e) => setProposedTokenRate(e.target.value)}
+                    aria-describedby="proposed-token-rate-help"
                     style={{
                       width: '120px', padding: '10px 14px', borderRadius: '8px', border: '1px solid #cbd5e1',
                       fontSize: '1rem', fontWeight: 700, boxSizing: 'border-box'
                     }}
                   />
-                  <span style={{ fontSize: '0.85rem', color: '#64748b' }}>
-                    🪙 Teachers choose their course token price (0 = free)
+                  <span id="proposed-token-rate-help" style={{ fontSize: '0.85rem', color: '#64748b' }}>
+                    {isFreeCourse ? (
+                      <>
+                        <span style={{
+                          background: '#dcfce7', color: '#15803d', border: '1px solid #86efac', padding: '2px 10px',
+                          borderRadius: '999px', fontWeight: 800, letterSpacing: '0.5px', marginRight: '6px'
+                        }}>
+                          FREE
+                        </span>
+                        {' '}Students enrol at no cost
+                      </>
+                    ) : '🪙 Teachers choose their course token price (0 = FREE)'}
                   </span>
                 </div>
               </div>

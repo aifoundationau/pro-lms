@@ -941,6 +941,61 @@ async function run() {
     }
   });
 
+  await test('Teacher application: 0 tokens is saved as FREE and reads FREE on the form, the postcard and the Super Admin card', async () => {
+    const appsServer = await makeServer([{
+      find: /^(\.\.?\/)+services\/teacherApplicationService(\.js)?$/,
+      replacement: fileURLToPath(new URL('./fixtures/teacherApplicationServiceMock.js', import.meta.url))
+    }]);
+    const { default: TeacherApplicationPostcard } = await appsServer.ssrLoadModule('/src/components/TeacherApplicationPostcard.jsx');
+    const { default: SuperAdminTokenPanel } = await appsServer.ssrLoadModule('/src/components/SuperAdminTokenPanel.jsx');
+    globalThis.__TEST_APPLICATIONS__ = {
+      u7: { id: 'app_u7', applicant_uid: 'u7', applicant_name: 'One Token Teacher', applicant_email: 'one@teacher.edu', subject_specialty: 'Maths', proposed_course_title: 'Algebra', proposed_token_rate: 1, teaching_bio: 'Bio', status: 'pending', ai_id_verification: null, id_document_url: '' }
+    };
+    try {
+      const applicant = { uid: 'u8', email: 'free@teacher.edu', displayName: 'Free Teacher' };
+      const view = await render(React.createElement(TeacherApplicationPostcard, { currentUser: applicant, userProfile: { role: 'Supporter', email: applicant.email } }));
+      const price = await waitFor(() => view.container.querySelector('#proposed-token-rate'), 'application form');
+      const hint = () => textOf(view.container.querySelector('#proposed-token-rate-help')).trim();
+      assert.strictEqual(price.value, '10', 'starts at 10 tokens');
+      assert.strictEqual(hint(), '🪙 Teachers choose their course token price (0 = FREE)');
+      await type(price, '0');
+      assert.strictEqual(hint(), 'FREE Students enrol at no cost', 'typing 0 shows FREE');
+      await type(price, '12');
+      assert(!hint().startsWith('FREE'), 'a price above 0 is not FREE');
+      await type(price, '0');
+      await type(view.container.querySelector('input[placeholder^="e.g. Applied Machine Learning"]'), 'Marine Science');
+      await type(view.container.querySelector('input[placeholder^="e.g. Practical Deep Learning"]'), 'Reef Ecology');
+      await type(view.container.querySelector('textarea'), 'Ten years teaching marine science.');
+      await submit(view.container.querySelector('form'));
+      await waitFor(() => textOf(view.container).includes('Application posted!'), 'application posted');
+      assert.strictEqual(globalThis.__TEST_APPLICATIONS__.u8.proposed_token_rate, 0, 'saved as 0 tokens (FREE), not 10');
+      const postcard = textOf(view.container);
+      assert(postcard.includes('Proposed Course: Reef Ecology (FREE)'), postcard.slice(0, 500));
+      assert(!/🪙\s*(0|10)\s*Tokens/.test(postcard), 'neither 0 nor 10 tokens is shown');
+      // The app's default text is white; these light cards must set dark text or "FREE" is invisible.
+      const lineStartingWith = (scope, start) => Array.from(scope.querySelectorAll('div')).find(d => textOf(d).trim().startsWith(start));
+      const inkOf = (el) => {
+        for (let node = el; node; node = node.parentElement) if (node.style?.color) return node.style.color;
+        return '';
+      };
+      assert.strictEqual(inkOf(lineStartingWith(view.container, 'Proposed Course:')), 'rgb(30, 41, 59)', 'readable on the postcard');
+      await view.unmount();
+
+      // The Super Admin reviews it in 🛡️ Super Admin Control → Teacher Postcards.
+      const admin = { uid: 'a1', email: 'support@aifoundation.net.au', displayName: 'Admin' };
+      const panel = await render(React.createElement(SuperAdminTokenPanel, { currentUser: admin, userProfile: { role: 'Superadmin', email: admin.email }, isOpen: true, onClose: () => {} }));
+      await click(await waitFor(() => buttonWith(panel.container, 'Teacher Postcards (2 pending)'), 'Teacher Postcards tab'));
+      await waitFor(() => textOf(panel.container).includes('Free Teacher'), 'applications listed');
+      const review = textOf(panel.container);
+      assert(review.includes('Proposed Course: Reef Ecology (FREE)'), review.slice(0, 800));
+      assert(review.includes('Proposed Course: Algebra (🪙 1 Token)'), 'one token reads "1 Token"');
+      assert.strictEqual(inkOf(lineStartingWith(panel.container, 'Proposed Course: Reef Ecology')), 'rgb(30, 41, 59)', 'readable on the white review card');
+      await panel.unmount();
+    } finally {
+      delete globalThis.__TEST_APPLICATIONS__;
+    }
+  });
+
   // ---------- signed-in dashboards (auth stand-in, Firebase still offline) ----------
   const signedIn = await makeServer([{
     find: /^(\.\.?\/)+services\/authService(\.js)?$/,
