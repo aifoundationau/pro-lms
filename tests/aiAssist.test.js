@@ -3,6 +3,7 @@
  * Run: node tests/aiAssist.test.js
  */
 
+import './fixtures/noLiveFirebase.js'; // first: unit tests never reach the live Firebase project
 import assert from 'node:assert';
 import {
   DEFAULT_AI_ASSIST_COST_TOKENS,

@@ -308,7 +308,6 @@ export async function ingestCourseSyllabusWithAI({
     id: generateEntityId('course'),
     authorId: currentUser.uid,
     authorName: currentUser.displayName || currentUser.email?.split('@')[0] || 'Teacher',
-    token_cost: 10,
     isPublished: false,
     tags: ['OzEdu', `AQF${level}`, 'AI-Ingested'],
     createdAt: Date.now()

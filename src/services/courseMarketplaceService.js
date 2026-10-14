@@ -265,7 +265,6 @@ const SEED_MARKETPLACE_COURSES = [
     description: 'Comprehensive AQF Level 4 qualification covering client-side JavaScript, responsive layout architectures, and RESTful API endpoints.',
     tag: 'lms',
     tags: ['lms', 'Web Development', 'ICT40120', 'JavaScript', 'Frontend', 'AQF4'],
-    token_cost: 10,
     units: [
       {
         id: 'u_ictweb441',
@@ -334,7 +333,6 @@ const SEED_MARKETPLACE_COURSES = [
     description: 'AQF Level 5 Diploma curriculum focusing on threat modeling, vulnerability scanning, security compliance, and network defense.',
     tag: 'lms',
     tags: ['lms', 'Cyber Security', 'ICT50220', 'Risk Assessment', 'AQF5'],
-    token_cost: 15,
     units: [
       {
         id: 'u_ictnwk541',
@@ -394,7 +392,6 @@ const SEED_MARKETPLACE_COURSES = [
     description: 'Foundational practical office technology, workplace spreadsheets, and collaborative team communication.',
     tag: 'lms',
     tags: ['lms', 'Business', 'BSB30120', 'Productivity', 'AQF3'],
-    token_cost: 8,
     units: [
       {
         id: 'u_bsbtec301',

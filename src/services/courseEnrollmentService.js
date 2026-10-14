@@ -217,8 +217,6 @@ export function buildMemberRecord({ courseId, courseTitle, memberName, memberEma
     memberEmail: cleanEmail,
     memberRole: role,
     status: 'active',
-    tokenCost: 0, // 0 TOKENS REQUIRED (Free teacher privilege)
-    isFreeTeacherGrant: true,
     addedByUid: String(addedByUid || 'teacher'),
     addedByName: String(addedByName || 'Course Teacher').slice(0, 120),
     enrolledAt: nowIso,
@@ -338,10 +336,9 @@ export async function addMemberToCourseFree({
     persisted,
     alreadyEnrolled,
     promotedFromSupporter,
-    tokenCost: 0,
     message: alreadyEnrolled
       ? `${newMemberRecord.memberName} is already enrolled in "${courseTitle}".`
-      : `🎉 Successfully enrolled ${newMemberRecord.memberName} (${newMemberRecord.memberRole}) into "${courseTitle}" at 0 tokens (Teacher Grant Privilege)!${promotedFromSupporter ? ' Status upgraded from Supporter to Student.' : ''}`
+      : `🎉 Successfully enrolled ${newMemberRecord.memberName} (${newMemberRecord.memberRole}) into "${courseTitle}"!${promotedFromSupporter ? ' Status upgraded from Supporter to Student.' : ''}`
   };
 }
 

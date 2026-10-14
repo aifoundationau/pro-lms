@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   listSiteCourses, saveCourse, newCourseId, setCourseArchived,
-  copyCourseForTeacher, listNetworkCourses, getLmsCourseById,
+  copyCourseForTeacher, listNetworkCourses,
   incrementCourseEnrolments, isDbAvailable
 } from './services/lmsRepository';
 import { parseCourseSheetWithAI, SAMPLE_SHEET_CSV, DEFAULT_GEMINI_KEY, formatLocalizedDate } from './services/geminiCourseService';
@@ -19,7 +19,7 @@ import StudentLearningPanel from './components/student/StudentLearningPanel';
 import { createBlankCourse, generateEntityId, createBlankUnit, createBlankLesson } from './types/courseBuilderTypes';
 import { confirmCheckoutSession } from './services/stripeService';
 import { getUserTokenBalance } from './services/tokenService';
-import { listMyEnrolments, subscribeToMyEnrolments } from './services/courseEnrollmentService';
+import { subscribeToEnrolledCourses } from './services/enrolledCourses';
 import { sendMessage, SUPERADMIN_INBOX } from './services/messageService';
 import { formatTokenBalance } from './services/rolePrivileges';
 import { ALL_GLOBAL_COURSES } from './services/globalCoursesData';
@@ -272,63 +272,55 @@ function App() {
     if (!privileges.isStaff && STAFF_TABS.includes(activeTab)) setActiveTab('learning');
   }, [authUser, userProfile, privileges.isStaff, activeTab]);
 
-  // Enrolled courses (real-time listener: student panel + "message my teacher")
+  // Enrolled courses, live: the enrolment list and every enrolled course document are followed, so a
+  // teacher's saved changes reach the Student Panel (and "message my teacher") without a reload.
+  // Refs keep the listener from restarting when these values change.
+  const myCoursesRef = useRef(myCourses);
+  const profileRoleRef = useRef(userProfile?.role);
+  useEffect(() => {
+    myCoursesRef.current = myCourses;
+  }, [myCourses]);
+  useEffect(() => {
+    profileRoleRef.current = userProfile?.role;
+  }, [userProfile?.role]);
+
   useEffect(() => {
     if (!authUser?.email) return undefined;
     let cancelled = false;
+    const uid = authUser.uid;
     setIsLoadingEnrolments(true);
     setEnrolmentsError('');
 
-    const unsubscribe = subscribeToMyEnrolments(
+    const unsubscribe = subscribeToEnrolledCourses(
       authUser.email,
-      async (enrolments) => {
-        try {
-          const courses = await Promise.all(
-            (enrolments || []).slice(0, 60).map(async (e) => {
-              const fromRepo = await getLmsCourseById(e.courseId).catch(() => null);
-              if (fromRepo) return fromRepo;
-              // Fallback to myCourses or local state if created locally
-              const fromMy = myCourses.find(c => String(c.id) === String(e.courseId));
-              if (fromMy) return fromMy;
-              // Fallback object so the student can immediately see and access the enrolled course
-              return {
-                id: e.courseId,
-                title: e.courseTitle || 'Course',
-                authorName: e.addedByName || 'Course Teacher',
-                authorEmail: '',
-                units: [],
-                assessments: [],
-                tag: 'lms'
-              };
-            })
-          );
-          if (cancelled) return;
-          const activeCourses = courses.filter(Boolean).filter(c => !c.archived);
-          setEnrolledCourses(activeCourses);
+      (activeCourses) => {
+        if (cancelled) return;
+        setEnrolledCourses(activeCourses);
+        setEnrolmentsError('');
+        setIsLoadingEnrolments(false);
 
-          // If the logged in person has supporter status, upgrade to student as soon as they are enrolled!
-          if (activeCourses.length > 0) {
-            setUserProfile(prev => {
-              if (prev && String(prev.role || '').toLowerCase() === 'supporter') {
-                return { ...prev, role: 'student', classification: 'student' };
-              }
-              return prev;
-            });
-            if (authUser?.uid && String(userProfile?.role || '').toLowerCase() === 'supporter') {
-              updateUserToStudentRole(authUser.uid).catch(() => {});
+        // If the logged in person has supporter status, upgrade to student as soon as they are enrolled!
+        if (activeCourses.length > 0) {
+          setUserProfile(prev => {
+            if (prev && String(prev.role || '').toLowerCase() === 'supporter') {
+              return { ...prev, role: 'student', classification: 'student' };
             }
+            return prev;
+          });
+          if (uid && String(profileRoleRef.current || '').toLowerCase() === 'supporter') {
+            updateUserToStudentRole(uid).catch(() => {});
           }
-        } catch (err) {
-          console.warn('Enrolled courses could not be processed:', err);
-          if (!cancelled) setEnrolmentsError('Your courses could not be loaded. Check your connection.');
-        } finally {
-          if (!cancelled) setIsLoadingEnrolments(false);
         }
       },
-      (err) => {
-        console.warn('Real-time enrolment listener notice:', err);
-        if (!cancelled) setEnrolmentsError('Your courses could not be loaded. Check your connection.');
-        setIsLoadingEnrolments(false);
+      {
+        // Courses created in this browser (not yet saved) still open for their teacher.
+        localCourse: (courseId) => myCoursesRef.current.find(c => String(c.id) === String(courseId)) || null,
+        onError: (err) => {
+          console.warn('Real-time enrolment listener notice:', err);
+          if (cancelled) return;
+          setEnrolmentsError('Your courses could not be loaded. Check your connection.');
+          setIsLoadingEnrolments(false);
+        }
       }
     );
 
@@ -336,7 +328,7 @@ function App() {
       cancelled = true;
       unsubscribe();
     };
-  }, [authUser?.email, enrolmentsVersion, myCourses]);
+  }, [authUser?.email, authUser?.uid, enrolmentsVersion]);
 
   // Courses this person may manage: their own (plus unowned legacy courses); the Super Admin sees all.
   const visibleMyCourses = privileges.isSuperadmin
@@ -394,7 +386,6 @@ function App() {
   const [editingYear, setEditingYear] = useState('');
   const [editingOutcomes, setEditingOutcomes] = useState('');
   const [editingKnowledge, setEditingKnowledge] = useState('');
-  const [editingTokenCost, setEditingTokenCost] = useState(10);
   const [isUploadingThumbnail, setIsUploadingThumbnail] = useState(false);
   const [uploadingAssessments, setUploadingAssessments] = useState({});
   const [expandedCards, setExpandedCards] = useState({ info: true, assessments: true, modules: true });
@@ -414,7 +405,6 @@ function App() {
       setEditingYear(editingCourse.year || '');
       setEditingOutcomes(editingCourse.outcomes || '');
       setEditingKnowledge(editingCourse.knowledge || '');
-      setEditingTokenCost(editingCourse.token_cost !== undefined ? editingCourse.token_cost : 10);
     }
   }, [editingCourse]);
 
@@ -511,7 +501,6 @@ function App() {
       year: editingYear,
       outcomes: editingOutcomes,
       knowledge: editingKnowledge,
-      token_cost: Math.max(0, Number(editingTokenCost) || 0),
       isDraft: !isPub,
       isPublished: isPub,
       status: isPub ? 'published' : 'draft',
@@ -1147,34 +1136,6 @@ function App() {
                     onChange={(e) => setEditingKnowledge(e.target.value)}
                   ></textarea>
 
-                  {/* Teacher Course Token Pricing */}
-                  <div style={{
-                    display: 'flex', alignItems: 'center', gap: '14px', background: 'rgba(255,255,255,0.06)',
-                    padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.14)'
-                  }}>
-                    <span style={{ fontSize: '1.6rem' }}>🪙</span>
-                    <div style={{ flex: 1 }}>
-                      <label style={{ display: 'block', fontSize: '0.88rem', fontWeight: 600, color: '#fef08a', marginBottom: '4px' }}>
-                        Course Token Pricing (Cost for Students to Enroll)
-                      </label>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <input
-                          type="number"
-                          min="0"
-                          step="1"
-                          placeholder="e.g. 10"
-                          className="form-input"
-                          style={{ width: '130px', fontWeight: 700, margin: 0 }}
-                          value={editingTokenCost}
-                          onChange={(e) => setEditingTokenCost(e.target.value)}
-                        />
-                        <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                          Teachers can choose how many tokens this course costs (0 = Free enrollment)
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  
                   <div style={{display: 'flex', gap: '12px', alignItems: 'center'}}>
                     <input 
                       type="text" 
@@ -1679,17 +1640,6 @@ function App() {
                       )}
                       <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '2px 0 6px 0'}}>
                         <p style={{margin: 0, fontSize: '0.76rem'}}>{isDraft ? 'Draft Status (Private)' : `Students: ${course.students}`}</p>
-                        <span style={{
-                          background: isDraft ? 'rgba(245, 158, 11, 0.25)' : 'rgba(245, 158, 11, 0.2)',
-                          border: isDraft ? '1px solid rgba(245, 158, 11, 0.6)' : '1px solid rgba(245, 158, 11, 0.45)',
-                          color: '#fef08a',
-                          fontSize: '0.72rem',
-                          fontWeight: 700,
-                          padding: '2px 6px',
-                          borderRadius: '6px'
-                        }}>
-                          🪙 {course.token_cost !== undefined ? `${course.token_cost} Tokens` : '10 Tokens'}
-                        </span>
                       </div>
 
                       <div style={{

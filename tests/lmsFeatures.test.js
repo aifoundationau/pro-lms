@@ -1,9 +1,11 @@
 /**
  * Unit tests for messaging, enrolment, submissions, tokens, roles, Global Search copies and
- * Stripe verification (no network, no emulator).
+ * Stripe verification (no network, no emulator: Firebase is switched off, so nothing reaches the
+ * live project; the emulator suites check the database).
  * Run: node tests/lmsFeatures.test.js
  */
 
+import './fixtures/noLiveFirebase.js'; // first: unit tests never reach the live Firebase project
 import assert from 'node:assert';
 import {
   buildMessage,
@@ -25,10 +27,9 @@ import {
   parseRosterSheets,
   memberDocId,
   buildMemberRecord,
-  isValidMemberEmail,
-  addMemberToCourseFree,
-  subscribeToMyEnrolments
+  isValidMemberEmail
 } from '../src/services/courseEnrollmentService.js';
+import { subscribeToEnrolledCourses } from '../src/services/enrolledCourses.js';
 import { validateSubmission, validateDraftSubmission, submissionDocId, buildSubmissionPayload } from '../src/services/submissionService.js';
 import { validateGrantAmount, MAX_GRANT_TOKENS } from '../src/services/tokenService.js';
 import { resolvePrivileges, formatTokenBalance, hasUnlimitedTokens, MAX_SUPERADMIN_GRANT } from '../src/services/rolePrivileges.js';
@@ -125,16 +126,18 @@ async function run() {
   assert.deepStrictEqual(contacts.map(c => c.email), [SUPERADMIN_INBOX, 'boss@school.edu', 'stu@school.edu']);
   assert.deepStrictEqual(contacts[2].courses, [{ id: 'c1', title: 'Bio' }]);
 
-  // Students can contact any registered teacher, network course teachers, and their course teachers
+  // Students message a teacher about one of the teacher's courses: one they are in, or a Global Course
   const studentContacts = await loadContacts({
     selfEmail: 'stu@school.edu',
     enrolledCourses: [{ id: 'c1', title: 'Bio', authorEmail: 'teacher@school.edu', authorName: 'Ms T' }],
-    networkCourses: [{ id: 'net_c2', title: 'Chemistry', authorEmail: 'chem_teacher@school.edu', authorName: 'Dr C' }],
+    networkCourses: [{ id: 'net_c2', title: 'Chemistry', authorEmail: 'chem_teacher@school.edu', authorName: 'Dr C' }, { id: 'net_c3', title: 'Bio 2', authorEmail: 'teacher@school.edu' }],
     registeredTeachers: [{ email: 'math_prof@school.edu', name: 'Prof M' }]
   });
-  assert(studentContacts.some(c => c.email === 'chem_teacher@school.edu'), 'student can contact network course teacher');
-  assert(studentContacts.some(c => c.email === 'math_prof@school.edu'), 'student can contact any registered teacher');
-  assert(studentContacts.some(c => c.email === 'teacher@school.edu'), 'student can contact their course teacher');
+  assert.deepStrictEqual(studentContacts.map(c => c.email), [SUPERADMIN_INBOX, 'teacher@school.edu', 'chem_teacher@school.edu'], 'course teachers first; teachers without a course are not offered');
+  assert.deepStrictEqual(studentContacts[1].courses.map(c => c.id), ['c1', 'net_c3'], 'the enrolled course is named first');
+  assert.deepStrictEqual(studentContacts[2].courses, [{ id: 'net_c2', title: 'Chemistry' }], 'Global Course teacher comes with that course');
+  const staffContacts = await loadContacts({ selfEmail: 'teacher@school.edu', registeredTeachers: [{ email: 'math_prof@school.edu', name: 'Prof M' }], senderIsStaff: true });
+  assert(staffContacts.some(c => c.email === 'math_prof@school.edu'), 'staff can message any registered teacher');
   console.log('✅ Test 2 Passed: conversations group correctly with unread counts and permitted contacts.');
 
   // 3. Bulk enrolment parsing (paste and spreadsheet)
@@ -153,7 +156,7 @@ async function run() {
   const record = buildMemberRecord({ courseId: 'c1', courseTitle: 'Bio', memberEmail: 'Jane@School.edu', memberRole: 'hacker', addedByUid: 't1', nowIso: 'x' });
   assert.strictEqual(record.id, 'c1__jane@school.edu');
   assert.strictEqual(record.memberRole, 'student', 'unknown roles fall back to student');
-  assert.strictEqual(record.tokenCost, 0);
+  assert(!('tokenCost' in record) && !('isFreeTeacherGrant' in record), 'enrolments carry no cost');
   assert(isValidMemberEmail('a.b+c@d.co') && !isValidMemberEmail('a@b'));
   console.log('✅ Test 3 Passed: bulk & spreadsheet enrolment parsing (names, duplicates, invalid emails).');
 
@@ -390,40 +393,74 @@ async function run() {
   assert.strictEqual(teacherEnrolledPrivileges.isStaff, true);
   assert.strictEqual(teacherEnrolledPrivileges.role, 'teacher');
 
-  // Enrolment record creation:
-  const enrolResult = await addMemberToCourseFree({
-    courseId: 'c1',
-    courseTitle: 'Reef Ecology',
-    memberName: 'Supporter Sam',
-    memberEmail: 'sam@school.edu',
-    memberRole: 'student',
-    addedByUid: teacher.uid,
-    addedByName: teacher.displayName
-  });
-  assert.strictEqual(enrolResult.success, true);
-  assert.strictEqual(enrolResult.tokenCost, 0);
-  assert.strictEqual(enrolResult.member.memberEmail, 'sam@school.edu');
-
-  // Real-time subscription emits immediately from cache:
-  let receivedEnrolments = null;
-  const unsub = subscribeToMyEnrolments('sam@school.edu', enrolments => {
-    receivedEnrolments = enrolments;
-  });
-  assert(Array.isArray(receivedEnrolments), 'subscription delivers enrolments');
-  assert(receivedEnrolments.some(e => e.courseId === 'c1'), 'enrolled course is in subscription');
-  unsub();
+  // Live Student Panel: the enrolment list and each enrolled course document are followed, so an
+  // enrolment or a teacher's saved edit shows without a reload. Fake listeners here; the emulator
+  // suite (npm run test:e2e) runs the same flow against the real database.
+  {
+    const enrolmentFeeds = [];
+    const courseFeeds = new Map();
+    const listeners = {
+      enrolments: (email, onList) => {
+        enrolmentFeeds.push(onList);
+        return () => {};
+      },
+      course: (id, onCourse, onError) => {
+        const feed = { onCourse, onError, stopped: false };
+        courseFeeds.set(id, feed);
+        return () => {
+          feed.stopped = true;
+        };
+      }
+    };
+    const pushEnrolments = list => enrolmentFeeds[0](list);
+    const seen = [];
+    const stop = subscribeToEnrolledCourses('sam@school.edu', list => seen.push(list), {
+      listeners,
+      waitMs: 0,
+      localCourse: id => (id === 'local1' ? { id: 'local1', title: 'Draft in this browser' } : null)
+    });
+    pushEnrolments([]);
+    assert.deepStrictEqual(seen.at(-1), [], 'not enrolled yet');
+    pushEnrolments([{ courseId: 'c1', courseTitle: 'Reef Ecology' }, { courseId: 'c1' }]);
+    assert.strictEqual(seen.length, 1, 'waits for the course document');
+    courseFeeds.get('c1').onCourse({ id: 'c1', title: 'Reef Ecology', units: [] });
+    assert.deepStrictEqual(seen.at(-1).map(c => c.title), ['Reef Ecology'], 'one card per course');
+    assert.strictEqual(resolvePrivileges({ role: 'supporter', email: 'sam@school.edu' }, seen.at(-1).length).isStudent, true, 'supporter becomes a student once enrolled');
+    // The teacher saves an edit: the new version replaces the old one straight away.
+    courseFeeds.get('c1').onCourse({ id: 'c1', title: 'Reef Ecology (2027)', units: [{ id: 'u1' }] });
+    assert.deepStrictEqual(seen.at(-1).map(c => [c.title, c.units.length]), [['Reef Ecology (2027)', 1]]);
+    // Connection lost later: the last version stays on screen.
+    courseFeeds.get('c1').onError(Object.assign(new Error('offline'), { code: 'unavailable' }));
+    assert.strictEqual(seen.at(-1)[0].title, 'Reef Ecology (2027)', 'last version kept');
+    // Courses that cannot be read fall back to a copy in this browser or a placeholder; archived ones are hidden.
+    pushEnrolments([{ courseId: 'c1' }, { courseId: 'local1' }, { courseId: 'gone', courseTitle: 'Old Course', addedByName: 'Ms T' }, { courseId: 'arch' }]);
+    courseFeeds.get('local1').onError(Object.assign(new Error('denied'), { code: 'permission-denied' }));
+    courseFeeds.get('gone').onCourse(null);
+    courseFeeds.get('arch').onCourse({ id: 'arch', title: 'Archived', archived: true });
+    assert.deepStrictEqual(seen.at(-1).map(c => c.title), ['Reef Ecology (2027)', 'Draft in this browser', 'Old Course']);
+    assert.strictEqual(seen.at(-1)[2].authorName, 'Ms T', 'placeholder keeps the enrolment details');
+    // Unenrolled: that course's listener stops; unsubscribing stops the rest.
+    pushEnrolments([{ courseId: 'local1' }]);
+    assert(courseFeeds.get('c1').stopped, 'listener for a removed enrolment stops');
+    assert.deepStrictEqual(seen.at(-1).map(c => c.id), ['local1']);
+    stop();
+    assert(courseFeeds.get('local1').stopped, 'unsubscribe stops every course listener');
+    const before = seen.length;
+    courseFeeds.get('local1').onCourse({ id: 'local1', title: 'Late' });
+    assert.strictEqual(seen.length, before, 'nothing arrives after unsubscribing');
+  }
 
   // Welcome message generation for the newly enrolled supporter:
   const welcome = buildEnrolmentWelcome({
     course: { title: 'Reef Ecology' },
-    memberName: enrolResult.member.memberName,
-    memberEmail: enrolResult.member.memberEmail,
+    memberName: 'Supporter Sam',
+    memberEmail: 'sam@school.edu',
     senderName: teacher.displayName
   });
   assert(welcome.subject.includes('Reef Ecology'));
   assert(welcome.body.includes('Ms T has enrolled you in this course'));
   assert(welcome.body.includes('Student Panel'));
-  console.log('✅ Test 12 Passed: Supporter becomes student upon enrolment and receives welcome message.');
+  console.log('✅ Test 12 Passed: Supporter becomes student upon enrolment; enrolments and course edits reach the Student Panel live; welcome message.');
 
   {
     // 13. Course structure & unit quizzes: one course-level assessment list, answer keys kept from students, bulk marking

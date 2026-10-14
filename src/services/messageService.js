@@ -433,10 +433,15 @@ export function notifyTokenGrant({ sender, senderProfile, recipientEmail, recipi
 /**
  * Message recipients a user may pick: always the Super Admin, plus
  * teachers -> students in their courses, students -> their teachers.
+ * Every message from a student to a teacher names one of that teacher's courses (a course the
+ * student is enrolled in, or a published Global Course), so for students and supporters only
+ * teachers who come with a course are listed.
  * @param {object} args
  * @param {Array} args.teachingCourses courses the user teaches (with id/title)
  * @param {Array} args.enrolledCourses courses the user is enrolled in (with authorEmail/authorName)
+ * @param {Array} args.networkCourses published Global Courses (with authorEmail/authorName)
  * @param {(courseId: string) => Promise<Array>} args.listMembers roster loader
+ * @param {boolean} [args.senderIsStaff] teachers and staff may also message people without a course
  */
 export async function loadContacts({
   teachingCourses = [],
@@ -444,11 +449,34 @@ export async function loadContacts({
   networkCourses = [],
   registeredTeachers = [],
   listMembers,
-  selfEmail = ''
+  selfEmail = '',
+  senderIsStaff = false
 }) {
   const me = normalizeEmail(selfEmail);
   const contacts = new Map();
   contacts.set(SUPERADMIN_INBOX, { email: SUPERADMIN_INBOX, name: '🛡️ Super Admin', kind: 'superadmin', courses: [] });
+
+  // Teachers of courses this person is enrolled in (listed first, with those courses first)
+  for (const course of enrolledCourses || []) {
+    const email = normalizeEmail(course.authorEmail);
+    if (!email || email === me || !isValidEmail(email)) continue;
+    const entry = contacts.get(email) || { email, name: course.authorName || email, kind: 'teacher', courses: [] };
+    if (course.id && !entry.courses.some(x => x.id === String(course.id))) {
+      entry.courses.push({ id: String(course.id), title: course.title || 'Course' });
+    }
+    contacts.set(email, entry);
+  }
+
+  // Teachers who have published Global Courses (a student may ask them about that course)
+  for (const course of networkCourses || []) {
+    const email = normalizeEmail(course.authorEmail);
+    if (!email || email === me || !isValidEmail(email)) continue;
+    const entry = contacts.get(email) || { email, name: course.authorName || email, kind: 'teacher', courses: [] };
+    if (course.id && !entry.courses.some(x => x.id === String(course.id))) {
+      entry.courses.push({ id: String(course.id), title: course.title || 'Course' });
+    }
+    contacts.set(email, entry);
+  }
 
   // Any explicit registered teachers passed in
   for (const teacher of registeredTeachers || []) {
@@ -463,30 +491,8 @@ export async function loadContacts({
     contacts.set(email, entry);
   }
 
-  // Registered teachers who have published global network courses
-  for (const course of networkCourses || []) {
-    const email = normalizeEmail(course.authorEmail);
-    if (!email || email === me || !isValidEmail(email)) continue;
-    const entry = contacts.get(email) || { email, name: course.authorName || email, kind: 'teacher', courses: [] };
-    if (course.id && !entry.courses.some(x => x.id === String(course.id))) {
-      entry.courses.push({ id: String(course.id), title: course.title || 'Course' });
-    }
-    contacts.set(email, entry);
-  }
-
-  // Teachers of courses this student is enrolled in
-  for (const course of enrolledCourses || []) {
-    const email = normalizeEmail(course.authorEmail);
-    if (!email || email === me || !isValidEmail(email)) continue;
-    const entry = contacts.get(email) || { email, name: course.authorName || email, kind: 'teacher', courses: [] };
-    if (course.id && !entry.courses.some(x => x.id === String(course.id))) {
-      entry.courses.push({ id: String(course.id), title: course.title || 'Course' });
-    }
-    contacts.set(email, entry);
-  }
-
-  // Query registered teachers directly from Firestore if online and accessible
-  if (db) {
+  // Staff only: every registered teacher (no course needed between colleagues)
+  if (senderIsStaff && db) {
     try {
       const q = query(collection(db, 'users'), where('role', 'in', ['teacher', 'Teacher', 'TEACHER']), limit(50));
       const snap = await getDocs(q);
@@ -521,7 +527,9 @@ export async function loadContacts({
       }
     }
   }
-  return Array.from(contacts.values());
+  const list = Array.from(contacts.values());
+  // Students and supporters message a teacher about one of the teacher's courses.
+  return senderIsStaff ? list : list.filter(c => c.kind === 'superadmin' || c.courses.length > 0);
 }
 
 /** One-off fetch (used by tests / fallbacks). */

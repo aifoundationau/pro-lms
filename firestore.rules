@@ -7,7 +7,7 @@ rules_version = '2';
 // - Teachers own their courses (authorId) and manage their own rosters and submissions
 // - Students see only their own enrolments and submissions
 // - Message board (chat_interactions): anyone -> Super Admin, teachers -> students,
-//   students -> the teachers of courses they are enrolled in
+//   students -> a teacher about one of that teacher's courses (enrolled, or a published Global Course)
 // - Strict NO-DELETE policy across courses, rosters, coursework, messages and ledgers
 //
 // IMPORTANT: deploying replaces ALL live rules in the project. If other apps in the
@@ -291,12 +291,14 @@ service cloud.firestore {
                       request.resource.data.recipientEmail == 'superadmin'
                       // teachers / staff / Super Admin -> anyone (the app limits teachers to their students)
                       || isStaff()
-                      // students / users can contact any teacher or support
-                      || request.resource.data.category in ['teacher', 'student', 'support']
-                      // students -> the teacher of a course they are enrolled in
-                      || (request.resource.data.get('courseId', '') != ''
-                          && isEnrolled(request.resource.data.courseId)
-                          && get(coursePath(request.resource.data.courseId)).data.get('authorEmail', '') == request.resource.data.recipientEmail)
+                      // students -> a teacher, always about one of that teacher's courses (the message names
+                      // it): a course they are enrolled in, or a published Global Course (e.g. to ask to enrol)
+                      || (request.resource.data.get('courseId', '') is string
+                          && request.resource.data.get('courseId', '') != ''
+                          && exists(coursePath(request.resource.data.courseId))
+                          && get(coursePath(request.resource.data.courseId)).data.get('authorEmail', '').lower() == request.resource.data.recipientEmail
+                          && (isEnrolled(request.resource.data.courseId)
+                              || get(coursePath(request.resource.data.courseId)).data.get('visibility', '') == 'network'))
                     );
 
       // Recipients may only mark messages as read (add themselves to readBy).

@@ -95,7 +95,7 @@ function instructionsSheet() {
   add('Google Sheets', 'Use File → Import to open this file in Google Sheets. To upload it back, use File → Download → Microsoft Excel (.xlsx), which keeps every tab — or download each tab as .csv and upload them all together.', XLSX_STYLE.LABEL);
 
   section('Tabs');
-  add(SHEET.course, 'One value per row: title, code, level, category, dates, enrolment cost, description, prerequisites, curriculum standards.', XLSX_STYLE.LABEL);
+  add(SHEET.course, 'One value per row: title, code, level, category, dates, description, prerequisites, curriculum standards.', XLSX_STYLE.LABEL);
   add(SHEET.outcomes, 'One course learning outcome per row — add as many rows as you need.', XLSX_STYLE.LABEL);
   add(SHEET.units, 'One row per unit of study / unit of competency.', XLSX_STYLE.LABEL);
   add(SHEET.lessons, 'One row per lesson: Unit Code, Lesson #, title and duration, plus the lesson\'s links in the YouTube Video Links, Google Drive Resource Links and Gemini Notebook Links columns — as many as you need, one per line.', XLSX_STYLE.LABEL);
@@ -144,7 +144,6 @@ function courseFieldValue(course, key) {
   const value = course[key];
   switch (key) {
     case 'aqfLevel':
-    case 'token_cost':
       return Number.isFinite(Number(value)) && value !== '' && value !== null && value !== undefined ? Number(value) : '';
     case 'curriculumStandards':
       return Array.isArray(value) ? (value.length ? standardsToLabels(value) : 'None') : '';
@@ -470,7 +469,6 @@ export function createExampleCourse() {
       category: 'Business & Sustainability',
       year: '2026 Semester 1',
       startDate: '2026-02-09',
-      token_cost: 10,
       description: 'A practical diploma for team leaders who want to embed sustainability into everyday operations: measuring environmental impact, engaging stakeholders and reporting progress with recognised frameworks.',
       knowledge: 'Year 12 English or equivalent workplace experience.',
       curriculumStandards: [],

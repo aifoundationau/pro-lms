@@ -163,7 +163,7 @@ export default function CourseAddPeopleModal({
         : '';
       setNotice({
         type: 'success',
-        message: [result.alreadyEnrolled ? result.message : `Added ${fullName} to ${course.title} at 0 tokens!`, welcome].filter(Boolean).join(' ')
+        message: [result.alreadyEnrolled ? result.message : `Added ${fullName} to ${course.title}.`, welcome].filter(Boolean).join(' ')
       });
       await loadRoster();
       if (onMemberAdded) onMemberAdded(course.id);
@@ -241,7 +241,7 @@ export default function CourseAddPeopleModal({
         addedByName: currentUser?.displayName || currentUser?.email || 'Teacher'
       });
       const noun = bulkRole === 'student' ? 'student' : bulkRole === 'teacher' ? 'co-teacher' : 'guest';
-      const parts = [`✓ Enrolled ${result.added} ${noun}${result.added === 1 ? '' : 's'} at 0 tokens.`];
+      const parts = [`✓ Enrolled ${result.added} ${noun}${result.added === 1 ? '' : 's'}.`];
       if (result.alreadyEnrolled.length) parts.push(`${result.alreadyEnrolled.length} already enrolled.`);
       if (result.failed.length) parts.push(`${result.failed.length} could not be saved — try again.`);
       if (!result.persisted) parts.push('(Saved on this device only — the database could not be reached.)');

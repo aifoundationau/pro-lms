@@ -3,6 +3,7 @@
  * Run: node tests/courseSpreadsheet.test.js
  */
 
+import './fixtures/noLiveFirebase.js'; // first: unit tests never reach the live Firebase project
 import assert from 'node:assert';
 import * as XLSX from 'xlsx';
 import { buildXlsxWorkbook, crc32, columnLetter } from '../src/services/xlsxWriter.js';
@@ -106,7 +107,7 @@ async function run() {
   const rebuilt = finalizeCourseDraft(parsed.draft, {});
   const a = stripIds(example);
   const b = stripIds(rebuilt);
-  for (const field of ['title', 'code', 'aqfLevel', 'category', 'year', 'startDate', 'token_cost', 'description', 'knowledge', 'curriculumStandards', 'aqfEquivalenceNotes', 'learningOutcomes']) {
+  for (const field of ['title', 'code', 'aqfLevel', 'category', 'year', 'startDate', 'description', 'knowledge', 'curriculumStandards', 'aqfEquivalenceNotes', 'learningOutcomes']) {
     assert.deepStrictEqual(b[field], a[field], `round trip changed ${field}`);
   }
   assert.deepStrictEqual(comparable(rebuilt), comparable(example), 'units, lessons, blocks, quizzes and the course assessments survive');
@@ -186,7 +187,9 @@ async function run() {
   assert.strictEqual(c7.aqfLevel, 5);
   assert.strictEqual(c7.startDate, '2026-02-09', 'Australian day-first dates');
   assert.deepStrictEqual(c7.curriculumStandards, ['teqsa']);
-  assert.strictEqual(c7.token_cost, 0);
+  // Courses have no enrolment cost: an "Enrolment Cost" row from an older file is skipped quietly.
+  assert(!('token_cost' in c7), 'no enrolment cost on imported courses');
+  assert(!custom.unstructuredText.includes('Enrolment Cost'), 'old Enrolment Cost rows are not reported as unrecognised');
   const warnText = custom.warnings.map(formatImportWarning).join('\n');
   assert(warnText.includes('Klingon'), 'unknown standard warned');
   assert(warnText.includes('used more than once'), 'duplicate unit code warned');

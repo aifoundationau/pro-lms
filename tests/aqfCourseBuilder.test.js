@@ -3,6 +3,7 @@
  * Tests AQF Levels 1-9 taxonomy, 1-token copying, 0-token charity bypass, and 10-token AI ingestion.
  */
 
+import './fixtures/noLiveFirebase.js'; // first: unit tests never reach the live Firebase project
 import assert from 'node:assert';
 import {
   AQF_LEVELS,
@@ -66,8 +67,9 @@ async function runTestSuite() {
   assert.strictEqual(course.units.length, 1, 'Initial course has 1 unit');
   assert.strictEqual(course.units[0].lessons.length, 1, 'Initial unit has 1 lesson');
   assert.strictEqual(course.units[0].lessons[0].blocks.length, 1, 'Initial lesson has 1 block');
-  assert.strictEqual(course.units[0].assessments.length, 1, 'Initial unit has 1 assessment');
-  assert.strictEqual(course.units[0].assessments[0].rubric.length, 3, 'Default rubric has 3 criteria');
+  assert(!('assessments' in course.units[0]), 'Units hold lessons & blocks only');
+  assert.strictEqual(course.assessments.length, 1, 'Initial course has 1 assessment (one course list)');
+  assert.strictEqual(course.assessments[0].rubric.length, 3, 'Default rubric has 3 criteria');
   console.log('✅ Test 2 Passed: Domain models and rubric matrices initialize properly.');
 
   // Test 3: Charity Teacher Privilege Detection
@@ -138,7 +140,7 @@ Unit 2: Container Orchestration with Kubernetes`,
   assert(aiResult.course.units.length >= 1, 'Generated course must contain units');
   assert(aiResult.course.units[0].lessons.length >= 1, 'Units must contain lessons');
   assert(aiResult.course.units[0].lessons[0].blocks.length >= 1, 'Lessons must contain modular blocks');
-  assert(aiResult.course.units[0].assessments.length >= 1, 'Units must contain assessment tasks');
+  assert(aiResult.course.assessments.length >= 1, 'The course must contain assessment tasks (one course list)');
   console.log('✅ Test 6 Passed: 10-Token AI Ingestion correctly hydrates full AQF Course schema.');
 
   // Test 7: Teachers can add any student, teacher, or person to any course (0 Tokens Required)
@@ -154,8 +156,7 @@ Unit 2: Container Orchestration with Kubernetes`,
   });
 
   assert.strictEqual(teacherEnrollment.success, true);
-  assert.strictEqual(teacherEnrollment.tokenCost, 0, 'Teacher course enrollment must cost exactly 0 tokens');
-  assert.strictEqual(teacherEnrollment.member.isFreeTeacherGrant, true);
+  assert(!('tokenCost' in teacherEnrollment) && !('isFreeTeacherGrant' in teacherEnrollment.member), 'enrolment has no cost');
   assert.strictEqual(teacherEnrollment.member.memberRole, 'student');
 
   // Verify enrolled roster retrieval
@@ -172,7 +173,7 @@ Unit 2: Container Orchestration with Kubernetes`,
   assert.strictEqual(blankCourse.units[0].tag, 'lms', 'Unit must have tag "lms"');
   assert.strictEqual(blankCourse.units[0].lessons[0].tag, 'lms', 'Lesson must have tag "lms"');
   assert.strictEqual(blankCourse.units[0].lessons[0].blocks[0].tag, 'lms', 'Block must have tag "lms"');
-  assert.strictEqual(blankCourse.units[0].assessments[0].tag, 'lms', 'Assessment must have tag "lms"');
+  assert.strictEqual(blankCourse.assessments[0].tag, 'lms', 'Assessment must have tag "lms"');
 
   // Verify categories have tag 'lms'
   const categories = await fetchLmsCategories();

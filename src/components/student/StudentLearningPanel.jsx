@@ -71,7 +71,7 @@ function StudentBlock({ block, renderQuiz }) {
 function RubricView({ rubric, rubricUrl }) {
   if (typeof rubric === 'string' && rubric.trim()) {
     return (
-      <details className="sl-rubric" open>
+      <details className="sl-rubric">
         <summary>📊 How this is marked</summary>
         <div className="sl-text sl-rubric-text" style={{ marginTop: 6 }}>{rubric}</div>
         {isHttpUrl(rubricUrl) && (
@@ -86,7 +86,7 @@ function RubricView({ rubric, rubricUrl }) {
   if (!rows.length && !isHttpUrl(rubricUrl)) return null;
   const labels = rows.reduce((best, c) => ((c.levels || []).length > best.length ? (c.levels || []).map(l => l.label) : best), []);
   return (
-    <details className="sl-rubric" open>
+    <details className="sl-rubric">
       <summary>📊 How this is marked ({rows.length} criteria)</summary>
       {rows.length > 0 && (
         <div className="sl-table-wrap">
@@ -388,15 +388,16 @@ function StudentUnitCard({ unit, defaultOpen = false, renderQuiz }) {
   );
 }
 
-function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher, enrolledCourses = [], onSelectCourse }) {
+function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher, enrolledCourses = [], onSelectCourse, showQuickNavigator = false }) {
   // One Assessments & Rubrics list per course (older courses keep their tasks, moved up from units).
   const course = moveUnitAssessmentsToCourse(rawCourse);
   // Submissions and quiz attempts for this course; "loading" until they arrive for the open course.
   const [submissionState, setSubmissionState] = useState({ courseId: null, byAssessment: {} });
   const [quizState, setQuizState] = useState({ courseId: null, byQuiz: {} });
-  const [isSpecsExpanded, setIsSpecsExpanded] = useState(true);
-  const [isAssessmentsExpanded, setIsAssessmentsExpanded] = useState(true);
-  const [isUnitsSectionExpanded, setIsUnitsSectionExpanded] = useState(true);
+  // Every panel starts collapsed; the student opens what they need.
+  const [isSpecsExpanded, setIsSpecsExpanded] = useState(false);
+  const [isAssessmentsExpanded, setIsAssessmentsExpanded] = useState(false);
+  const [isUnitsSectionExpanded, setIsUnitsSectionExpanded] = useState(false);
   const loading = submissionState.courseId !== course.id;
   const standardIds = sanitizeStandardIds(course.curriculumStandards);
   const courseStandards = CURRICULUM_STANDARDS.filter(std => standardIds.includes(std.id));
@@ -513,8 +514,9 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
       </header>
 
       {/* Main 2-Column Grid Emulating Teacher View */}
-      <div className="builder-workspace-grid sl-viewer-grid">
-        {/* Left Column: Course Specifications & Quick Navigator (View-Only) */}
+      <div className={`builder-workspace-grid sl-viewer-grid ${showQuickNavigator ? '' : 'no-sidebar'}`}>
+        {/* Left Column: Quick Navigator (hidden for now) */}
+        {showQuickNavigator && (
         <aside className="builder-sidebar glass sl-student-sidebar">
           {/* Quick Navigator */}
           <div className="sidebar-section">
@@ -581,6 +583,7 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
             </div>
           </div>
         </aside>
+        )}
 
         {/* Right Main Area */}
         <main className="builder-main-panel glass sl-student-main">
@@ -602,7 +605,7 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
 
           {/* Panel 0: 📋 Course Specifications (view-only; mirrors the Course Builder, without the cover image) */}
           <section id="student-specs-panel" className="builder-collapsible-panel sl-specs-panel" aria-label="Course Specifications" style={{ marginBottom: '22px' }}>
-            <div className="sl-panel-header" onClick={() => setIsSpecsExpanded(prev => !prev)}>
+            <div className={`sl-panel-header ${isSpecsExpanded ? '' : 'collapsed'}`} onClick={() => setIsSpecsExpanded(prev => !prev)}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <button
                   type="button"
@@ -661,7 +664,7 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
-                marginBottom: '10px',
+                marginBottom: isAssessmentsExpanded ? '10px' : 0,
                 gap: '10px',
                 flexWrap: 'wrap',
                 cursor: 'pointer',
@@ -716,7 +719,7 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
                     const isSub = sub?.status === 'submitted';
                     const isDraft = sub?.status === 'draft';
                     return (
-                      <details key={assessment.id || aIdx} className="glass sl-assessment-dropdown" open>
+                      <details key={assessment.id || aIdx} className="glass sl-assessment-dropdown">
                         <summary className="sl-asmt-summary">
                           <div className="sl-asmt-summary-title">
                             <span className={`sl-pill ${assessment.type || 'formative'}`}>
@@ -795,7 +798,7 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
-                marginBottom: '12px',
+                marginBottom: isUnitsSectionExpanded ? '12px' : 0,
                 gap: '10px',
                 flexWrap: 'wrap',
                 cursor: 'pointer',
@@ -843,7 +846,7 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
 
                 {units.map((unit, uIdx) => (
                   <div key={unit.id || uIdx} id={`student-unit-${unit.id}`}>
-                    <StudentUnitCard unit={unit} defaultOpen={uIdx === 0} renderQuiz={renderQuiz} />
+                    <StudentUnitCard unit={unit} renderQuiz={renderQuiz} />
                   </div>
                 ))}
               </div>
@@ -1038,6 +1041,7 @@ export default function StudentLearningPanel({
         /* Assessments Section placed near top */
         .sl-assessments-top-panel { border-left: 4px solid #38bdf8; }
         .sl-panel-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; cursor: pointer; padding: 6px 8px; border-radius: 10px; background: rgba(255, 255, 255, 0.03); margin-bottom: 10px; }
+        .sl-panel-header.collapsed { margin-bottom: 0; }
         .sl-specs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px 16px; margin: 0; }
         .sl-spec { min-width: 0; }
         .sl-spec-wide { grid-column: 1 / -1; }
@@ -1156,6 +1160,9 @@ export default function StudentLearningPanel({
           gap: 18px;
           align-items: start;
         }
+        .sl-viewer-grid.no-sidebar {
+          grid-template-columns: 1fr;
+        }
         @media (max-width: 980px) {
           .sl-viewer-grid {
             grid-template-columns: 1fr;
@@ -1171,7 +1178,6 @@ export default function StudentLearningPanel({
         .sl-student-main {
           padding: 20px;
           border-radius: 16px;
-          min-height: 500px;
         }
       `}</style>
     </div>

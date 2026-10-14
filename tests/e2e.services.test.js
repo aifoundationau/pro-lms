@@ -21,7 +21,9 @@ process.env.VITE_FIREBASE_AUTH_DOMAIN = 'localhost';
 
 const { auth } = await import('../src/firebase.js');
 const { createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } = await import('firebase/auth');
-const { doc, getDoc, setLogLevel } = await import('firebase/firestore');
+const { doc, getDoc, setDoc, updateDoc, serverTimestamp, setLogLevel, getFirestore, connectFirestoreEmulator, terminate } = await import('firebase/firestore');
+const { initializeApp, deleteApp } = await import('firebase/app');
+const { getAuth, connectAuthEmulator } = await import('firebase/auth');
 const authService = await import('../src/services/authService.js');
 const lms = await import('../src/services/lmsRepository.js');
 const enrol = await import('../src/services/courseEnrollmentService.js');
@@ -33,6 +35,7 @@ const apps = await import('../src/services/teacherApplicationService.js');
 const market = await import('../src/services/courseMarketplaceService.js');
 const quizzes = await import('../src/services/quizService.js');
 const quizModel = await import('../src/services/quizModel.js');
+const enrolledLive = await import('../src/services/enrolledCourses.js');
 const { resolvePrivileges } = await import('../src/services/rolePrivileges.js');
 const { db } = await import('../src/firebase.js');
 
@@ -75,6 +78,38 @@ async function signInAs(key) {
   await cred.user.getIdToken(true);
   assert.strictEqual(cred.user.emailVerified, true, 'emulated users are verified like Google accounts');
   return cred.user;
+}
+
+/**
+ * A second, separately signed-in browser session (for the teacher), so live listeners in the
+ * main session keep running as the student while the teacher works.
+ */
+async function openBrowserAs(key) {
+  const app = initializeApp({ projectId: PROJECT_ID, apiKey: 'demo-api-key', authDomain: 'localhost' }, `browser-${key}-${Date.now()}`);
+  const browserAuth = getAuth(app);
+  connectAuthEmulator(browserAuth, `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}`, { disableWarnings: true });
+  const browserDb = getFirestore(app);
+  const [host, port] = process.env.FIRESTORE_EMULATOR_HOST.split(':');
+  connectFirestoreEmulator(browserDb, host, Number(port) || 8080);
+  const cred = await signInWithEmailAndPassword(browserAuth, ACCOUNTS[key], PASSWORD);
+  await cred.user.getIdToken(true);
+  return {
+    db: browserDb,
+    uid: cred.user.uid,
+    close: async () => {
+      await terminate(browserDb).catch(() => {});
+      await deleteApp(app).catch(() => {});
+    }
+  };
+}
+
+/** Waits until check() is true (live listeners deliver asynchronously). */
+async function until(check, label, ms = 10000) {
+  const started = Date.now();
+  while (!check()) {
+    if (Date.now() - started > ms) throw new Error(`timed out waiting: ${label}`);
+    await new Promise(r => setTimeout(r, 50));
+  }
 }
 
 async function expectCode(promise, code) {
@@ -232,11 +267,13 @@ async function run() {
     assert.strictEqual(request.meta.tokensRequested, 50);
   });
 
-  await step('outsiders cannot submit to or message a course they are not in', async () => {
+  await step('outsiders cannot submit to a course they are not in, or message a teacher without naming the teacher\'s course', async () => {
     const user = await signInAs('outsider');
     const loaded = await lms.getLmsCourseById(courseId);
     await expectCode(subs.submitAssessment({ course: loaded, unit: loaded.units[0], assessment: loaded.assessments[0], user, text: 'sneaky' }), 'NOT_ENROLLED');
-    await expectCode(messages.sendMessage({ sender: user, senderProfile: { role: 'Supporter', email: user.email }, to: ACCOUNTS.teacher, body: 'hi', courseId }), 'NOT_ALLOWED');
+    await expectCode(messages.sendMessage({ sender: user, senderProfile: { role: 'Supporter', email: user.email }, to: ACCOUNTS.teacher, body: 'hi' }), 'NOT_ALLOWED');
+    await expectCode(messages.sendMessage({ sender: user, senderProfile: { role: 'Supporter', email: user.email }, to: ACCOUNTS.teacher2, body: 'hi', courseId }), 'NOT_ALLOWED');
+    await expectCode(messages.sendMessage({ sender: user, senderProfile: { role: 'Supporter', email: user.email }, to: ACCOUNTS.student, body: 'hi', courseId }), 'NOT_ALLOWED');
     await messages.sendMessage({ sender: user, senderProfile: { role: 'Supporter', email: user.email }, to: messages.SUPERADMIN_INBOX, body: 'Can I join a course?' });
   });
 
@@ -355,6 +392,40 @@ async function run() {
     assert(audit.data().copiedAt, 'copy date recorded');
     assert.strictEqual(record.copyCourseId, copy.id);
     await assert.rejects(lms.saveCourse(courseId, { ...published, title: 'Hijacked' }), err => err.code === 'permission-denied');
+  });
+
+  // Live Student Panel: "Contact Teacher to Enrol" -> teacher enrols -> teacher edits the course.
+  await step('outsider asks to enrol; the enrolment and the teacher\'s course edits reach their Student Panel live', async () => {
+    const outsider = await signInAs('outsider');
+    const ask = await messages.sendMessage({ sender: outsider, senderProfile: { role: 'Supporter', email: outsider.email }, to: ACCOUNTS.teacher, subject: 'Enrolment request: Reef Ecology', body: 'Could you enrol me?', courseId, courseTitle: 'Reef Ecology' });
+    assert.strictEqual(ask.courseId, courseId, 'the request names the Global Course');
+
+    const updates = [];
+    const latest = () => [...updates].reverse().find(Array.isArray) || [];
+    const stop = enrolledLive.subscribeToEnrolledCourses(outsider.email, list => updates.push(list), { onError: err => updates.push(err), waitMs: 5000 });
+    const teacher = await openBrowserAs('teacher');
+    try {
+      await until(() => updates.some(Array.isArray), 'first list');
+      assert.deepStrictEqual(latest(), [], 'not enrolled yet');
+      assert.strictEqual(resolvePrivileges({ role: 'Supporter', email: outsider.email }, latest().length).isStudent, false);
+
+      // The teacher enrols them from their own browser: the course appears without a reload.
+      const record = enrol.buildMemberRecord({ courseId, courseTitle: 'Reef Ecology', memberName: 'Owen Outsider', memberEmail: outsider.email, memberRole: 'student', addedByUid: teacher.uid, addedByName: 'Tess', nowIso: new Date().toISOString() });
+      await setDoc(doc(teacher.db, 'course_members', record.id), { ...record, updatedAt: serverTimestamp() });
+      await until(() => latest().some(c => c.id === courseId && c.title === 'Reef Ecology'), 'enrolment arrives live');
+      assert.strictEqual(resolvePrivileges({ role: 'Supporter', email: outsider.email }, latest().length).isStudent, true, 'supporter becomes a student');
+
+      // The teacher edits and saves the course: the open Student Panel gets the new version.
+      const current = (await getDoc(doc(teacher.db, 'lms_courses', courseId))).data();
+      const units = current.units.map((u, i) => (i === 0 ? { ...u, lessons: u.lessons.map((l, j) => (j === 0 ? { ...l, title: 'Reef zones (updated)' } : l)) } : u));
+      await updateDoc(doc(teacher.db, 'lms_courses', courseId), { title: 'Reef Ecology (2027)', units, updatedAt: serverTimestamp() });
+      await until(() => latest().find(c => c.id === courseId)?.title === 'Reef Ecology (2027)', 'course edit arrives live');
+      assert.strictEqual(latest().find(c => c.id === courseId).units[0].lessons[0].title, 'Reef zones (updated)', 'lesson content updated too');
+      assert(!updates.some(u => u instanceof Error), 'no listener errors');
+    } finally {
+      stop();
+      await teacher.close();
+    }
   });
 
   console.log(`\n🎉 All end-to-end service checks passed (${steps} scenarios).`);

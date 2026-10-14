@@ -78,6 +78,8 @@ async function run() {
       await setDoc(doc(db, 'users', 'stu2'), { uid: 'stu2', email: PEOPLE.outsider.email, role: 'Supporter', classification: 'Supporter', token_balance: 0 });
       await setDoc(doc(db, 'lms_courses', 'c1'), { ...normalizeCourse({ title: 'Bio', authorId: 'teacherA', authorEmail: PEOPLE.teacherA.email, authorName: 'Teacher A' }), siteId: 'lms' });
       await setDoc(doc(db, 'lms_courses', 'legacy'), { title: 'Old course', siteId: 'lms', visibility: 'site' });
+      // A published Global Course by Teacher B (author email stored with capitals by an older client)
+      await setDoc(doc(db, 'lms_courses', 'net1'), { ...normalizeCourse({ title: 'Chemistry', authorId: 'teacherB', authorEmail: PEOPLE.teacherB.email, authorName: 'Teacher B' }), authorEmail: 'Teacher.B@Example.com', visibility: 'network', siteId: 'lms' });
       await setDoc(doc(db, 'course_members', memberDocId('c1', PEOPLE.student.email)), buildMemberRecord({
         courseId: 'c1', courseTitle: 'Bio', memberName: 'Student One', memberEmail: PEOPLE.student.email, memberRole: 'student', addedByUid: 'teacherA', addedByName: 'Teacher A', nowIso: '2026-10-13T00:00:00Z'
       }));
@@ -222,6 +224,11 @@ async function run() {
     await check('student must name the course', () => assertFails(send('student', { to: PEOPLE.teacherA.email, body: 'Hi' })));
     await check('non-enrolled cannot message the teacher', () => assertFails(send('outsider', { to: PEOPLE.teacherA.email, body: 'Hi', courseId: 'c1' })));
     await check('students cannot message other students', () => assertFails(send('student', { to: PEOPLE.outsider.email, body: 'Hi', courseId: 'c1' })));
+    await check('anyone may ask a Global Course teacher about that course', () => assertSucceeds(send('outsider', { to: PEOPLE.teacherB.email, body: 'Could you enrol me?', courseId: 'net1', courseTitle: 'Chemistry' })));
+    await check('the named course must be the recipient\'s', () => assertFails(send('outsider', { to: PEOPLE.teacherA.email, body: 'Hi', courseId: 'net1' })));
+    await check('a Global Course does not open messages to students', () => assertFails(send('outsider', { to: PEOPLE.student.email, body: 'Hi', courseId: 'net1' })));
+    await check('the named course must exist', () => assertFails(send('outsider', { to: PEOPLE.teacherB.email, body: 'Hi', courseId: 'no-such-course' })));
+    await check('no course named, no message to a teacher', () => assertFails(send('outsider', { to: PEOPLE.teacherB.email, body: 'Hi' })));
     let teacherMsgId;
     await check('teacher messages a student', async () => {
       teacherMsgId = await assertSucceeds(send('teacherA', { to: PEOPLE.student.email, body: 'Welcome to Bio', courseId: 'c1' }));

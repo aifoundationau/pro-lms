@@ -390,9 +390,6 @@ export const COURSE_FIELDS = Object.freeze([
   col('startDate', 'Start Date', ['course start date', 'commencement date', 'start', 'starts'], {
     help: 'YYYY-MM-DD.', example: '2026-02-09', signature: true
   }),
-  col('token_cost', 'Enrolment Cost (Tokens)', ['enrolment cost', 'enrollment cost', 'token cost', 'tokens', 'cost', 'price'], {
-    help: 'Tokens a student spends to enrol. 0 = free.', example: '10', signature: true
-  }),
   col('description', 'Course Description', ['description', 'overview', 'course overview', 'summary'], {
     help: 'Who the course is for, what it covers and where it leads.', example: 'A practical diploma for team leaders who want to embed sustainability into everyday operations.', signature: true
   }),
@@ -637,6 +634,17 @@ export function detectHeaderRow(cells, { strict = false } = {}) {
 }
 
 /** Matches a vertical "Label | Value" row on the Course tab. */
+/**
+ * Course rows from older templates that are no longer used (courses have no enrolment cost).
+ * Rows with these labels are skipped quietly instead of being reported as unrecognised.
+ */
+const RETIRED_COURSE_LABELS = new Set(['enrolment cost', 'enrollment cost', 'enrolment cost (tokens)', 'enrollment cost (tokens)', 'token cost', 'course token pricing'].map(normalizeHeader));
+
+export function isRetiredCourseLabel(label) {
+  const norm = normalizeHeader(label);
+  return Boolean(norm) && RETIRED_COURSE_LABELS.has(norm);
+}
+
 export function matchCourseFieldLabel(label) {
   const norm = normalizeHeader(label);
   if (!norm) return null;

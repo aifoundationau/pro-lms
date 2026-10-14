@@ -4,7 +4,7 @@
 import { db } from '../firebase.js';
 import {
   collection, doc, getDocs, getDoc, setDoc, updateDoc, deleteDoc, query, where,
-  increment, serverTimestamp, writeBatch
+  increment, serverTimestamp, writeBatch, deleteField, onSnapshot
 } from 'firebase/firestore';
 
 import { ALL_GLOBAL_COURSES, LMS_CATEGORIES } from './globalCoursesData.js';
@@ -115,7 +115,9 @@ function sanitizeArrayOfObjects(arr, maxItems = 200) {
 
 /** A stored course as the app uses it: assessments at course level (older courses are upgraded). */
 export function courseFromDoc(id, data) {
-  return moveUnitAssessmentsToCourse({ id, ...data });
+  // Courses no longer have an enrolment cost; older documents may still carry the field.
+  const { token_cost: _retiredEnrolmentCost, ...rest } = data || {};
+  return moveUnitAssessmentsToCourse({ id, ...rest });
 }
 
 /**
@@ -146,7 +148,6 @@ export function normalizeCourse(rawInput = {}) {
     category: str(input.category || 'General Academic', 200),
     aqfLevel: input.aqfLevel !== undefined ? Number(input.aqfLevel) : 0,
     nominalHours: Number(input.nominalHours) || 40,
-    token_cost: Number(input.token_cost) || 0,
     startDate: isoDateOr(input.startDate, new Date().toISOString().split('T')[0]),
     year: str(input.year, 100),
     description: str(input.description, 20000),
@@ -224,6 +225,8 @@ export async function saveCourse(id, course, { isNew = false } = {}) {
   };
   // Never overwrite the live counter from a stale client copy.
   if (!firstWrite) delete payload.students;
+  // Courses no longer have an enrolment cost: clear it from older documents as they are saved.
+  if (!firstWrite) payload.token_cost = deleteField();
   const keys = extractQuizAnswerKeys(course);
   return withRetry(() => {
     const courseRef = doc(db, LMS_COLLECTIONS.courses, String(id));
@@ -587,11 +590,38 @@ export async function getLmsCourseById(courseId) {
     console.warn(`Error getting course ${cid} from Firestore:`, err?.message || err);
   }
   // Fall back to global course catalog
-  const fromGlobal = ALL_GLOBAL_COURSES.find(c => String(c.id) === cid);
-  if (fromGlobal) {
-    return { ...fromGlobal, tag: 'lms' };
+  return catalogCourseById(cid);
+}
+
+/** A course from the built-in Global Course catalogue (no database needed), or null. */
+export function catalogCourseById(courseId) {
+  const cid = String(courseId || '');
+  const fromGlobal = cid ? ALL_GLOBAL_COURSES.find(c => String(c.id) === cid) : null;
+  return fromGlobal ? { ...fromGlobal, tag: 'lms' } : null;
+}
+
+/**
+ * Follows one course document live, so students see a teacher's saved changes straight away.
+ * onCourse(course) runs on every change (null when the document does not exist); onError(err)
+ * runs if the listener cannot start or stops (offline database, no access).
+ * @returns {() => void} unsubscribe
+ */
+export function subscribeToCourse(courseId, onCourse, onError) {
+  const cid = String(courseId || '');
+  if (!cid || !db) {
+    onError?.(Object.assign(new Error('Database unavailable (Firebase not configured).'), { code: 'DB_UNAVAILABLE' }));
+    return () => {};
   }
-  return null;
+  try {
+    return onSnapshot(
+      doc(db, LMS_COLLECTIONS.courses, cid),
+      snap => onCourse(snap.exists() ? { ...courseFromDoc(snap.id, snap.data()), tag: 'lms' } : null),
+      err => onError?.(err)
+    );
+  } catch (err) {
+    onError?.(err);
+    return () => {};
+  }
 }
 
 /**

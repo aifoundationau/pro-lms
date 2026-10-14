@@ -35,6 +35,7 @@ import {
   normalizeKey,
   detectHeaderRow,
   matchCourseFieldLabel,
+  isRetiredCourseLabel,
   blockTypeLabel,
   parseBlockType,
   parseAssessmentType,
@@ -274,7 +275,6 @@ function emptyCourseFields() {
     category: '',
     year: '',
     startDate: '',
-    token_cost: null,
     description: '',
     knowledge: '',
     curriculumStandards: null,
@@ -348,6 +348,12 @@ function scanSheet(sheet, state) {
     for (const target of Object.values(links)) state.sourceUrls.add(target);
 
     if (!section && verticalAllowed) {
+      // Rows from older templates that are no longer used (e.g. Enrolment Cost) are skipped.
+      const label = cells[firstFilledIndex(cells)];
+      if (isRetiredCourseLabel(label)) {
+        state.recognized.add(sheet.name);
+        continue;
+      }
       const hit = matchVerticalFieldRow(cells);
       if (hit) {
         applyCourseField(state, hit.field.key, cells[hit.valueIndex], links[hit.valueIndex], { sheet: sheet.name, row: r + 1 });
@@ -420,12 +426,6 @@ function applyCourseField(state, key, rawValue, linkTarget, where) {
       const iso = parseDateCell(value);
       if (iso === undefined) ctx.warn(where.sheet, where.row, `Start Date "${value}" was not understood — use YYYY-MM-DD.`);
       else if (iso) assign('startDate', iso);
-      break;
-    }
-    case 'token_cost': {
-      const parsed = /^free$/i.test(value) ? { value: 0 } : parseIntegerInRange(value, 0, 1000000, 'Enrolment cost');
-      if (parsed.error) ctx.warn(where.sheet, where.row, `${parsed.error}.`);
-      else if (parsed.value !== null) assign('token_cost', parsed.value);
       break;
     }
     case 'curriculumStandards': {
@@ -1592,7 +1592,6 @@ export function finalizeCourseDraft(draft, baseCourse = {}) {
     category: pick(c.category, base.category || 'General Academic'),
     year: pick(c.year, base.year || ''),
     startDate: pick(c.startDate, base.startDate || ''),
-    token_cost: Number.isInteger(c.token_cost) ? c.token_cost : (Number.isFinite(Number(base.token_cost)) ? Number(base.token_cost) : 10),
     description: pick(c.description, base.description || ''),
     knowledge: pick(c.knowledge, base.knowledge || ''),
     thumbnail: pick(c.thumbnail, base.thumbnail || ''),

@@ -60,6 +60,30 @@ export function CategoryTag({ category, small = false }) {
   );
 }
 
+/** Unique {id, title} course choices, in order. */
+function courseChoices(...lists) {
+  const seen = new Set();
+  const out = [];
+  for (const list of lists) {
+    for (const c of list || []) {
+      const id = c && c.id !== undefined && c.id !== null ? String(c.id) : '';
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id, title: c.title || 'Course' });
+    }
+  }
+  return out;
+}
+
+/** Loaded contacts plus any added directly (e.g. "Message teacher"), keeping every course of both. */
+function mergeContacts(loaded, previous) {
+  const merged = loaded.map(c => {
+    const direct = (previous || []).find(x => x.email === c.email);
+    return direct ? { ...c, courses: courseChoices(c.courses, direct.courses) } : c;
+  });
+  return [...merged, ...(previous || []).filter(c => !loaded.some(x => x.email === c.email))];
+}
+
 /**
  * Message board dock shown at the bottom of every signed-in panel.
  * @param {object[]} teachingCourses courses the user teaches (for "message my students")
@@ -97,6 +121,7 @@ export default function MessageDock({
   const [composeEmail, setComposeEmail] = useState('');
   const [composeSubject, setComposeSubject] = useState('');
   const [composeBody, setComposeBody] = useState('');
+  const [composeCourseId, setComposeCourseId] = useState('');
   const [requestAmount, setRequestAmount] = useState('50');
   const [requestReason, setRequestReason] = useState('');
 
@@ -155,11 +180,12 @@ export default function MessageDock({
         networkCourses,
         registeredTeachers,
         listMembers: listCourseMembers,
-        selfEmail: myEmail
+        selfEmail: myEmail,
+        senderIsStaff: privileges.isStaff
       });
       if (!mountedRef.current) return;
-      // Keep any contact added directly (e.g. "Message teacher") that the list does not include.
-      setContacts(prev => [...list, ...(prev || []).filter(c => !list.some(x => x.email === c.email))]);
+      // Keep any contact added directly (e.g. "Message teacher") and the course it was started from.
+      setContacts(prev => mergeContacts(list, prev));
       setContactsLoaded(true);
     } catch (err) {
       console.warn('Contacts could not be loaded:', err);
@@ -171,6 +197,7 @@ export default function MessageDock({
 
   const openCompose = (to = SUPERADMIN_INBOX) => {
     setComposeTo(to);
+    setComposeCourseId('');
     setComposeEmail('');
     setComposeSubject('');
     setComposeBody('');
@@ -188,15 +215,16 @@ export default function MessageDock({
       setComposeSubject(request.subject || '');
       setComposeBody(request.body || '');
       setComposeEmail(to);
+      setComposeCourseId(request.courseId ? String(request.courseId) : '');
+      const requestedCourses = request.courseId ? [{ id: String(request.courseId), title: request.courseTitle || 'Course' }] : [];
       setContacts(prev => {
         const list = prev ? prev.slice() : [{ email: SUPERADMIN_INBOX, name: '🛡️ Super Admin', kind: 'superadmin', courses: [] }];
-        if (!list.some(c => c.email === to)) {
-          list.push({
-            email: to,
-            name: request.toName || to,
-            kind: 'direct',
-            courses: request.courseId ? [{ id: String(request.courseId), title: request.courseTitle || 'Course' }] : []
-          });
+        const index = list.findIndex(c => c.email === to);
+        if (index < 0) {
+          list.push({ email: to, name: request.toName || to, kind: 'direct', courses: requestedCourses });
+        } else if (requestedCourses.length) {
+          // The message names the course it was started from (e.g. "Contact Teacher to Enrol").
+          list[index] = { ...list[index], courses: courseChoices(requestedCourses, list[index].courses) };
         }
         return list;
       });
@@ -207,11 +235,35 @@ export default function MessageDock({
 
   const sender = currentUser ? { uid: currentUser.uid, email: currentUser.email, displayName: currentUser.displayName } : null;
 
+  // Messages between students and teachers always name a course (the teacher's course). The app
+  // fills it in: students pick a teacher (their courses come with them); teachers choose from the
+  // courses they share with that person, or any course they teach.
+  const isTeacherSender = privileges.isStaff && !isSuperadmin;
+  const composeRecipient = composeTo === '__typed__' ? normalizeEmail(composeEmail) : composeTo;
+  const composeContact = (contacts || []).find(c => c.email === composeRecipient) || null;
+  const contactCourses = courseChoices(composeContact?.courses);
+  const courseOptions = !composeRecipient || composeRecipient === SUPERADMIN_INBOX
+    ? []
+    : (contactCourses.length || !isTeacherSender ? contactCourses : courseChoices(teachingCourses));
+  const selectedCourse = courseOptions.find(c => c.id === composeCourseId)
+    || (composeCourseId === '__none__' ? null : courseOptions[0])
+    || null;
+
+  /** A course this person shares with `email` (for replies in conversations that name none). */
+  const courseSharedWith = (email) => {
+    const enrolled = (enrolledCourses || []).find(c => c && c.id !== undefined && normalizeEmail(c.authorEmail) === email);
+    if (enrolled) return { id: String(enrolled.id), title: enrolled.title || 'Course' };
+    return courseChoices((contacts || []).find(c => c.email === email)?.courses)[0] || null;
+  };
+
   const handleSendReply = async (e) => {
     e.preventDefault();
     if (!selectedThread || !reply.trim()) return;
     const partner = selectedThread.partnerEmail;
-    const courseRef = selectedThread.messages.slice().reverse().find(m => m.courseId);
+    const lastCourse = selectedThread.messages.slice().reverse().find(m => m.courseId);
+    const course = lastCourse
+      ? { id: lastCourse.courseId, title: lastCourse.courseTitle }
+      : (partner === SUPERADMIN_INBOX ? null : courseSharedWith(partner));
     setBusy(true);
     try {
       await sendMessage({
@@ -220,8 +272,8 @@ export default function MessageDock({
         to: partner,
         toName: selectedThread.partnerName,
         body: reply,
-        courseId: courseRef?.courseId || '',
-        courseTitle: courseRef?.courseTitle || ''
+        courseId: course?.id || '',
+        courseTitle: course?.title || ''
       });
       setReply('');
     } catch (err) {
@@ -240,6 +292,10 @@ export default function MessageDock({
       return;
     }
     const contact = (contacts || []).find(c => c.email === to);
+    if (!privileges.isStaff && to !== SUPERADMIN_INBOX && !selectedCourse) {
+      flash('error', 'Choose a teacher from the list: messages to a teacher are about one of their courses. You can always message the Super Admin.');
+      return;
+    }
     setBusy(true);
     try {
       const sent = await sendMessage({
@@ -249,8 +305,8 @@ export default function MessageDock({
         toName: contact?.name || '',
         subject: composeSubject,
         body: composeBody,
-        courseId: contact?.courses?.[0]?.id || '',
-        courseTitle: contact?.courses?.[0]?.title || ''
+        courseId: selectedCourse?.id || '',
+        courseTitle: selectedCourse?.title || ''
       });
       flash('success', 'Message sent.');
       setSelectedThreadId(sent.threadId);
@@ -483,19 +539,28 @@ export default function MessageDock({
                       <strong>New message</strong>
                     </header>
                     <label className="md-label" htmlFor="md-to">To</label>
-                    <select id="md-to" className="form-input" value={composeTo} onChange={e => setComposeTo(e.target.value)}>
+                    <select id="md-to" className="form-input" value={composeTo} onChange={e => { setComposeTo(e.target.value); setComposeCourseId(''); }}>
                       {(contacts || [{ email: SUPERADMIN_INBOX, name: '🛡️ Super Admin', courses: [] }]).map(c => (
                         <option key={c.email} value={c.email}>
                           {c.name}{c.email !== SUPERADMIN_INBOX ? ` — ${c.email}` : ''}{c.courses?.length ? ` (${c.courses.map(x => x.title).join(', ').slice(0, 60)})` : ''}
                         </option>
                       ))}
-                      <option value="__typed__">✉️ Other registered teacher / email…</option>
+                      {privileges.isStaff && <option value="__typed__">✉️ Other registered teacher / email…</option>}
                     </select>
                     {contactsLoading && <small className="md-sub">Loading registered teachers and contacts…</small>}
-                    {!privileges.isStaff && <small className="md-sub">You can message the Super Admin and any registered teacher.</small>}
-                    {privileges.isStaff && !isSuperadmin && <small className="md-sub">You can message the Super Admin, teachers, and students enrolled in your courses.</small>}
+                    {!privileges.isStaff && <small className="md-sub">You can message the Super Admin, or a teacher about one of their courses (yours, or a Global Course).</small>}
+                    {privileges.isStaff && !isSuperadmin && <small className="md-sub">You can message the Super Admin, teachers, and students enrolled in your courses. Each message names the course.</small>}
                     {composeTo === '__typed__' && (
                       <input type="email" className="form-input" placeholder="teacher@example.com" value={composeEmail} onChange={e => setComposeEmail(e.target.value)} aria-label="Recipient email" required />
+                    )}
+                    {courseOptions.length > 0 && (
+                      <>
+                        <label className="md-label" htmlFor="md-course">Course</label>
+                        <select id="md-course" className="form-input" value={selectedCourse?.id || '__none__'} onChange={e => setComposeCourseId(e.target.value)}>
+                          {isSuperadmin && <option value="__none__">— No course —</option>}
+                          {courseOptions.map(c => <option key={c.id} value={c.id}>{c.title}</option>)}
+                        </select>
+                      </>
                     )}
                     <label className="md-label" htmlFor="md-subject">Subject (optional)</label>
                     <input id="md-subject" className="form-input" maxLength={150} value={composeSubject} onChange={e => setComposeSubject(e.target.value)} />

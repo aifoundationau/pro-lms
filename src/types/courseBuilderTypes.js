@@ -390,7 +390,6 @@ export function createBlankCourse(authorId = 'anonymous', authorName = 'Educator
     year: `${new Date().getFullYear()} Semester 1`,
     startDate: new Date().toISOString().split('T')[0],
     description: '',
-    token_cost: 10,
     isDraft: true,
     isPublished: false,
     status: 'draft',

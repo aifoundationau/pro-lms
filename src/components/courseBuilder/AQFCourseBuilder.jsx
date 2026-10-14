@@ -135,21 +135,19 @@ function AQFCourseBuilderInner({
   currentUser,
   userProfile,
   userTokenBalance = 0,
-  onRefreshBalance
+  onRefreshBalance,
+  showQuickNavigator = false // hidden for now; set true to bring the sidebar navigator back
 }) {
   // Course State
   // Assessments live once, at course level (older courses keep their tasks, moved up from units).
   const [currentCourse, setCurrentCourse] = useState(() => moveUnitAssessmentsToCourse(course));
   const [activeUnitId, setActiveUnitId] = useState(course.units?.[0]?.id || null);
   const [activeTab, setActiveTab] = useState(initialPanel === 'assessments' ? 'assessments' : 'curriculum');
-  const [isSpecsExpanded, setIsSpecsExpanded] = useState(true);
-  const [isAssessmentsExpanded, setIsAssessmentsExpanded] = useState(true);
-  const [isUnitsSectionExpanded, setIsUnitsSectionExpanded] = useState(true);
-  const [expandedUnits, setExpandedUnits] = useState(() => {
-    const map = {};
-    if (course.units?.[0]?.id) map[course.units[0].id] = true;
-    return map;
-  });
+  // Every panel starts collapsed; panels open when clicked, and newly added items open.
+  const [isSpecsExpanded, setIsSpecsExpanded] = useState(false);
+  const [isAssessmentsExpanded, setIsAssessmentsExpanded] = useState(initialPanel === 'assessments');
+  const [isUnitsSectionExpanded, setIsUnitsSectionExpanded] = useState(false);
+  const [expandedUnits, setExpandedUnits] = useState({});
   const [expandedLessons, setExpandedLessons] = useState({});
   const [expandedAssessments, setExpandedAssessments] = useState({});
 
@@ -173,7 +171,7 @@ function AQFCourseBuilderInner({
     };
   }, [keysCourseId]);
 
-  // Add People / Enrol Members Modal State (0 Tokens)
+  // Add People / Enrol Members Modal State
   const [isAddPeopleOpen, setIsAddPeopleOpen] = useState(false);
 
   // AI Ingest Modal / Banner State
@@ -302,6 +300,7 @@ function AQFCourseBuilderInner({
       ...prev,
       units: prev.units.map(u => u.id === unitId ? { ...u, lessons: [...(u.lessons || []), newLesson] } : u)
     }));
+    setExpandedLessons(prev => ({ ...prev, [newLesson.id]: true }));
   };
 
   const handleUpdateLesson = (unitId, lessonId, field, value) => {
@@ -754,9 +753,9 @@ function AQFCourseBuilderInner({
             className="nav-btn secondary"
             style={{ borderColor: 'rgba(52, 211, 153, 0.5)', color: '#86efac', display: 'flex', alignItems: 'center', gap: '6px' }}
             onClick={() => setIsAddPeopleOpen(true)}
-            title="Free Teacher Privilege: Add any students, teachers, or colleagues at 0 tokens"
+            title="Add students, teachers or colleagues to this course"
           >
-            👥 Add People (0 🪙)
+            👥 Add People
           </button>
 
           <button
@@ -794,8 +793,9 @@ function AQFCourseBuilderInner({
       )}
 
       {/* Main Grid: Left Sidebar (Units/Meta) + Right Editor */}
-      <div className="builder-workspace-grid">
-        {/* Left Sidebar: Course Config & Unit Navigator */}
+      <div className={`builder-workspace-grid ${showQuickNavigator ? '' : 'no-sidebar'}`}>
+        {/* Left Sidebar: Quick Navigator (hidden for now) */}
+        {showQuickNavigator && (
         <aside className="builder-sidebar glass">
           <div className="sidebar-section">
             <h4 className="sidebar-heading">Quick Navigator</h4>
@@ -878,13 +878,14 @@ function AQFCourseBuilderInner({
             </div>
           </div>
         </aside>
+        )}
 
         {/* Right Editor Area */}
         <main className="builder-main-panel glass">
           {/* 📋 COURSE SPECIFICATIONS (one collapsible panel, above Course Assessments) */}
           <section id="builder-specs-panel" className="specs-container" aria-label="Course Specifications" style={{ marginBottom: '22px' }}>
             <div
-              className="specs-panel-header"
+              className={`specs-panel-header ${isSpecsExpanded ? '' : 'collapsed'}`}
               onClick={() => setIsSpecsExpanded(prev => !prev)}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1100,7 +1101,7 @@ function AQFCourseBuilderInner({
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
-                marginBottom: '8px',
+                marginBottom: isAssessmentsExpanded ? '8px' : 0,
                 gap: '10px',
                 flexWrap: 'wrap',
                 cursor: 'pointer',
@@ -1166,7 +1167,7 @@ function AQFCourseBuilderInner({
                   </div>
                 ) : (
                   courseAssessments.map((asmt) => {
-                    const isCardOpen = expandedAssessments[asmt.id] !== false;
+                    const isCardOpen = expandedAssessments[asmt.id] === true;
                     const rubricRows = Array.isArray(asmt.rubric) ? asmt.rubric : [];
                     const legacyRubricText = typeof asmt.rubric === 'string' ? asmt.rubric.trim() : '';
                     return (
@@ -1419,7 +1420,7 @@ function AQFCourseBuilderInner({
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
-                marginBottom: '10px',
+                marginBottom: isUnitsSectionExpanded ? '10px' : 0,
                 gap: '10px',
                 flexWrap: 'wrap',
                 cursor: 'pointer',
@@ -1474,7 +1475,7 @@ function AQFCourseBuilderInner({
                   </div>
                 ) : (
                   (currentCourse.units || []).map((unit, uIdx) => {
-                    const isUnitOpen = expandedUnits[unit.id] !== false;
+                    const isUnitOpen = expandedUnits[unit.id] === true;
                     const lessons = Array.isArray(unit.lessons) ? unit.lessons : [];
                     const unitQuizCount = lessons.reduce((acc, l) => acc + (l.blocks || []).filter(b => b.type === 'quiz').length, 0);
 
@@ -1644,7 +1645,7 @@ function AQFCourseBuilderInner({
                                 </div>
                               ) : (
                                 (unit.lessons || []).map((lesson, lIdx) => {
-                                  const isLessonOpen = expandedLessons[lesson.id] !== false;
+                                  const isLessonOpen = expandedLessons[lesson.id] === true;
                                   const quizBlocks = (lesson.blocks || []).filter(b => b.type === 'quiz');
 
                                   return (
@@ -2272,7 +2273,7 @@ function AQFCourseBuilderInner({
         </div>
       )}
 
-      {/* Course Add People Modal (0 Tokens) */}
+      {/* Course Add People Modal */}
       {isAddPeopleOpen && (
         <CourseAddPeopleModal
           course={currentCourse}
@@ -2356,6 +2357,9 @@ function AQFCourseBuilderInner({
           gap: 18px;
           align-items: start;
         }
+        .builder-workspace-grid.no-sidebar {
+          grid-template-columns: 1fr;
+        }
         @media (max-width: 980px) {
           .builder-workspace-grid {
             grid-template-columns: 1fr;
@@ -2436,7 +2440,6 @@ function AQFCourseBuilderInner({
         .builder-main-panel {
           padding: 22px;
           border-radius: 16px;
-          min-height: 600px;
         }
         .unit-editor-header {
           padding-bottom: 16px;
@@ -2795,6 +2798,7 @@ function AQFCourseBuilderInner({
         .course-details-more > summary { cursor: pointer; font-size: 0.82rem; font-weight: 700; color: #fef08a; }
         .legacy-rubric-note { padding: 8px 10px; border-radius: 8px; background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); font-size: 0.82rem; margin-bottom: 8px; }
         .specs-panel-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; cursor: pointer; padding: 6px 8px; border-radius: 10px; background: rgba(255, 255, 255, 0.03); margin-bottom: 10px; }
+        .specs-panel-header.collapsed { margin-bottom: 0; }
         .specs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 14px; }
         .specs-grid > div { min-width: 0; }
         .specs-grid .specs-wide { grid-column: 1 / -1; }
