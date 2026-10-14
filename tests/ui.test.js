@@ -6,6 +6,7 @@
  */
 
 import assert from 'node:assert';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -125,6 +126,37 @@ async function waitFor(check, label, timeout = 8000) {
 const buttons = (scope) => Array.from(scope.querySelectorAll('button'));
 const buttonWith = (scope, text) => buttons(scope).find(b => b.textContent.includes(text));
 const textOf = (scope) => scope.textContent.replace(/\s+/g, ' ');
+
+// ---------- CSS helpers (jsdom does not evaluate media queries) ----------
+/** Bodies of every `@media …` block that starts with `prelude`. */
+function mediaBlocks(css, prelude) {
+  const blocks = [];
+  for (let at = css.indexOf(prelude); at >= 0; at = css.indexOf(prelude, at + 1)) {
+    const open = css.indexOf('{', at);
+    let depth = 1;
+    let i = open + 1;
+    for (; i < css.length && depth; i++) {
+      if (css[i] === '{') depth++;
+      else if (css[i] === '}') depth--;
+    }
+    blocks.push(css.slice(open + 1, i - 1));
+  }
+  return blocks;
+}
+
+/** The stylesheet with every @media block removed (the rules that apply at all widths). */
+function stripMediaBlocks(css) {
+  let out = css;
+  for (const body of mediaBlocks(css, '@media')) out = out.replace(body, '');
+  return out;
+}
+
+/** Declarations of the rule whose selector list is exactly `selector` (whitespace-insensitive). */
+function ruleBody(css, selector) {
+  const pattern = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  const match = new RegExp(`(?:^|[;{}\\s])${pattern}\\s*\\{([^}]*)\\}`).exec(css);
+  return match ? match[1] : null;
+}
 
 /** Clicks every "Expand …" toggle until none are left (opening a section reveals its units' toggles). */
 async function expandAll(scope) {
@@ -493,6 +525,30 @@ async function run() {
     assert(view.container.querySelector('img[src="/david-photo.jpg"]'), 'David image is rendered');
     await click(view.container.querySelector('.close-btn'));
 
+    await view.unmount();
+  });
+
+  await test('Phone header (signed out): Sign in with Google replaces the 3-bar menu; Contact moves to the footer', async () => {
+    const { default: App } = await load('/src/App.jsx');
+    const view = await render(React.createElement(App));
+    const header = await waitFor(() => view.container.querySelector('header.header'), 'header');
+    const signIn = await waitFor(() => {
+      const button = Array.from(header.children).find(el => el.classList.contains('mobile-signin-btn'));
+      return button && !button.disabled ? button : null;
+    }, 'phone Sign in with Google button');
+    assert(!view.container.querySelector('.mobile-menu-toggle, .hamburger-line'), 'the 3-bar menu is gone');
+    assert.strictEqual(signIn.textContent.trim(), 'Sign in with Google');
+    assert(signIn.querySelector('svg'), 'Google "G" icon');
+    assert(header.firstElementChild.classList.contains('logo-btn') && signIn.previousElementSibling === header.firstElementChild,
+      'logo on the left, then the Google button (top right of the header)');
+    assert(!header.querySelector('.mobile-account-btn, .mobile-role-status'), 'no account menu before sign-in');
+    assert(!view.container.querySelector('.mobile-nav-backdrop, nav.header-nav.mobile-open'), 'nothing to open while signed out');
+    // The phone button runs the real Google sign-in (offline here, so its error is shown).
+    await click(signIn);
+    await waitFor(() => textOf(view.container).includes('Firebase Auth is not initialized'), 'sign-in attempted');
+    // Contact used to live in the 3-bar menu; on phones it is in the footer.
+    await click(view.container.querySelector('footer .mobile-footer-contact'));
+    assert(view.container.querySelector('.contact-steps'), 'Contact opens from the footer');
     await view.unmount();
   });
 
@@ -954,6 +1010,102 @@ async function run() {
     await waitFor(() => textOf(view.container).includes('Give tokens to any registered account'), 'Give Tokens tab');
     await view.unmount();
     delete globalThis.__TEST_AUTH__;
+  });
+
+  await test('Phone header (signed in): the Google button opens a role menu whose first item is the role status', async () => {
+    const menuButtons = (nav) => Array.from(nav.children).filter(el => el.tagName === 'BUTTON').map(b => b.textContent.replace(/\s+/g, ' ').trim());
+    const memberItems = ['Student Panel', 'Global Search', 'Join as Teacher', 'Token Fund', 'Tokens', 'Logout'];
+    const roles = [
+      { user: { uid: 's1', email: 'stu@school.edu', displayName: 'Stu' }, profile: { role: 'Supporter', email: 'stu@school.edu' }, label: 'Supporter', items: memberItems },
+      { user: { uid: 's2', email: 'lee@school.edu', displayName: 'Lee' }, profile: { role: 'student', email: 'lee@school.edu' }, label: 'Student', items: memberItems },
+      { user: { uid: 't1', email: teacher.email, displayName: 'Ms T' }, profile: { role: 'teacher', email: teacher.email }, label: 'Teacher', items: ['My Courses', 'Student Registration', 'Global Search', 'Token Fund', 'Tokens', 'Logout'] },
+      { user: { uid: 'a1', email: 'support@aifoundation.net.au', displayName: 'Admin' }, profile: { role: 'Superadmin', email: 'support@aifoundation.net.au' }, label: 'Super Admin', items: ['My Courses', 'Student Registration', 'Global Search', 'Token Fund', 'UNL Tokens', 'Super Admin Control', 'Logout'] }
+    ];
+    // jsdom has no matchMedia: a stand-in lets the test widen the window to the desktop layout.
+    const widthListeners = new Set();
+    window.matchMedia = (media) => ({ media, matches: false, addEventListener: (_type, fn) => widthListeners.add(fn), removeEventListener: (_type, fn) => widthListeners.delete(fn) });
+    try {
+      for (const r of roles) {
+        const view = await renderAs(r.user, r.profile);
+        const header = view.container.querySelector('header.header');
+        const nav = header.querySelector('nav.header-nav');
+        const account = header.querySelector('.mobile-account-btn');
+        const isOpen = () => account.getAttribute('aria-expanded') === 'true' && nav.classList.contains('mobile-open') && Boolean(header.querySelector('.mobile-nav-backdrop'));
+        const isClosed = () => account.getAttribute('aria-expanded') === 'false' && !nav.classList.contains('mobile-open') && !header.querySelector('.mobile-nav-backdrop');
+        assert(account && account.previousElementSibling?.classList.contains('logo-btn'), `${r.label}: Google button next to the logo (top right)`);
+        assert(account.querySelector('svg'), 'Google "G" on the button');
+        assert(!view.container.querySelector('.mobile-menu-toggle, .hamburger-line'), 'the 3-bar menu is gone');
+        assert.strictEqual(account.getAttribute('aria-controls'), nav.id, 'the button controls the menu');
+        assert(account.getAttribute('aria-label').includes(r.label), account.getAttribute('aria-label'));
+        assert(isClosed(), `${r.label}: menu starts closed`);
+        // Role status is always the first item, then the role's own items, Logout last.
+        const status = nav.firstElementChild;
+        assert(status.classList.contains('mobile-role-status'), `${r.label}: role status is the first item`);
+        assert(textOf(status).includes(r.user.email) && textOf(status).includes(`Role: ${r.label}`), textOf(status));
+        const items = menuButtons(nav);
+        assert.strictEqual(items.length, r.items.length, `${r.label} menu: ${items.join(' | ')}`);
+        r.items.forEach((label, i) => assert(items[i].includes(label), `${r.label} item ${i + 1}: expected ${label}, got ${items[i]}`));
+
+        await click(account);
+        assert(isOpen(), `${r.label}: pressing the Google button opens the menu`);
+        await click(account);
+        assert(isClosed(), 'pressing it again closes it');
+        await click(account);
+        await click(header.querySelector('.mobile-nav-backdrop'));
+        assert(isClosed(), 'tapping outside closes it');
+        await click(account);
+        await act(async () => { document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+        assert(isClosed(), 'Escape closes it');
+        assert.strictEqual(document.activeElement, account, 'focus returns to the Google button');
+        await click(account);
+        assert.strictEqual(widthListeners.size, 1, 'listens for the desktop width only while open');
+        await act(async () => { for (const fn of [...widthListeners]) fn({ matches: true }); });
+        assert(isClosed(), 'widening to the desktop layout closes it');
+        assert.strictEqual(widthListeners.size, 0, 'listener removed when closed (no leak)');
+        await click(account);
+        await click(buttonWith(nav, 'Global Search'));
+        assert(isClosed(), 'choosing an item closes the menu');
+        await waitFor(() => /Curated Course Catalog/i.test(textOf(view.container)), `${r.label}: Global Search opened from the menu`);
+        await view.unmount();
+      }
+
+      // Signed-in front page: same Google button and role status, then the front-page items.
+      const view = await renderAs(roles[2].user, roles[2].profile);
+      await click(view.container.querySelector('.logo-btn'));
+      const header = await waitFor(() => view.container.querySelector('.hero-text') && view.container.querySelector('header.header'), 'front page');
+      const nav = header.querySelector('nav.header-nav');
+      await click(header.querySelector('.mobile-account-btn'));
+      assert(nav.classList.contains('mobile-open'));
+      assert(nav.firstElementChild.classList.contains('mobile-role-status') && textOf(nav.firstElementChild).includes('Role: Teacher'));
+      assert.deepStrictEqual(menuButtons(nav).map(t => t.replace(/^\W+/u, '')), ['Contact', 'Go to Admin', 'Token Fund', 'Logout']);
+      // Logging out from the menu closes it and brings back Sign in with Google.
+      await click(buttonWith(nav, 'Logout'));
+      await waitFor(() => view.container.querySelector('header.header .mobile-signin-btn'), 'signed out');
+      assert(!view.container.querySelector('.mobile-account-btn, .mobile-nav-backdrop, nav.header-nav.mobile-open, .mobile-role-status'), 'menu gone after logout');
+      await view.unmount();
+    } finally {
+      delete window.matchMedia;
+      delete globalThis.__TEST_AUTH__;
+    }
+  });
+
+  await test('Phone header CSS: hidden on desktop, menu closed until the Google button is pressed', async () => {
+    const css = readFileSync(fileURLToPath(new URL('../src/App.css', import.meta.url)), 'utf8');
+    const phone = mediaBlocks(css, '@media (max-width: 768px)').join('\n');
+    const desktop = mediaBlocks(css, '@media (min-width: 769px)').join('\n');
+    const base = stripMediaBlocks(css);
+    assert(/display:\s*none/.test(ruleBody(base, '.header .mobile-signin-btn, .header .mobile-account-btn, .header-nav .mobile-role-status, .footer .mobile-footer-contact') || ''),
+      'phone-only pieces are hidden by default (desktop and laptop)');
+    for (const name of ['mobile-signin-btn', 'mobile-account-btn', 'mobile-role-status', 'mobile-footer-contact']) {
+      assert(!desktop.includes(name), `${name} is never shown by the desktop rules`);
+    }
+    assert(/display:\s*inline-flex/.test(ruleBody(phone, '.header .mobile-signin-btn') || ''), 'phones show Sign in with Google');
+    assert(/display:\s*inline-flex/.test(ruleBody(phone, '.header .mobile-account-btn') || ''), 'phones show the Google account button');
+    assert(/display:\s*flex/.test(ruleBody(phone, '.header-nav .mobile-role-status') || ''), 'phones show the role status item');
+    // ".header nav { display: flex }" out-ranks a plain ".header-nav" rule, which once kept the phone menu open.
+    assert(/display:\s*none/.test(ruleBody(phone, '.header .header-nav') || ''), 'phone menu is closed by default');
+    assert(/display:\s*flex/.test(ruleBody(phone, '.header .header-nav.mobile-open') || ''), 'phone menu opens with .mobile-open');
+    assert(!/mobile-menu-toggle|hamburger/.test(css), 'no 3-bar menu styles left');
   });
 
   console.log(`\n🎉 All UI interaction tests passed (${passed}).`);

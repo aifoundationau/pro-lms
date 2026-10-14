@@ -16,6 +16,7 @@ import CourseSubmissionsModal from './components/course/CourseSubmissionsModal';
 import TokenFundModal from './components/TokenFundModal';
 import MessageDock from './components/messaging/MessageDock';
 import StudentLearningPanel from './components/student/StudentLearningPanel';
+import { HEADER_MENU_ID, MobileAccountButton, MobileRoleStatus, MobileSignInButton } from './components/HeaderAccountMenu';
 import { createBlankCourse, generateEntityId, createBlankUnit } from './types/courseBuilderTypes';
 import { confirmCheckoutSession } from './services/stripeService';
 import { getUserTokenBalance } from './services/tokenService';
@@ -83,6 +84,9 @@ function App() {
   const [isSuperAdminPanelOpen, setIsSuperAdminPanelOpen] = useState(false);
   const [userTokenBalance, setUserTokenBalance] = useState(0);
   const [showFrontPage, setShowFrontPage] = useState(false);
+  // Android / iPhone: the role menu opened from the Google button at the top right of the header.
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const accountButtonRef = useRef(null);
 
   // Student panel: courses this account is enrolled in (found by sign-in email)
   const [enrolledCourses, setEnrolledCourses] = useState([]);
@@ -116,6 +120,7 @@ function App() {
       setAuthUser(firebaseUser);
       setUserProfile(profile);
       setIsAuthLoading(false);
+      if (!firebaseUser) setIsMobileMenuOpen(false);
     });
     return () => unsubscribe();
   }, []);
@@ -257,8 +262,28 @@ function App() {
 
   const [activeTab, setActiveTab] = useState('my-courses');
   const [searchQuery, setSearchQuery] = useState('');
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [managingPeopleCourse, setManagingPeopleCourse] = useState(null);
+
+  // While the phone menu is open: Escape closes it (focus back on the Google button), and it
+  // closes if the window widens to the desktop layout.
+  useEffect(() => {
+    if (!isMobileMenuOpen) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key !== 'Escape') return;
+      setIsMobileMenuOpen(false);
+      accountButtonRef.current?.focus();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    const desktop = typeof window.matchMedia === 'function' ? window.matchMedia('(min-width: 769px)') : null;
+    const onWidthChange = (e) => {
+      if (e.matches) setIsMobileMenuOpen(false);
+    };
+    desktop?.addEventListener?.('change', onWidthChange);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      desktop?.removeEventListener?.('change', onWidthChange);
+    };
+  }, [isMobileMenuOpen]);
   
   const [myCourses, setMyCourses] = useState([
     { id: 1, title: 'Introduction to AI', students: 42, startDate: '2026-03-02' },
@@ -1477,24 +1502,23 @@ function App() {
             <h1>OzEdu Admin</h1>
           </button>
 
-          {/* Android / Mobile Collapsible Hamburger Button */}
-          <button 
-            className={`mobile-menu-toggle ${isMobileMenuOpen ? 'open' : ''}`}
-            onClick={() => setIsMobileMenuOpen(prev => !prev)}
-            aria-label="Toggle navigation menu"
-            aria-expanded={isMobileMenuOpen}
-          >
-            <span className="hamburger-line"></span>
-            <span className="hamburger-line"></span>
-            <span className="hamburger-line"></span>
-          </button>
+          {/* Android / iPhone: the Google button at the top right opens the role menu (desktop shows the nav inline) */}
+          <MobileAccountButton
+            ref={accountButtonRef}
+            user={authUser}
+            role={privileges.role}
+            open={isMobileMenuOpen}
+            onToggle={() => setIsMobileMenuOpen(prev => !prev)}
+          />
 
           {/* Collapsible Backdrop on Mobile */}
           {isMobileMenuOpen && (
             <div className="mobile-nav-backdrop" onClick={() => setIsMobileMenuOpen(false)} />
           )}
 
-          <nav className={`header-nav ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
+          <nav id={HEADER_MENU_ID} className={`header-nav ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
+            {/* Phones: the first item is always the role status */}
+            <MobileRoleStatus user={authUser} privileges={privileges} />
             {privileges.isStaff && (
               <button className={`nav-btn ${activeTab === 'my-courses' ? 'primary' : 'secondary'}`} onClick={() => { setActiveTab('my-courses'); setIsMobileMenuOpen(false); }}>My Courses</button>
             )}
@@ -2168,24 +2192,27 @@ function App() {
           <h1>OzEdu</h1>
         </button>
 
-        {/* Android / Mobile Collapsible Hamburger Button */}
-        <button 
-          className={`mobile-menu-toggle ${isMobileMenuOpen ? 'open' : ''}`}
-          onClick={() => setIsMobileMenuOpen(prev => !prev)}
-          aria-label="Toggle navigation menu"
-          aria-expanded={isMobileMenuOpen}
-        >
-          <span className="hamburger-line"></span>
-          <span className="hamburger-line"></span>
-          <span className="hamburger-line"></span>
-        </button>
+        {/* Android / iPhone: the Google button at the top right — sign in, or open the role menu once signed in */}
+        {isLoggedIn ? (
+          <MobileAccountButton
+            ref={accountButtonRef}
+            user={authUser}
+            role={privileges.role}
+            open={isMobileMenuOpen}
+            onToggle={() => setIsMobileMenuOpen(prev => !prev)}
+          />
+        ) : (
+          <MobileSignInButton onClick={handleSignIn} busy={isAuthLoading} />
+        )}
 
         {/* Collapsible Backdrop on Mobile */}
-        {isMobileMenuOpen && (
+        {isLoggedIn && isMobileMenuOpen && (
           <div className="mobile-nav-backdrop" onClick={() => setIsMobileMenuOpen(false)} />
         )}
 
-        <nav className={`header-nav ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
+        <nav id={HEADER_MENU_ID} className={`header-nav ${isMobileMenuOpen ? 'mobile-open' : ''}`}>
+          {/* Phones: the first item is always the role status */}
+          {isLoggedIn && <MobileRoleStatus user={authUser} privileges={privileges} />}
           <button className="nav-btn secondary" onClick={() => { setIsContactOpen(true); setIsMobileMenuOpen(false); }}>Contact</button>
           {isLoggedIn ? (
             <>
@@ -2300,6 +2327,15 @@ function App() {
             onClick={() => setIsAboutDavidOpen(true)}
           >
             About David
+          </button>
+          {/* Phones: Contact (the header only has room for the Google button) */}
+          <button
+            type="button"
+            className="nav-btn secondary mobile-footer-contact"
+            style={{ padding: '4px 14px', fontSize: '0.82rem', borderRadius: '20px', cursor: 'pointer' }}
+            onClick={() => setIsContactOpen(true)}
+          >
+            Contact
           </button>
         </div>
       </footer>
