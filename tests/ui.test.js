@@ -531,6 +531,8 @@ async function run() {
     assert(frontCards[0].querySelector('.card-icon'), 'postcard has icon');
     assert(frontCards[0].querySelector('h3'), 'postcard has title heading');
     assert(frontCards[0].textContent.includes('Mission & Ecosystem'), 'postcard has title text');
+    for (const card of frontCards) assert(card.querySelector('p')?.textContent.trim().length > 100, 'every postcard carries its full paragraph');
+    assert(!/tap to flip/i.test(textOf(view.container)), 'postcards do not flip');
 
     await view.unmount();
   });
@@ -1182,6 +1184,20 @@ async function run() {
     assert(/flex-wrap:\s*wrap/.test(ruleBody(phone, '.pagination-actions') || ''), 'pagination buttons wrap on phones');
     assert(/width:\s*100%\s*!important/.test(ruleBody(phone, '.global-filter-row > .search-input, .global-filter-row > .filter-select') || ''),
       'the search box and subject filter fit the screen');
+  });
+
+  await test('Phone front page CSS: the 4 postcards show their full text, grow to fit it, stay even and never flip', async () => {
+    const css = readFileSync(fileURLToPath(new URL('../src/App.css', import.meta.url)), 'utf8');
+    const phone = mediaBlocks(css, '@media (max-width: 768px)').join('\n');
+    const grid = ruleBody(phone, '.cards-grid.front-cards-grid, .front-cards-grid') || '';
+    assert(/grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(grid) && /grid-auto-rows:\s*1fr/.test(grid), `two even columns, equal rows (got: ${grid.trim()})`);
+    const card = ruleBody(phone, '.front-cards-grid .front-card, .cards-grid .card.front-card, .front-card') || '';
+    // A fixed square cannot hold the paragraph on a phone: the box must grow to fit its text.
+    for (const rule of [/aspect-ratio:\s*auto/, /min-height:\s*0/, /grid-template-areas:/]) assert(rule.test(card), `postcard: ${rule}`);
+    const text = ruleBody(phone, '.front-cards-grid .front-card p, .cards-grid .card.front-card p, .front-card p') || '';
+    assert(text && !/display:\s*none/.test(text), 'the paragraph is shown on phones');
+    const app = readFileSync(fileURLToPath(new URL('../src/App.jsx', import.meta.url)), 'utf8');
+    assert(!/tap to flip|is-flipped|flippedFrontCards/i.test(app), 'the postcards do not flip');
   });
 
   console.log(`\n🎉 All UI interaction tests passed (${passed}).`);
