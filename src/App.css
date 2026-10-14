@@ -274,9 +274,10 @@
   display: block !important;
 }
 
-/* Android / iPhone / Mobile viewports:
-   Show only the 4 postcards with icons and headings, no paragraph text anywhere on the front page.
-   Static presentation (no flip). */
+/* Android / iPhone / Mobile viewports: the 4 postcards show their icon, heading and full paragraph
+   (the same words as desktop), laid out like the back of a postcard: icon beside the heading, text
+   centred below. They do not flip. All four boxes share one size (the height of the longest text),
+   so every word fits inside its box and the grid stays even. Text scales with the screen width. */
 @media (max-width: 768px) {
   .hero-text {
     margin: 0 auto 20px auto !important;
@@ -288,73 +289,86 @@
     margin-bottom: 0 !important;
   }
 
-  /* No paragraph text on mobile front page */
+  /* No hero paragraph on the mobile front page (the postcards carry the text) */
   .hero-text p {
     display: none !important;
   }
 
+  /* Two even columns; every row takes the height of the tallest postcard */
   .cards-grid.front-cards-grid,
   .front-cards-grid {
-    grid-template-columns: repeat(2, 1fr) !important;
-    max-width: 440px !important;
-    gap: 12px !important;
-    margin: 0 auto 24px auto !important;
-    padding: 0 12px !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: 1fr;
+    max-width: 440px;
+    gap: 10px;
+    margin: 0 auto 24px auto;
+    padding: 0;
     justify-content: center;
   }
 
+  /* Icon beside the heading (centred as a pair), paragraph across the full width below */
   .front-cards-grid .front-card,
   .cards-grid .card.front-card,
   .front-card {
-    aspect-ratio: 1 / 1 !important;
-    min-height: 140px !important;
-    padding: 14px 10px !important;
-    border-radius: 16px !important;
-    background: rgba(15, 23, 42, 0.72) !important;
-    border: 1px solid rgba(255, 255, 255, 0.14) !important;
-    backdrop-filter: blur(16px) !important;
-    -webkit-backdrop-filter: blur(16px) !important;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
-    justify-content: center !important;
-    align-items: center !important;
-    text-align: center !important;
-    display: flex !important;
-    flex-direction: column !important;
-    cursor: default !important;
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr);
+    grid-template-areas:
+      ". icon title ."
+      "text text text text";
+    align-content: center;
+    row-gap: 6px;
+    aspect-ratio: auto;
+    min-width: 0;
+    min-height: 0;
+    padding: 12px 10px;
+    border-radius: 16px;
+    background: rgba(15, 23, 42, 0.78);
+    border: 1.5px solid rgba(250, 204, 21, 0.55);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    overflow: visible;
+    cursor: default;
   }
 
   .front-cards-grid .front-card:hover,
   .cards-grid .card.front-card:hover,
   .front-card:hover {
-    transform: none !important;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+    transform: none;
+    border-color: rgba(250, 204, 21, 0.55);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   }
 
   .front-cards-grid .front-card .card-icon,
   .cards-grid .card.front-card .card-icon,
   .front-card .card-icon {
-    width: 38px !important;
-    height: 38px !important;
-    font-size: 1.35rem !important;
-    margin: 0 auto 8px auto !important;
+    grid-area: icon;
+    width: auto;
+    height: auto;
+    margin: 0 6px 0 0;
+    background: none;
+    border: none;
+    font-size: clamp(0.95rem, 4.2vw, 1.2rem);
+    line-height: 1;
   }
 
   .front-cards-grid .front-card h3,
   .cards-grid .card.front-card h3,
   .front-card h3 {
-    font-size: 0.88rem !important;
-    line-height: 1.25 !important;
-    margin: 0 !important;
-    color: #fef08a !important;
-    display: block !important;
-    text-align: center !important;
+    grid-area: title;
+    margin: 0;
+    font-size: clamp(0.72rem, 3.2vw, 0.9rem);
+    line-height: 1.2;
+    text-align: left;
+    overflow: visible;
+    text-wrap: balance;
   }
 
-  /* Hide paragraph text completely on Android / iPhone */
   .front-cards-grid .front-card p,
   .cards-grid .card.front-card p,
   .front-card p {
-    display: none !important;
+    grid-area: text;
+    font-size: clamp(0.62rem, 2.9vw, 0.78rem);
+    line-height: 1.4;
+    text-wrap: pretty;
   }
 }
 
@@ -365,32 +379,14 @@
 
   .cards-grid.front-cards-grid,
   .front-cards-grid {
-    gap: 8px !important;
-    padding: 0 8px !important;
+    gap: 8px;
   }
 
   .front-cards-grid .front-card,
   .cards-grid .card.front-card,
   .front-card {
-    min-height: 120px !important;
-    padding: 10px 6px !important;
-    border-radius: 12px !important;
-  }
-
-  .front-cards-grid .front-card .card-icon,
-  .cards-grid .card.front-card .card-icon,
-  .front-card .card-icon {
-    width: 32px !important;
-    height: 32px !important;
-    font-size: 1.15rem !important;
-    margin-bottom: 4px !important;
-  }
-
-  .front-cards-grid .front-card h3,
-  .cards-grid .card.front-card h3,
-  .front-card h3 {
-    font-size: 0.76rem !important;
-    line-height: 1.2 !important;
+    padding: 10px 7px;
+    border-radius: 12px;
   }
 }
 
