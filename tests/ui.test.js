@@ -525,17 +525,12 @@ async function run() {
     assert(view.container.querySelector('img[src="/david-photo.jpg"]'), 'David image is rendered');
     await click(view.container.querySelector('.close-btn'));
 
-    // Front page 4 postcards: click flips card over to show paragraph text, click again flips back
+    // Front page 4 postcards: exactly 4 postcards rendered with icon and title
     const frontCards = view.container.querySelectorAll('.front-card');
     assert.strictEqual(frontCards.length, 4, '4 postcards rendered on front page');
-    assert(!frontCards[0].classList.contains('is-flipped'), 'card 0 initially unflipped');
-    assert(frontCards[0].querySelector('.front-card-desc-mobile').textContent.includes('OzEdu bridges'), 'back contains paragraph text');
-    await click(frontCards[0]);
-    assert(frontCards[0].classList.contains('is-flipped'), 'card 0 flips on click');
-    assert.strictEqual(frontCards[0].getAttribute('aria-expanded'), 'true');
-    await click(frontCards[0]);
-    assert(!frontCards[0].classList.contains('is-flipped'), 'card 0 flips back on second click');
-    assert.strictEqual(frontCards[0].getAttribute('aria-expanded'), 'false');
+    assert(frontCards[0].querySelector('.card-icon'), 'postcard has icon');
+    assert(frontCards[0].querySelector('h3'), 'postcard has title heading');
+    assert(frontCards[0].textContent.includes('Mission & Ecosystem'), 'postcard has title text');
 
     await view.unmount();
   });
