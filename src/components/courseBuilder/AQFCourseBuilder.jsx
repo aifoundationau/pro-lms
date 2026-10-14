@@ -142,6 +142,7 @@ function AQFCourseBuilderInner({
   const [currentCourse, setCurrentCourse] = useState(() => moveUnitAssessmentsToCourse(course));
   const [activeUnitId, setActiveUnitId] = useState(course.units?.[0]?.id || null);
   const [activeTab, setActiveTab] = useState(initialPanel === 'assessments' ? 'assessments' : 'curriculum');
+  const [isSpecsExpanded, setIsSpecsExpanded] = useState(true);
   const [isAssessmentsExpanded, setIsAssessmentsExpanded] = useState(true);
   const [isUnitsSectionExpanded, setIsUnitsSectionExpanded] = useState(true);
   const [expandedUnits, setExpandedUnits] = useState(() => {
@@ -797,160 +798,25 @@ function AQFCourseBuilderInner({
         {/* Left Sidebar: Course Config & Unit Navigator */}
         <aside className="builder-sidebar glass">
           <div className="sidebar-section">
-            <h4 className="sidebar-heading">Course Specifications</h4>
-            
-            <label className="field-label">Course Title</label>
-            <input
-              type="text"
-              className="form-input"
-              value={currentCourse.title || ''}
-              onChange={e => handleCourseFieldChange('title', e.target.value)}
-              placeholder="e.g. Diploma of Cyber Security"
-            />
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-              <div>
-                <label className="field-label">Course Code</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={currentCourse.code || ''}
-                  onChange={e => handleCourseFieldChange('code', e.target.value)}
-                  placeholder="e.g. ICT50220"
-                />
-              </div>
-              <div>
-                <label className="field-label">Token Cost</label>
-                <input
-                  type="number"
-                  min="0"
-                  className="form-input"
-                  value={currentCourse.token_cost !== undefined ? currentCourse.token_cost : 10}
-                  onChange={e => handleCourseFieldChange('token_cost', Number(e.target.value) || 0)}
-                  title="How many tokens students spend to enroll (0 = Free)"
-                />
-              </div>
-            </div>
-
-            <label className="field-label">Level Taxonomy</label>
-            <select
-              className="form-input"
-              value={currentCourse.aqfLevel !== undefined ? currentCourse.aqfLevel : 0}
-              onChange={e => handleCourseFieldChange('aqfLevel', Number(e.target.value))}
-            >
-              {AQF_LEVELS.map(lvl => (
-                <option key={lvl.level} value={lvl.level}>
-                  {lvl.title}
-                </option>
-              ))}
-            </select>
-            <small style={{ color: 'var(--text-secondary)', display: 'block', marginTop: '4px', fontSize: '0.78rem' }}>
-              {selectedAqf.competencySummary}
-            </small>
-
-            {/* Curriculum Standards: the AI Assist agent follows the matching /skills/*.md rules */}
-            <label className="field-label" style={{ marginTop: '10px' }}>Curriculum Standards (AI Alignment)</label>
-            <div className="standards-chip-grid" role="group" aria-label="Curriculum standards">
-              {CURRICULUM_STANDARDS.map(std => {
-                const isSelected = selectedStandardIds.includes(std.id);
-                const isSkipped = standardsRouting.skipped.some(s => s.id === std.id);
-                return (
-                  <label
-                    key={std.id}
-                    className={`standard-chip ${isSelected ? 'selected' : ''} ${isSkipped ? 'skipped' : ''}`}
-                    title={`${std.region} — ${std.description}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => handleToggleStandard(std.id)}
-                    />
-                    <span>{std.flag} {std.label}</span>
-                  </label>
-                );
-              })}
-            </div>
-            {standardsRouting.advisories.map(msg => (
-              <small key={msg} className="standards-advisory">⚠️ {msg}</small>
-            ))}
-
-            <label className="field-label" style={{ marginTop: '10px' }}>Course Description</label>
-            <textarea
-              rows="3"
-              className="form-input"
-              value={currentCourse.description || ''}
-              onChange={e => handleCourseFieldChange('description', e.target.value)}
-              placeholder="Comprehensive industry overview and target learning cohort..."
-            />
-
-            <details className="course-details-more">
-              <summary>More course details</summary>
-              <label className="field-label" style={{ marginTop: '8px' }}>Category</label>
-              <input
-                type="text"
-                className="form-input"
-                value={currentCourse.category || ''}
-                onChange={e => handleCourseFieldChange('category', e.target.value)}
-                placeholder="e.g. Information Technology"
-              />
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                <div>
-                  <label className="field-label" style={{ marginTop: '8px' }}>Year / Semester</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    value={currentCourse.year || ''}
-                    onChange={e => handleCourseFieldChange('year', e.target.value)}
-                    placeholder="2026 Semester 1"
-                  />
-                </div>
-                <div>
-                  <label className="field-label" style={{ marginTop: '8px' }}>Start Date</label>
-                  <input
-                    type="date"
-                    className="form-input"
-                    value={currentCourse.startDate || ''}
-                    onChange={e => handleCourseFieldChange('startDate', e.target.value)}
-                  />
-                </div>
-              </div>
-              <label className="field-label" style={{ marginTop: '8px' }}>Course Learning Outcomes (one per line)</label>
-              <textarea
-                rows="4"
-                className="form-input"
-                value={listToLines(currentCourse.learningOutcomes)}
-                onChange={e => handleCourseFieldChange('learningOutcomes', linesToList(e.target.value))}
-                placeholder="Analyse…&#10;Apply…&#10;Evaluate…"
-              />
-              <label className="field-label" style={{ marginTop: '8px' }}>Assumed Knowledge / Prerequisites</label>
-              <textarea
-                rows="2"
-                className="form-input"
-                value={currentCourse.knowledge || ''}
-                onChange={e => handleCourseFieldChange('knowledge', e.target.value)}
-                placeholder="What learners should already know"
-              />
-              <label className="field-label" style={{ marginTop: '8px' }}>Level Equivalence Notes</label>
-              <textarea
-                rows="2"
-                className="form-input"
-                value={currentCourse.aqfEquivalenceNotes || ''}
-                onChange={e => handleCourseFieldChange('aqfEquivalenceNotes', e.target.value)}
-                placeholder="How this maps to AQF or international frameworks"
-              />
-              <label className="field-label" style={{ marginTop: '8px' }}>Cover Image URL</label>
-              <input
-                type="url"
-                className="form-input"
-                value={currentCourse.thumbnail || ''}
-                onChange={e => handleCourseFieldChange('thumbnail', e.target.value)}
-                placeholder="https://…"
-              />
-            </details>
-          </div>
-
-          <div className="sidebar-section">
             <h4 className="sidebar-heading">Quick Navigator</h4>
+            <button
+              type="button"
+              className={`course-assessments-nav course-specs-nav ${isSpecsExpanded ? 'active' : ''}`}
+              onClick={() => {
+                setIsSpecsExpanded(true);
+                const el = document.getElementById('builder-specs-panel');
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }}
+              style={{ width: '100%', marginBottom: '8px' }}
+              title="Jump to Course Specifications at the top of the right column"
+            >
+              <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
+                <div className="course-assessments-nav-label">📋 Course Specifications</div>
+                <div className="course-assessments-nav-sub">
+                  {currentCourse.code ? `${currentCourse.code} • ` : ''}{selectedAqf.shortTitle}
+                </div>
+              </div>
+            </button>
             <button
               type="button"
               className={`course-assessments-nav ${isAssessmentsExpanded ? 'active' : ''}`}
@@ -1015,7 +881,219 @@ function AQFCourseBuilderInner({
 
         {/* Right Editor Area */}
         <main className="builder-main-panel glass">
-          {/* 🎯 COURSE ASSESSMENTS & RUBRICS (At the very top of the right column) */}
+          {/* 📋 COURSE SPECIFICATIONS (one collapsible panel, above Course Assessments) */}
+          <section id="builder-specs-panel" className="specs-container" aria-label="Course Specifications" style={{ marginBottom: '22px' }}>
+            <div
+              className="specs-panel-header"
+              onClick={() => setIsSpecsExpanded(prev => !prev)}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="collapse-toggle-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsSpecsExpanded(prev => !prev);
+                  }}
+                  aria-expanded={isSpecsExpanded}
+                  aria-controls="builder-specs-body"
+                  aria-label={isSpecsExpanded ? 'Collapse Course Specifications' : 'Expand Course Specifications'}
+                  style={{ background: 'transparent', border: 'none', color: '#fef08a', fontSize: '1rem', cursor: 'pointer' }}
+                >
+                  {isSpecsExpanded ? '▼' : '►'}
+                </button>
+                <h3 style={{ margin: 0, fontSize: '1.15rem' }}>📋 Course Specifications</h3>
+                {!isSpecsExpanded && (
+                  <span style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+                    {currentCourse.title || 'Untitled Course'}{currentCourse.code ? ` • ${currentCourse.code}` : ''} • {selectedAqf.shortTitle}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                className="nav-btn secondary"
+                style={{ padding: '4px 10px', fontSize: '0.8rem' }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsSpecsExpanded(prev => !prev);
+                }}
+              >
+                {isSpecsExpanded ? 'Collapse' : 'Expand'}
+              </button>
+            </div>
+
+            {isSpecsExpanded && (
+              <div id="builder-specs-body" className="specs-grid">
+                <div className="specs-wide">
+                  <label className="field-label" htmlFor="spec-title">Course Title</label>
+                  <input
+                    id="spec-title"
+                    type="text"
+                    className="form-input"
+                    value={currentCourse.title || ''}
+                    onChange={e => handleCourseFieldChange('title', e.target.value)}
+                    placeholder="e.g. Diploma of Cyber Security"
+                  />
+                </div>
+
+                <div>
+                  <label className="field-label" htmlFor="spec-code">Course Code</label>
+                  <input
+                    id="spec-code"
+                    type="text"
+                    className="form-input"
+                    value={currentCourse.code || ''}
+                    onChange={e => handleCourseFieldChange('code', e.target.value)}
+                    placeholder="e.g. ICT50220"
+                  />
+                </div>
+
+                <div>
+                  <label className="field-label" htmlFor="spec-level">Level Taxonomy</label>
+                  <select
+                    id="spec-level"
+                    className="form-input"
+                    value={currentCourse.aqfLevel !== undefined ? currentCourse.aqfLevel : 0}
+                    onChange={e => handleCourseFieldChange('aqfLevel', Number(e.target.value))}
+                  >
+                    {AQF_LEVELS.map(lvl => (
+                      <option key={lvl.level} value={lvl.level}>
+                        {lvl.title}
+                      </option>
+                    ))}
+                  </select>
+                  <small style={{ color: 'var(--text-secondary)', display: 'block', marginTop: '4px', fontSize: '0.78rem' }}>
+                    {selectedAqf.competencySummary}
+                  </small>
+                </div>
+
+                {/* Curriculum Standards: the AI Assist agent follows the matching /skills/*.md rules */}
+                <div className="specs-wide">
+                  <label className="field-label">Curriculum Standards (AI Alignment)</label>
+                  <div className="standards-chip-grid" role="group" aria-label="Curriculum standards">
+                    {CURRICULUM_STANDARDS.map(std => {
+                      const isSelected = selectedStandardIds.includes(std.id);
+                      const isSkipped = standardsRouting.skipped.some(s => s.id === std.id);
+                      return (
+                        <label
+                          key={std.id}
+                          className={`standard-chip ${isSelected ? 'selected' : ''} ${isSkipped ? 'skipped' : ''}`}
+                          title={`${std.region} — ${std.description}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => handleToggleStandard(std.id)}
+                          />
+                          <span>{std.flag} {std.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {standardsRouting.advisories.map(msg => (
+                    <small key={msg} className="standards-advisory">⚠️ {msg}</small>
+                  ))}
+                </div>
+
+                <div className="specs-wide">
+                  <label className="field-label" htmlFor="spec-description">Course Description</label>
+                  <textarea
+                    id="spec-description"
+                    rows="3"
+                    className="form-input"
+                    value={currentCourse.description || ''}
+                    onChange={e => handleCourseFieldChange('description', e.target.value)}
+                    placeholder="Comprehensive industry overview and target learning cohort..."
+                  />
+                </div>
+
+                <div>
+                  <label className="field-label" htmlFor="spec-category">Category</label>
+                  <input
+                    id="spec-category"
+                    type="text"
+                    className="form-input"
+                    value={currentCourse.category || ''}
+                    onChange={e => handleCourseFieldChange('category', e.target.value)}
+                    placeholder="e.g. Information Technology"
+                  />
+                </div>
+
+                <div>
+                  <label className="field-label" htmlFor="spec-year">Year / Semester</label>
+                  <input
+                    id="spec-year"
+                    type="text"
+                    className="form-input"
+                    value={currentCourse.year || ''}
+                    onChange={e => handleCourseFieldChange('year', e.target.value)}
+                    placeholder="2026 Semester 1"
+                  />
+                </div>
+
+                <div>
+                  <label className="field-label" htmlFor="spec-start">Start Date</label>
+                  <input
+                    id="spec-start"
+                    type="date"
+                    className="form-input"
+                    value={currentCourse.startDate || ''}
+                    onChange={e => handleCourseFieldChange('startDate', e.target.value)}
+                  />
+                </div>
+
+                <div className="specs-wide">
+                  <label className="field-label" htmlFor="spec-outcomes">Course Learning Outcomes (one per line)</label>
+                  <textarea
+                    id="spec-outcomes"
+                    rows="4"
+                    className="form-input"
+                    value={listToLines(currentCourse.learningOutcomes)}
+                    onChange={e => handleCourseFieldChange('learningOutcomes', linesToList(e.target.value))}
+                    placeholder="Analyse…&#10;Apply…&#10;Evaluate…"
+                  />
+                </div>
+
+                <div className="specs-wide">
+                  <label className="field-label" htmlFor="spec-knowledge">Assumed Knowledge / Prerequisites</label>
+                  <textarea
+                    id="spec-knowledge"
+                    rows="2"
+                    className="form-input"
+                    value={currentCourse.knowledge || ''}
+                    onChange={e => handleCourseFieldChange('knowledge', e.target.value)}
+                    placeholder="What learners should already know"
+                  />
+                </div>
+
+                <div className="specs-wide">
+                  <label className="field-label" htmlFor="spec-equivalence">Level Equivalence Notes</label>
+                  <textarea
+                    id="spec-equivalence"
+                    rows="2"
+                    className="form-input"
+                    value={currentCourse.aqfEquivalenceNotes || ''}
+                    onChange={e => handleCourseFieldChange('aqfEquivalenceNotes', e.target.value)}
+                    placeholder="How this maps to AQF or international frameworks"
+                  />
+                </div>
+
+                <div className="specs-wide">
+                  <label className="field-label" htmlFor="spec-cover">Cover Image URL</label>
+                  <input
+                    id="spec-cover"
+                    type="url"
+                    className="form-input"
+                    value={currentCourse.thumbnail || ''}
+                    onChange={e => handleCourseFieldChange('thumbnail', e.target.value)}
+                    placeholder="https://…"
+                  />
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* 🎯 COURSE ASSESSMENTS & RUBRICS (below Course Specifications) */}
           <section id="builder-assessments-panel" className="assessments-container" aria-label="Course Assessments and Rubrics" style={{ marginBottom: '28px' }}>
             <div
               style={{
@@ -2716,6 +2794,11 @@ function AQFCourseBuilderInner({
         .course-details-more { margin-top: 10px; }
         .course-details-more > summary { cursor: pointer; font-size: 0.82rem; font-weight: 700; color: #fef08a; }
         .legacy-rubric-note { padding: 8px 10px; border-radius: 8px; background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); font-size: 0.82rem; margin-bottom: 8px; }
+        .specs-panel-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; cursor: pointer; padding: 6px 8px; border-radius: 10px; background: rgba(255, 255, 255, 0.03); margin-bottom: 10px; }
+        .specs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 14px; }
+        .specs-grid > div { min-width: 0; }
+        .specs-grid .specs-wide { grid-column: 1 / -1; }
+        .specs-grid .field-label { margin-top: 0; }
         .course-assessments-nav { display: flex; width: 100%; padding: 10px 12px; border-radius: 10px; background: rgba(56,189,248,0.08); border: 1px solid rgba(56,189,248,0.35); color: inherit; font: inherit; cursor: pointer; text-align: left; }
         .course-assessments-nav:hover { background: rgba(56,189,248,0.16); }
         .course-assessments-nav.active { background: rgba(56,189,248,0.22); border-color: #38bdf8; }

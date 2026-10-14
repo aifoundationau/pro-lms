@@ -31,6 +31,8 @@ const tokens = await import('../src/services/tokenService.js');
 const aiTokens = await import('../src/services/aiAssistTokenService.js');
 const apps = await import('../src/services/teacherApplicationService.js');
 const market = await import('../src/services/courseMarketplaceService.js');
+const quizzes = await import('../src/services/quizService.js');
+const quizModel = await import('../src/services/quizModel.js');
 const { resolvePrivileges } = await import('../src/services/rolePrivileges.js');
 const { db } = await import('../src/firebase.js');
 
@@ -154,11 +156,27 @@ async function run() {
     id: courseId,
     title: 'Reef Ecology',
     category: 'Science',
-    units: [{ id: 'u1', unitCode: 'REEF1', unitTitle: 'Coral basics', lessons: [], assessments: [{ id: 'a1', title: 'Reef report', type: 'summative', rubric: [] }] }]
+    // An older-style course: the assessment sits in the unit and moves up to the course on save.
+    units: [{
+      id: 'u1', unitCode: 'REEF1', unitTitle: 'Coral basics',
+      assessments: [{ id: 'a1', title: 'Reef report', type: 'summative', rubric: [] }],
+      lessons: [{ id: 'l1', title: 'Polyps', blocks: [{ id: 'quiz1', type: 'quiz', title: 'Polyp quiz', quiz: { instructions: 'Answer all.', questions: [
+        { id: 'q1', type: 'multiple_choice', prompt: 'Corals are…', points: 1, allowMultiple: false, options: [{ id: 'o1', text: 'Plants' }, { id: 'o2', text: 'Animals' }], correctOptionIds: ['o2'] },
+        { id: 'q2', type: 'true_false', prompt: 'Corals host algae.', points: 1, correctAnswer: true },
+        { id: 'q3', type: 'open', prompt: 'Why do corals bleach?', points: 5, modelAnswer: 'Heat stress expels the algae.' }
+      ] } }] }]
+    }]
   };
   await step('teacher saves & publishes a course; it appears in Global Search', async () => {
     const user = await signInAs('teacher');
     await lms.saveCourse(courseId, { ...course, authorId: user.uid, authorName: 'Tess Teacher', authorEmail: user.email, isPublished: true, status: 'published', visibility: 'network' }, { isNew: true });
+    const stored = (await getDoc(doc(db, 'lms_courses', courseId))).data();
+    assert(!JSON.stringify(stored).includes('correctOptionIds') && !JSON.stringify(stored).includes('modelAnswer'), 'answer keys never stored in the course document');
+    assert.strictEqual(stored.units[0].lessons[0].blocks[0].quiz.questions.length, 3);
+    assert(!('assessments' in stored.units[0]), 'units hold lessons & blocks only');
+    assert.deepStrictEqual(stored.assessments.map(a => [a.id, a.unitId]), [['a1', 'u1']], 'the unit task moved up to the course (same id)');
+    const keys = (await getDoc(doc(db, 'lms_quiz_keys', courseId))).data();
+    assert.deepStrictEqual(keys.quizzes.quiz1.q1.correctOptionIds, ['o2'], 'keys saved in the same batch');
     const published = await lms.listNetworkCourses();
     assert(published.some(c => c.id === courseId && c.authorEmail === ACCOUNTS.teacher), 'published course is listed');
   });
@@ -204,8 +222,8 @@ async function run() {
     assert(welcome, 'the student received the enrolment welcome');
     assert(welcome.subject === 'Welcome to Reef Ecology' && welcome.body.includes('Student Panel') && welcome.category === 'teacher', welcome.body);
     const loaded = await lms.getLmsCourseById(courseId);
-    assert.strictEqual(loaded.units[0].assessments[0].id, 'a1');
-    await subs.submitAssessment({ course: loaded, unit: loaded.units[0], assessment: loaded.units[0].assessments[0], user, text: 'Coral polyps host zooxanthellae.', linkUrl: 'https://docs.google.com/document/d/abc' });
+    assert.strictEqual(loaded.assessments[0].id, 'a1');
+    await subs.submitAssessment({ course: loaded, unit: loaded.units[0], assessment: loaded.assessments[0], user, text: 'Coral polyps host zooxanthellae.', linkUrl: 'https://docs.google.com/document/d/abc' });
     const mine = await subs.listMySubmissions(courseId, user.uid);
     assert.strictEqual(mine.a1.status, 'submitted');
     const toTeacher = await messages.sendMessage({ sender: user, senderProfile: { role: 'Supporter', email: user.email }, to: ACCOUNTS.teacher, body: 'Is the report due Friday?', courseId, courseTitle: 'Reef Ecology' });
@@ -217,7 +235,7 @@ async function run() {
   await step('outsiders cannot submit to or message a course they are not in', async () => {
     const user = await signInAs('outsider');
     const loaded = await lms.getLmsCourseById(courseId);
-    await expectCode(subs.submitAssessment({ course: loaded, unit: loaded.units[0], assessment: loaded.units[0].assessments[0], user, text: 'sneaky' }), 'NOT_ENROLLED');
+    await expectCode(subs.submitAssessment({ course: loaded, unit: loaded.units[0], assessment: loaded.assessments[0], user, text: 'sneaky' }), 'NOT_ENROLLED');
     await expectCode(messages.sendMessage({ sender: user, senderProfile: { role: 'Supporter', email: user.email }, to: ACCOUNTS.teacher, body: 'hi', courseId }), 'NOT_ALLOWED');
     await messages.sendMessage({ sender: user, senderProfile: { role: 'Supporter', email: user.email }, to: messages.SUPERADMIN_INBOX, body: 'Can I join a course?' });
   });
@@ -254,10 +272,41 @@ async function run() {
     const mine = await subs.listMySubmissions(courseId, user.uid);
     assert.strictEqual(mine.a1.grade, 'HD');
     const loaded = await lms.getLmsCourseById(courseId);
-    await expectCode(subs.submitAssessment({ course: loaded, unit: loaded.units[0], assessment: loaded.units[0].assessments[0], user, text: 'late edit' }), 'ALREADY_GRADED');
+    await expectCode(subs.submitAssessment({ course: loaded, unit: loaded.units[0], assessment: loaded.assessments[0], user, text: 'late edit' }), 'ALREADY_GRADED');
   });
 
   // 6. Super Admin token grants (1–999, by email, once per Stripe session)
+  await step('student takes the unit quiz; answer keys stay hidden', async () => {
+    const user = await signInAs('student');
+    await assert.rejects(getDoc(doc(db, 'lms_quiz_keys', courseId)), err => err.code === 'permission-denied');
+    const loaded = await lms.getLmsCourseById(courseId);
+    const lesson = loaded.units[0].lessons[0];
+    const block = lesson.blocks[0];
+    assert(!JSON.stringify(block).includes('correctOptionIds'), 'students receive questions without answers');
+    const saved = await quizzes.submitQuizAttempt({ course: loaded, unit: loaded.units[0], lesson, block, user, answers: { q1: ['o2'], q2: false, q3: 'Warm water stresses them.' } });
+    assert.strictEqual(saved.status, 'submitted');
+    const mine = await quizzes.listMyQuizAttempts(courseId, user.uid);
+    assert.deepStrictEqual(mine.quiz1.answers, { q1: ['o2'], q2: false, q3: 'Warm water stresses them.' });
+  });
+
+  await step('teacher bulk-marks the quiz (auto + open answer) and releases results', async () => {
+    const user = await signInAs('teacher');
+    const attempts = await quizzes.listCourseQuizAttempts(courseId);
+    assert.strictEqual(attempts.length, 1);
+    const { keys, ok } = await quizzes.loadQuizAnswerKeys(courseId);
+    assert(ok);
+    const teacherCourse = quizModel.mergeQuizAnswerKeys(await lms.getLmsCourseById(courseId), keys);
+    const quiz = teacherCourse.units[0].lessons[0].blocks[0].quiz;
+    assert.strictEqual(quizModel.scoreQuizAttempt(quiz, attempts[0].answers).pending, 1, 'open answer waits for the teacher');
+    const result = await quizzes.releaseQuizResults({ quiz, attempts, manualScoresByAttempt: { [attempts[0].id]: { q3: 4 } }, feedbackByAttempt: { [attempts[0].id]: 'Good thinking' }, grader: user });
+    assert.deepStrictEqual([result.released.length, result.skipped.length, result.failed.length], [1, 0, 0]);
+    const student = await signInAs('student');
+    const mine = await quizzes.listMyQuizAttempts(courseId, student.uid);
+    assert.deepStrictEqual([mine.quiz1.status, mine.quiz1.score, mine.quiz1.maxScore, mine.quiz1.percent, mine.quiz1.feedback], ['graded', 5, 7, 71, 'Good thinking']);
+    const loaded = await lms.getLmsCourseById(courseId);
+    await expectCode(quizzes.submitQuizAttempt({ course: loaded, unit: loaded.units[0], lesson: loaded.units[0].lessons[0], block: loaded.units[0].lessons[0].blocks[0], user: student, answers: { q1: ['o1'] } }), 'ALREADY_GRADED');
+  });
+
   await step('Super Admin gives tokens by email (limits, unknown email, double-credit guard)', async () => {
     const owner = await signInAs('owner');
     const inbox = await messages.fetchInboxOnce({ email: owner.email, isSuperadmin: true });
@@ -292,6 +341,8 @@ async function run() {
     const user = await signInAs('teacher2');
     const published = (await lms.listNetworkCourses()).find(c => c.id === courseId);
     const { course: copy, record } = await lms.copyCourseForTeacher(published, user);
+    const copiedKeys = (await getDoc(doc(db, 'lms_quiz_keys', copy.id))).data();
+    assert.deepStrictEqual(copiedKeys.quizzes.quiz1.q3.modelAnswer, 'Heat stress expels the algae.', 'quiz answer keys copied with the course');
     assert.strictEqual(copy.authorId, user.uid);
     assert.strictEqual(copy.isDraft, true);
     assert.strictEqual(copy.sourceCourseId, courseId);

@@ -14,6 +14,7 @@ import { listMyQuizAttempts } from '../../services/quizService';
 import StudentQuiz from './StudentQuiz.jsx';
 import { youtubeVideoId, isGoogleDocsUrl } from '../../services/mediaLinks';
 import { summarizeStudentProgress } from '../../services/studentDashboard';
+import { CURRICULUM_STANDARDS, sanitizeStandardIds } from '../../services/curriculumStandards';
 
 function blockLink(block) {
   const key = LINK_BLOCK_METADATA_KEYS[block.type];
@@ -393,9 +394,12 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
   // Submissions and quiz attempts for this course; "loading" until they arrive for the open course.
   const [submissionState, setSubmissionState] = useState({ courseId: null, byAssessment: {} });
   const [quizState, setQuizState] = useState({ courseId: null, byQuiz: {} });
+  const [isSpecsExpanded, setIsSpecsExpanded] = useState(true);
   const [isAssessmentsExpanded, setIsAssessmentsExpanded] = useState(true);
   const [isUnitsSectionExpanded, setIsUnitsSectionExpanded] = useState(true);
   const loading = submissionState.courseId !== course.id;
+  const standardIds = sanitizeStandardIds(course.curriculumStandards);
+  const courseStandards = CURRICULUM_STANDARDS.filter(std => standardIds.includes(std.id));
   const quizzesLoading = quizState.courseId !== course.id;
   const submissions = submissionState.byAssessment;
   const units = Array.isArray(course.units) ? course.units : [];
@@ -512,85 +516,25 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
       <div className="builder-workspace-grid sl-viewer-grid">
         {/* Left Column: Course Specifications & Quick Navigator (View-Only) */}
         <aside className="builder-sidebar glass sl-student-sidebar">
-          <div className="sidebar-section">
-            <h4 className="sidebar-heading">Course Specifications</h4>
-            
-            <div style={{ marginBottom: '12px' }}>
-              <label className="field-label">Course Title</label>
-              <div style={{ fontWeight: 700, fontSize: '1.05rem', color: '#f1f5f9' }}>{course.title || 'Untitled Course'}</div>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '12px' }}>
-              <div>
-                <label className="field-label">Course Code</label>
-                <div style={{ fontWeight: 600, color: '#38bdf8', fontSize: '0.9rem' }}>{course.code || 'N/A'}</div>
-              </div>
-              <div>
-                <label className="field-label">Category</label>
-                <div style={{ color: '#cbd5e1', fontSize: '0.9rem' }}>{course.category || 'General'}</div>
-              </div>
-            </div>
-
-            {course.aqfLevel !== undefined && (
-              <div style={{ marginBottom: '12px' }}>
-                <label className="field-label">Level Taxonomy</label>
-                <span className="aqf-badge-pill" style={{ background: '#0284c7', display: 'inline-block' }}>
-                  {getAqfLevelMeta(course.aqfLevel).shortTitle}
-                </span>
-              </div>
-            )}
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '12px' }}>
-              <div>
-                <label className="field-label">Delivery Mode</label>
-                <div style={{ color: '#cbd5e1', fontSize: '0.85rem' }}>{course.deliveryMode || 'Online'}</div>
-              </div>
-              <div>
-                <label className="field-label">Start Date</label>
-                <div style={{ color: '#cbd5e1', fontSize: '0.85rem' }}>{course.startDate ? formatLocalizedDate(course.startDate) : 'Self-Paced'}</div>
-              </div>
-            </div>
-
-            <div style={{ marginBottom: '12px' }}>
-              <label className="field-label">Teacher</label>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
-                <span style={{ fontSize: '0.9rem', color: '#f1f5f9', fontWeight: 600 }}>{course.authorName || 'Teacher'}</span>
-                {course.authorEmail && (
-                  <button
-                    type="button"
-                    className="nav-btn secondary icon-only-btn"
-                    style={{ fontSize: '0.75rem', padding: '3px 8px' }}
-                    onClick={() => onMessageTeacher?.(course)}
-                    title="Send message to teacher"
-                  >
-                    💬 Message
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {course.description && (
-              <div style={{ marginBottom: '12px' }}>
-                <label className="field-label">Description</label>
-                <div className="sl-text" style={{ fontSize: '0.85rem', color: '#cbd5e1' }}>{course.description}</div>
-              </div>
-            )}
-
-            {course.learningOutcomes?.length > 0 && (
-              <div>
-                <label className="field-label">What you will learn</label>
-                <ul style={{ margin: '4px 0 0 16px', padding: 0, fontSize: '0.85rem', color: '#cbd5e1' }}>
-                  {course.learningOutcomes.map((o, i) => (
-                    <li key={i} style={{ marginBottom: '4px' }}>{o}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-
           {/* Quick Navigator */}
           <div className="sidebar-section">
             <h4 className="sidebar-heading">Quick Navigator</h4>
+            <button
+              type="button"
+              className={`course-assessments-nav ${isSpecsExpanded ? 'active' : ''}`}
+              onClick={() => {
+                setIsSpecsExpanded(true);
+                const el = document.getElementById('student-specs-panel');
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }}
+              style={{ width: '100%', marginBottom: '8px' }}
+              title="Jump to Course Specifications"
+            >
+              <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
+                <div className="course-assessments-nav-label">📋 Course Specifications</div>
+                <div className="course-assessments-nav-sub">{course.code ? `${course.code} • ` : ''}{getAqfLevelMeta(course.aqfLevel ?? 0).shortTitle}</div>
+              </div>
+            </button>
             <button
               type="button"
               className={`course-assessments-nav ${isAssessmentsExpanded ? 'active' : ''}`}
@@ -656,7 +600,61 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
             </div>
           )}
 
-          {/* Panel 1: 🎯 Course Assessments (Top of right column) */}
+          {/* Panel 0: 📋 Course Specifications (view-only; mirrors the Course Builder, without the cover image) */}
+          <section id="student-specs-panel" className="builder-collapsible-panel sl-specs-panel" aria-label="Course Specifications" style={{ marginBottom: '22px' }}>
+            <div className="sl-panel-header" onClick={() => setIsSpecsExpanded(prev => !prev)}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="collapse-toggle-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsSpecsExpanded(prev => !prev);
+                  }}
+                  aria-expanded={isSpecsExpanded}
+                  aria-controls="student-specs-body"
+                  aria-label={isSpecsExpanded ? 'Collapse Course Specifications' : 'Expand Course Specifications'}
+                  style={{ background: 'transparent', border: 'none', color: '#fef08a', fontSize: '1rem', cursor: 'pointer' }}
+                >
+                  {isSpecsExpanded ? '▼' : '►'}
+                </button>
+                <h3 style={{ margin: 0, fontSize: '1.15rem' }}>📋 Course Specifications</h3>
+              </div>
+            </div>
+            {isSpecsExpanded && (
+              <dl id="student-specs-body" className="sl-specs-grid">
+                <div className="sl-spec sl-spec-wide"><dt>Course Title</dt><dd>{course.title || 'Untitled Course'}</dd></div>
+                <div className="sl-spec"><dt>Course Code</dt><dd>{course.code || '—'}</dd></div>
+                <div className="sl-spec"><dt>Level Taxonomy</dt><dd>{getAqfLevelMeta(course.aqfLevel ?? 0).title}</dd></div>
+                <div className="sl-spec sl-spec-wide">
+                  <dt>Curriculum Standards</dt>
+                  <dd>
+                    {courseStandards.length ? (
+                      <span className="sl-standards">
+                        {courseStandards.map(std => <span key={std.id} className="sl-standard-chip" title={std.description}>{std.flag} {std.label}</span>)}
+                      </span>
+                    ) : 'None selected'}
+                  </dd>
+                </div>
+                <div className="sl-spec sl-spec-wide"><dt>Course Description</dt><dd className="sl-text">{course.description || '—'}</dd></div>
+                <div className="sl-spec"><dt>Category</dt><dd>{course.category || '—'}</dd></div>
+                <div className="sl-spec"><dt>Year / Semester</dt><dd>{course.year || '—'}</dd></div>
+                <div className="sl-spec"><dt>Start Date</dt><dd>{course.startDate ? formatLocalizedDate(course.startDate) : '—'}</dd></div>
+                <div className="sl-spec sl-spec-wide">
+                  <dt>Course Learning Outcomes</dt>
+                  <dd>
+                    {course.learningOutcomes?.length ? (
+                      <ul className="sl-spec-list">{course.learningOutcomes.map((o, i) => <li key={i}>{o}</li>)}</ul>
+                    ) : '—'}
+                  </dd>
+                </div>
+                <div className="sl-spec sl-spec-wide"><dt>Assumed Knowledge / Prerequisites</dt><dd className="sl-text">{course.knowledge || '—'}</dd></div>
+                <div className="sl-spec sl-spec-wide"><dt>Level Equivalence Notes</dt><dd className="sl-text">{course.aqfEquivalenceNotes || '—'}</dd></div>
+              </dl>
+            )}
+          </section>
+
+          {/* Panel 1: 🎯 Course Assessments (below Course Specifications) */}
           <section id="student-assessments-panel" className="builder-collapsible-panel sl-assessments-top-panel" aria-label="Course Assessments" style={{ marginBottom: '28px' }}>
             <div
               style={{
@@ -1039,6 +1037,15 @@ export default function StudentLearningPanel({
 
         /* Assessments Section placed near top */
         .sl-assessments-top-panel { border-left: 4px solid #38bdf8; }
+        .sl-panel-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; cursor: pointer; padding: 6px 8px; border-radius: 10px; background: rgba(255, 255, 255, 0.03); margin-bottom: 10px; }
+        .sl-specs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px 16px; margin: 0; }
+        .sl-spec { min-width: 0; }
+        .sl-spec-wide { grid-column: 1 / -1; }
+        .sl-spec dt { font-size: 0.75rem; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 2px; }
+        .sl-spec dd { margin: 0; color: #e2e8f0; font-size: 0.92rem; overflow-wrap: anywhere; }
+        .sl-spec-list { margin: 2px 0 0 18px; padding: 0; }
+        .sl-standards { display: flex; flex-wrap: wrap; gap: 6px; }
+        .sl-standard-chip { font-size: 0.78rem; padding: 2px 8px; border-radius: 999px; background: rgba(56,189,248,0.15); border: 1px solid rgba(56,189,248,0.4); }
         .sl-section-heading { margin-bottom: 14px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px; }
         .sl-count-pill { font-size: 0.8rem; font-weight: 800; padding: 2px 8px; border-radius: 12px; background: rgba(56,189,248,0.25); color: #7dd3fc; border: 1px solid rgba(56,189,248,0.4); }
         .sl-assessment-dropdown { border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; margin-bottom: 12px; background: rgba(15,23,42,0.55); overflow: hidden; }

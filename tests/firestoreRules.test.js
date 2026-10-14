@@ -16,6 +16,7 @@ import { buildMessage, SUPERADMIN_INBOX } from '../src/services/messageService.j
 import { buildMemberRecord, memberDocId } from '../src/services/courseEnrollmentService.js';
 import { buildSubmissionPayload, submissionDocId } from '../src/services/submissionService.js';
 import { normalizeCourse } from '../src/services/lmsRepository.js';
+import { buildQuizKeysDoc, buildQuizAttemptPayload, quizAttemptDocId } from '../src/services/quizModel.js';
 
 if (!process.env.FIRESTORE_EMULATOR_HOST) {
   console.log('⏭️  Firestore rules tests skipped: no emulator running (use `npm run test:rules`).');
@@ -164,6 +165,52 @@ async function run() {
     await check('teacher grades', () => assertSucceeds(updateDoc(doc(as('teacherA'), 'lms_coursework', subId), { status: 'graded', grade: '85%', feedback: 'Good', gradedAt: serverTimestamp() })));
     await check('no resubmission after grading', () => assertFails(setDoc(doc(as('student'), 'lms_coursework', subId), { ...submission, text: 'late' }, { merge: true })));
     console.log('✅ submissions: enrolled students submit/resubmit, teachers grade, privacy between students');
+
+    // ---------- unit quizzes: answer keys (staff only) and attempts ----------
+    const keyDoc = (courseId) => ({ ...buildQuizKeysDoc(courseId, { quiz1: { q1: { correctOptionIds: ['o2'] } } }), siteId: 'lms', updatedAt: serverTimestamp() });
+    await check('owner saves quiz answer keys', () => assertSucceeds(setDoc(doc(as('teacherA'), 'lms_quiz_keys', 'c1'), keyDoc('c1'), { merge: true })));
+    await check('course + keys in one batch (new course)', () => {
+      const batch = writeBatch(as('teacherA'));
+      batch.set(doc(as('teacherA'), 'lms_courses', 'cq'), { ...normalizeCourse({ title: 'Quiz course', authorId: 'teacherA' }), siteId: 'lms' });
+      batch.set(doc(as('teacherA'), 'lms_quiz_keys', 'cq'), keyDoc('cq'));
+      return assertSucceeds(batch.commit());
+    });
+    await check('keys must name their course', () => assertFails(setDoc(doc(as('teacherA'), 'lms_quiz_keys', 'c2'), keyDoc('c1'))));
+    await check('other teacher cannot write keys', () => assertFails(setDoc(doc(as('teacherB'), 'lms_quiz_keys', 'c1'), keyDoc('c1'), { merge: true })));
+    await check('students cannot read answer keys', () => assertFails(getDoc(doc(as('student'), 'lms_quiz_keys', 'c1'))));
+    await check('students cannot write answer keys', () => assertFails(setDoc(doc(as('student'), 'lms_quiz_keys', 'c1'), keyDoc('c1'), { merge: true })));
+    await check('teachers read answer keys (Global Search copies)', () => assertSucceeds(getDoc(doc(as('teacherB'), 'lms_quiz_keys', 'c1'))));
+    await check('Super Admin writes keys', () => assertSucceeds(setDoc(doc(as('admin'), 'lms_quiz_keys', 'c1'), keyDoc('c1'), { merge: true })));
+    await check('no key deletes', () => assertFails(deleteDoc(doc(as('teacherA'), 'lms_quiz_keys', 'c1'))));
+
+    const quizCourse = { id: 'c1', title: 'Bio', authorId: 'teacherA' };
+    const quizBlock = { id: 'quiz1', type: 'quiz', title: 'Check', quiz: { questions: [
+      { id: 'q1', type: 'multiple_choice', prompt: 'Pick', points: 1, options: [{ id: 'o1', text: 'A' }, { id: 'o2', text: 'B' }] },
+      { id: 'q2', type: 'open', prompt: 'Explain', points: 5 }
+    ] } };
+    const attemptId = quizAttemptDocId('c1', 'quiz1', 'stu1');
+    const attempt = { ...buildQuizAttemptPayload({ course: quizCourse, unit: { id: 'u1', unitTitle: 'Cells' }, lesson: { id: 'l1', title: 'L1' }, block: quizBlock, user: PEOPLE.student, answers: { q1: ['o2'], q2: 'Because' } }), submittedAt: serverTimestamp(), attempts: increment(1) };
+    await check('student reads missing attempt', () => assertSucceeds(getDoc(doc(as('student'), 'lms_quiz_attempts', attemptId))));
+    await check('enrolled student submits a quiz', () => assertSucceeds(setDoc(doc(as('student'), 'lms_quiz_attempts', attemptId), attempt, { merge: true })));
+    await check('student resubmits before release', () => assertSucceeds(setDoc(doc(as('student'), 'lms_quiz_attempts', attemptId), { ...attempt, answers: { q1: ['o1'] } }, { merge: true })));
+    await check('student cannot mark their own quiz', () => assertFails(updateDoc(doc(as('student'), 'lms_quiz_attempts', attemptId), { score: 6, percent: 100 })));
+    await check('student cannot submit with marks', () => assertFails(setDoc(doc(as('student'), 'lms_quiz_attempts', quizAttemptDocId('c1', 'quiz2', 'stu1')), { ...attempt, quizId: 'quiz2', score: 6 })));
+    await check('student cannot release their own results', () => assertFails(updateDoc(doc(as('student'), 'lms_quiz_attempts', attemptId), { status: 'graded' })));
+    const outsiderAttempt = { ...buildQuizAttemptPayload({ course: quizCourse, block: quizBlock, user: PEOPLE.outsider, answers: { q1: ['o1'] } }), submittedAt: serverTimestamp() };
+    await check('non-enrolled cannot take the quiz', () => assertFails(setDoc(doc(as('outsider'), 'lms_quiz_attempts', quizAttemptDocId('c1', 'quiz1', 'stu2')), outsiderAttempt)));
+    await check('attempt id must be the student\'s own', () => assertFails(setDoc(doc(as('student'), 'lms_quiz_attempts', 'c1__quiz1__someone'), attempt)));
+    await check('other student cannot read an attempt', () => assertFails(getDoc(doc(as('outsider'), 'lms_quiz_attempts', attemptId))));
+    await check('student lists own attempts', () => assertSucceeds(getDocs(query(collection(as('student'), 'lms_quiz_attempts'), where('studentUid', '==', 'stu1'), where('courseId', '==', 'c1')))));
+    await check('teacher lists course attempts', () => assertSucceeds(getDocs(query(collection(as('teacherA'), 'lms_quiz_attempts'), where('courseId', '==', 'c1')))));
+    await check('teacher releases results in a batch', () => {
+      const batch = writeBatch(as('teacherA'));
+      batch.update(doc(as('teacherA'), 'lms_quiz_attempts', attemptId), { status: 'graded', score: 5, maxScore: 6, percent: 83, grade: '83%', results: [], gradedAt: serverTimestamp() });
+      return assertSucceeds(batch.commit());
+    });
+    await check('no resubmission after release', () => assertFails(setDoc(doc(as('student'), 'lms_quiz_attempts', attemptId), { ...attempt, answers: { q1: ['o2'] } }, { merge: true })));
+    await check('student reads released results', () => assertSucceeds(getDoc(doc(as('student'), 'lms_quiz_attempts', attemptId))));
+    await check('no attempt deletes', () => assertFails(deleteDoc(doc(as('teacherA'), 'lms_quiz_attempts', attemptId))));
+    console.log('✅ quizzes: answer keys hidden from students, enrolled students submit only answers, teachers release marks');
 
     // ---------- message board ----------
     const send = (key, args) => {

@@ -154,6 +154,21 @@ async function run() {
     assert(labels.includes('Level Taxonomy'), 'renamed label');
     assert(!labels.includes('AQF Level Taxonomy'));
     assert.strictEqual(view.container.querySelectorAll('.standard-chip input[type=checkbox]').length, 5, 'all Curriculum Standards tick boxes kept');
+    const specs = view.container.querySelector('#builder-specs-panel');
+    assert(specs, 'Course Specifications panel');
+    assert(specs.compareDocumentPosition(view.container.querySelector('#builder-assessments-panel')) & window.Node.DOCUMENT_POSITION_FOLLOWING, 'specifications sit above Course Assessments');
+    assert.deepStrictEqual(Array.from(specs.querySelectorAll('label.field-label')).map(l => l.textContent.trim()), [
+      'Course Title', 'Course Code', 'Level Taxonomy', 'Curriculum Standards (AI Alignment)', 'Course Description', 'Category',
+      'Year / Semester', 'Start Date', 'Course Learning Outcomes (one per line)', 'Assumed Knowledge / Prerequisites', 'Level Equivalence Notes', 'Cover Image URL'
+    ], 'every specification in one panel');
+    assert(!textOf(view.container).includes('Token Cost'), 'token cost field removed');
+    assert(!view.container.querySelector('.builder-sidebar input'), 'no specification fields left in the sidebar');
+    await type(specs.querySelector('#spec-title'), 'Marine Science');
+    assert(textOf(view.container).includes('Course Builder: Marine Science'));
+    await click(specs.querySelector('button[aria-label="Collapse Course Specifications"]'));
+    assert(!view.container.querySelector('#spec-title') && textOf(specs).includes('Marine Science'), 'collapsed panel shows a summary');
+    await click(specs.querySelector('button[aria-label="Expand Course Specifications"]'));
+    assert(view.container.querySelector('#spec-title'));
     const pcLabel = Array.from(view.container.querySelectorAll('.unit-editor-header label')).find(l => l.textContent.trim() === 'Performance Criteria');
     assert(pcLabel, 'unit box below Unit Code / Title / Nominal Hours is titled Performance Criteria');
     assert.strictEqual(document.getElementById(pcLabel.htmlFor)?.tagName, 'TEXTAREA', 'label is linked to its box');
@@ -420,6 +435,9 @@ async function run() {
     const { default: StudentLearningPanel } = await load('/src/components/student/StudentLearningPanel.jsx');
     const course = {
       id: 'c1', title: 'Reef Ecology', authorName: 'Ms T', authorEmail: 'teacher@school.edu', category: 'Science',
+      code: 'REEF-5', aqfLevel: 5, curriculumStandards: ['teqsa'], year: '2026 Semester 2', startDate: '2026-07-20',
+      learningOutcomes: ['Explain coral symbiosis'], knowledge: 'Year 10 science', aqfEquivalenceNotes: 'Similar to a UK Level 5 HND.',
+      thumbnail: 'https://example.com/cover.jpg', description: 'Reefs from polyp to ecosystem.',
       units: [{
         id: 'u1', unitCode: 'REEF1', unitTitle: 'Coral basics', nominalHours: 10,
         lessons: [{ id: 'l1', title: 'Polyps', estimatedMinutes: 30, blocks: [
@@ -431,7 +449,11 @@ async function run() {
           { id: 'b6', type: 'google_drive_link', title: 'Slides', content: 'https://docs.google.com/presentation/d/s/view', metadata: { driveUrl: 'https://docs.google.com/presentation/d/s/view' } },
           { id: 'b7', type: 'google_drive_link', title: 'Article', content: 'https://example.org/article', metadata: { driveUrl: 'https://example.org/article' } },
           { id: 'b8', type: 'notebook_link', title: 'Second notebook', content: 'https://notebooklm.google.com/notebook/y', metadata: { notebookUrl: 'https://notebooklm.google.com/notebook/y' } },
-          { id: 'b9', type: 'youtube_video', title: 'Second video', content: 'https://www.youtube.com/watch?v=9bZkp7q19f0', metadata: { youtubeUrl: 'https://www.youtube.com/watch?v=9bZkp7q19f0' } }
+          { id: 'b9', type: 'youtube_video', title: 'Second video', content: 'https://www.youtube.com/watch?v=9bZkp7q19f0', metadata: { youtubeUrl: 'https://www.youtube.com/watch?v=9bZkp7q19f0' } },
+          { id: 'b10', type: 'quiz', title: 'Polyp quiz', quiz: { instructions: 'Answer both.', questions: [
+            { id: 'q1', type: 'multiple_choice', prompt: 'Corals are…', points: 1, allowMultiple: false, options: [{ id: 'o1', text: 'Plants' }, { id: 'o2', text: 'Animals' }] },
+            { id: 'q2', type: 'open', prompt: 'Why do corals bleach?', points: 5 }
+          ] } }
         ] }],
         assessments: [{ id: 'a1', title: 'Reef report', type: 'summative', dueDate: '2026-05-15', nominalWeight: 60, description: 'Write it.', rubric: types.createDefaultRubric() }]
       }]
@@ -443,6 +465,19 @@ async function run() {
     assert(view.container.querySelector('.cards-grid'), 'course postcards grid');
     assert(overview.includes('Reef Ecology') && overview.includes('Ms T'), 'enrolled course postcard shown');
     await click(buttonWith(view.container, 'Open course'));
+    const studentSpecs = view.container.querySelector('#student-specs-panel');
+    assert(studentSpecs.compareDocumentPosition(view.container.querySelector('#student-assessments-panel')) & window.Node.DOCUMENT_POSITION_FOLLOWING, 'specifications above Course Assessments');
+    assert.deepStrictEqual(Array.from(studentSpecs.querySelectorAll('dt')).map(d => d.textContent), [
+      'Course Title', 'Course Code', 'Level Taxonomy', 'Curriculum Standards', 'Course Description', 'Category',
+      'Year / Semester', 'Start Date', 'Course Learning Outcomes', 'Assumed Knowledge / Prerequisites', 'Level Equivalence Notes'
+    ], 'same specifications as Course Builder, no cover image');
+    const specText = textOf(studentSpecs);
+    for (const value of ['REEF-5', 'TEQSA', '2026 Semester 2', 'Explain coral symbiosis', 'Year 10 science', 'UK Level 5 HND', 'Reefs from polyp to ecosystem.']) {
+      assert(specText.includes(value), value);
+    }
+    assert(!specText.includes('cover.jpg') && !studentSpecs.querySelector('input, textarea, select'), 'view-only, no cover image');
+    await click(studentSpecs.querySelector('button[aria-label="Collapse Course Specifications"]'));
+    assert(!studentSpecs.querySelector('dl'), 'collapsible');
     const text = textOf(view.container);
     assert(text.includes('Corals are animals.'));
     assert(!text.includes('TEACHER ONLY NOTES'), 'teacher guides are hidden from students');
@@ -458,9 +493,19 @@ async function run() {
     await click(buttonWith(view.container, 'Message teacher'));
     assert.strictEqual(messaged.id, 'c1');
     await waitFor(() => view.container.querySelector('textarea#ans-a1'), 'submission box');
+    assert(textOf(view.container.querySelector('.sl-assessments-top-panel')).includes('Reef report'), 'a task stored in a unit (older course) shows in the one course list');
     await type(view.container.querySelector('textarea#ans-a1'), 'Coral polyps host algae.');
     await submit(view.container.querySelector('.sl-submit form'));
     await waitFor(() => textOf(view.container).includes('Submissions are unavailable right now'), 'offline submission error');
+    // Unit quiz inside the lesson
+    const quizForm = await waitFor(() => view.container.querySelector('form.sq-quiz'), 'quiz form');
+    assert(textOf(quizForm).includes('Answer both.') && textOf(quizForm).includes('0/2 answered'));
+    assert.strictEqual(buttonWith(quizForm, 'Submit quiz').disabled, true, 'nothing answered yet');
+    await click(quizForm.querySelectorAll('input[type=radio]')[1]);
+    await type(quizForm.querySelector('textarea'), 'Heat stress.');
+    assert(textOf(quizForm).includes('2/2 answered'));
+    await submit(quizForm);
+    await waitFor(() => textOf(view.container).includes('Quizzes are unavailable right now'), 'offline quiz error');
     await view.unmount();
   });
 
@@ -502,11 +547,55 @@ async function run() {
 
   await test('Submissions (teacher): offline list shows empty state per assessment', async () => {
     const { default: CourseSubmissionsModal } = await load('/src/components/course/CourseSubmissionsModal.jsx');
-    const course = { id: 'c1', title: 'Bio', units: [{ id: 'u1', unitCode: 'B1', assessments: [{ id: 'a1', title: 'Essay' }] }] };
+    const course = {
+      id: 'c1', title: 'Bio', assessments: [{ id: 'a2', title: 'Course exam' }],
+      units: [{ id: 'u1', unitCode: 'B1', assessments: [{ id: 'a1', title: 'Essay' }], lessons: [{ id: 'l1', title: 'L', blocks: [{ id: 'qz', type: 'quiz', title: 'Q', quiz: { questions: [] } }] }] }]
+    };
     const view = await render(React.createElement(CourseSubmissionsModal, { course, currentUser: teacher, onClose: () => {} }));
     await waitFor(() => textOf(view.container).includes('No submissions yet.'), 'empty state');
-    assert(textOf(view.container).includes('Essay'));
+    assert(textOf(view.container).includes('Essay') && textOf(view.container).includes('Course exam'), 'one list: course tasks plus tasks moved up from units');
+    await click(buttonWith(view.container, 'Unit quizzes (1)'));
+    await waitFor(() => textOf(view.container).includes('answer keys could not be loaded'), 'offline marking view');
     await view.unmount();
+  });
+
+  await test('Bulk quiz marking: auto-marked closed questions, mark-by-question, release to all', async () => {
+    const quizServer = await makeServer([{
+      find: /^(\.\.?\/)+services\/quizService(\.js)?$/,
+      replacement: fileURLToPath(new URL('./fixtures/quizServiceMock.js', import.meta.url))
+    }]);
+    const { default: QuizMarkingPanel } = await quizServer.ssrLoadModule('/src/components/course/QuizMarkingPanel.jsx');
+    const quizBlock = { id: 'quiz1', type: 'quiz', title: 'Polyp quiz', quiz: { questions: [
+      { id: 'q1', type: 'multiple_choice', prompt: 'Corals are…', points: 1, options: [{ id: 'o1', text: 'Plants' }, { id: 'o2', text: 'Animals' }] },
+      { id: 'q2', type: 'true_false', prompt: 'Corals host algae.', points: 1 },
+      { id: 'q3', type: 'open', prompt: 'Why do corals bleach?', points: 5 }
+    ] } };
+    globalThis.__TEST_QUIZ__ = {
+      keys: { quiz1: { q1: { correctOptionIds: ['o2'] }, q2: { correctAnswer: true }, q3: { modelAnswer: 'Heat stress expels algae.' } } },
+      attempts: [
+        { id: 'at1', quizId: 'quiz1', studentName: 'Ann', studentEmail: 'ann@school.edu', status: 'submitted', answers: { q1: ['o2'], q2: true, q3: 'Warm water stresses them.' } },
+        { id: 'at2', quizId: 'quiz1', studentName: 'Ben', studentEmail: 'ben@school.edu', status: 'submitted', answers: { q1: ['o1'], q2: true } },
+        { id: 'at3', quizId: 'quiz1', studentName: 'Cy', studentEmail: 'cy@school.edu', status: 'graded', score: 2, maxScore: 7, percent: 29, answers: { q1: ['o2'] }, results: [] }
+      ]
+    };
+    const course = { id: 'cq', title: 'Reef', units: [{ id: 'u1', unitCode: 'REEF1', lessons: [{ id: 'l1', title: 'Polyps', blocks: [quizBlock] }] }] };
+    const view = await render(React.createElement(QuizMarkingPanel, { course, currentUser: teacher }));
+    await waitFor(() => view.container.querySelector('.qm-stats'), 'marking view');
+    const stat = (label) => Array.from(view.container.querySelectorAll('.qm-stat')).find(x => x.textContent.includes(label)).querySelector('strong').textContent;
+    assert.deepStrictEqual([stat('submitted'), stat('to mark'), stat('ready to release'), stat('released')], ['3', '1', '1', '1']);
+    assert(textOf(view.container).includes('Model answer: Heat stress expels algae.'), 'model answer shown to the teacher');
+    assert(textOf(view.container).includes('Warm water stresses them.'));
+    await click(buttonWith(view.container, 'Full marks to all answered'));
+    assert.deepStrictEqual([stat('to mark'), stat('ready to release')], ['0', '2']);
+    await type(view.container.querySelector('input[aria-label="Feedback for Ann"]'), 'Great work');
+    await click(buttonWith(view.container, 'Release results to all ready (2)'));
+    await waitFor(() => textOf(view.container).includes('Released results to 2 students'), 'bulk release');
+    const released = Object.fromEntries(globalThis.__TEST_QUIZ__.released.map(r => [r.id, r.update]));
+    assert.deepStrictEqual([released.at1.score, released.at1.maxScore, released.at1.percent, released.at1.feedback], [7, 7, 100, 'Great work']);
+    assert.deepStrictEqual([released.at2.score, released.at2.percent], [1, 14], 'wrong choice 0, unanswered open question 0');
+    assert.strictEqual(stat('released'), '3');
+    await view.unmount();
+    delete globalThis.__TEST_QUIZ__;
   });
 
   await test('Teacher application: optional ID check (honest "Not verified" offline), document link box, no stored photo', async () => {
