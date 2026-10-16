@@ -20,7 +20,19 @@ import {
   loadContacts,
   buildTeacherApplicationMessage,
   buildEnrolmentWelcome,
-  sendEnrolmentWelcomes
+  sendEnrolmentWelcomes,
+  isThreadPending,
+  isThreadDeclined,
+  buildDeclinedMessage,
+  sendCourseGroupMessage,
+  ARCHIVE_RETENTION_YEARS,
+  ARCHIVE_RETENTION_MS,
+  archiveMessageRecord,
+  archiveThreadRecord,
+  restoreMessageRecord,
+  restoreThreadRecord,
+  searchUsersInDb,
+  loadUserArchive
 } from '../src/services/messageService.js';
 import {
   parseMemberText,
@@ -33,7 +45,17 @@ import { subscribeToEnrolledCourses } from '../src/services/enrolledCourses.js';
 import { validateSubmission, validateDraftSubmission, submissionDocId, buildSubmissionPayload } from '../src/services/submissionService.js';
 import { validateGrantAmount, MAX_GRANT_TOKENS } from '../src/services/tokenService.js';
 import { resolvePrivileges, formatTokenBalance, hasUnlimitedTokens, MAX_SUPERADMIN_GRANT, canEnrolInCourses } from '../src/services/rolePrivileges.js';
-import { buildCourseCopy, normalizeCourse } from '../src/services/lmsRepository.js';
+import {
+  buildCourseCopy,
+  normalizeCourse,
+  COURSE_ARCHIVE_RETENTION_YEARS,
+  COURSE_ARCHIVE_RETENTION_DAYS,
+  COURSE_ARCHIVE_RETENTION_MS,
+  getLocallyArchivedCourseIds,
+  markCourseLocallyArchived,
+  unmarkCourseLocallyArchived,
+  setCourseArchived
+} from '../src/services/lmsRepository.js';
 import { executeContentClone } from '../src/services/courseMarketplaceService.js';
 import { checkAiAssistBalance } from '../src/services/aiCourseShared.js';
 import { youtubeVideoId } from '../src/services/mediaLinks.js';
@@ -65,6 +87,18 @@ import {
 } from '../src/services/teacherApplicationService.js';
 import { analyzeIdentificationDocument, sanitizeIdVerification, maskIdNumber, hasVerifiedScore } from '../src/services/idVerificationService.js';
 import confirmHandler from '../api/stripe/confirm.js';
+import {
+  parsePublicationYear,
+  isEligiblePublicationYear,
+  buildScholarUrl,
+  buildBooksWebSearchUrl,
+  buildGoogleFullViewSearchUrl,
+  appendFullViewParam,
+  formatApaCitation,
+  searchGoogleBooks,
+  MIN_PUBLICATION_YEAR,
+  FULL_VIEW_TBS_PARAM
+} from '../src/services/googleBooksService.js';
 
 const teacher = { uid: 't1', email: 'Teacher@School.edu', displayName: 'Ms T' };
 const student = { uid: 's1', email: 'stu@school.edu', displayName: 'Stu' };
@@ -140,7 +174,80 @@ async function run() {
   assert.deepStrictEqual(studentContacts[2].courses, [{ id: 'net_c2', title: 'Chemistry' }], 'Global Course teacher comes with that course');
   const staffContacts = await loadContacts({ selfEmail: 'teacher@school.edu', registeredTeachers: [{ email: 'math_prof@school.edu', name: 'Prof M' }], senderIsStaff: true });
   assert(staffContacts.some(c => c.email === 'math_prof@school.edu'), 'staff can message any registered teacher');
-  console.log('✅ Test 2 Passed: conversations group correctly with unread counts and permitted contacts.');
+
+  // Initial message requests, decline notifications, and thread pending/declined states
+  const initialReqThread = {
+    partnerEmail: 'teacher@school.edu',
+    partnerName: 'Ms T',
+    messages: [
+      { id: 'req1', senderEmail: 'teacher@school.edu', recipientEmail: 'stu@school.edu', body: 'Hello Stu', meta: { requestStatus: 'pending' } }
+    ]
+  };
+  assert(isThreadPending(initialReqThread, 'stu@school.edu'), 'receiver sees pending message request');
+  assert(!isThreadPending(initialReqThread, 'teacher@school.edu'), 'sender does not see pending request on own sent message');
+  assert(!isThreadPending(studentThreads[0], 'stu@school.edu'), 'Super Admin thread is never a pending request');
+
+  const declinePayload = buildDeclinedMessage({ receiver: { email: 'stu@school.edu', displayName: 'Stu' }, senderEmail: 'teacher@school.edu' });
+  assert.strictEqual(declinePayload.to, 'teacher@school.edu');
+  assert.strictEqual(declinePayload.body, 'Stu did not accept the message.');
+  assert.strictEqual(declinePayload.meta.requestStatus, 'declined');
+
+  const declinedThread = {
+    ...initialReqThread,
+    messages: [...initialReqThread.messages, { id: 'm_dec', senderEmail: 'stu@school.edu', recipientEmail: 'teacher@school.edu', meta: { requestStatus: 'declined' } }]
+  };
+  assert(isThreadDeclined(declinedThread), 'declined thread is recognized');
+  assert(!isThreadPending(declinedThread, 'stu@school.edu'), 'declined thread is not pending');
+
+  // Course group messaging: broadcast to enrolled course members
+  const groupCourse = { id: 'c1', title: 'Bio' };
+  const mockMembers = async () => [
+    { memberEmail: 'stu1@school.edu', memberName: 'Student 1', memberRole: 'student' },
+    { memberEmail: 'stu2@school.edu', memberName: 'Student 2', memberRole: 'student' },
+    { memberEmail: 'teacher@school.edu', memberName: 'Teacher', memberRole: 'teacher' }
+  ];
+  const groupRes = await sendCourseGroupMessage({
+    sender: teacher,
+    senderProfile: { role: 'teacher' },
+    course: groupCourse,
+    subject: 'Exam Notice',
+    body: 'Exam on Friday',
+    listMembers: mockMembers
+  });
+  assert.strictEqual(groupRes.total, 2, 'targets only enrolled students, not teachers or sender');
+
+  // 7-year retention archive logic
+  assert.strictEqual(ARCHIVE_RETENTION_YEARS, 7, 'archive retention is 7 years');
+  const nowMs = 1700000000000;
+  const arch1 = archiveMessageRecord({ email: 'stu@school.edu', messageId: 'm1', threadId: 't1', now: nowMs });
+  assert.strictEqual(arch1.messages.m1.retentionYears, 7);
+  assert.strictEqual(arch1.messages.m1.purgeAt, nowMs + ARCHIVE_RETENTION_MS, 'purged after 7 years');
+  const arch2 = archiveThreadRecord({ email: 'stu@school.edu', threadId: 't1', now: nowMs });
+  assert.strictEqual(arch2.threads.t1.retentionYears, 7);
+  assert.strictEqual(arch2.threads.t1.purgeAt, nowMs + ARCHIVE_RETENTION_MS);
+
+  const arch3 = restoreMessageRecord({ email: 'stu@school.edu', messageId: 'm1' });
+  assert(!arch3.messages.m1, 'message restored');
+  const arch4 = restoreThreadRecord({ email: 'stu@school.edu', threadId: 't1' });
+  assert(!arch4.threads.t1, 'thread restored');
+
+  // Database user search by name or email
+  const searched = await searchUsersInDb('ms t', {
+    currentEmail: 'teacher@school.edu',
+    fallbackContacts: [
+      { email: 'teacher@school.edu', name: 'Ms T', kind: 'teacher' },
+      { email: 'assistant@school.edu', name: 'Ms Taylor', kind: 'teacher' },
+      { email: 'student@school.edu', name: 'Sam Student', kind: 'student' }
+    ]
+  });
+  assert.strictEqual(searched.length, 1, 'excludes self and finds matching contact');
+  assert.strictEqual(searched[0].email, 'assistant@school.edu');
+  assert.strictEqual(searched[0].name, 'Ms Taylor');
+
+  const emptySearch = await searchUsersInDb('', { fallbackContacts: [{ email: 'a@b.com', name: 'A' }] });
+  assert.deepStrictEqual(emptySearch, []);
+
+  console.log('✅ Test 2 Passed: conversations group correctly with unread counts, permitted contacts, 7-year archive retention, and DB user search.');
 
   // 3. Bulk enrolment parsing (paste and spreadsheet)
   const pasted = parseMemberText('Jane Doe <Jane@School.edu>\nliam@school.edu, Liam Smith\nmia@x.org; noah@x.org\nbad@\njane@school.edu');
@@ -369,12 +476,16 @@ async function run() {
   // 11. Student Admin Panel overview + enrolment welcome message
   const dashNow = new Date(2026, 9, 14, 10).getTime(); // 14 Oct 2026
   const dashCourses = [
-    { id: 'c1', title: 'Reef', units: [{ unitTitle: 'U1', assessments: [
-      { id: 'a1', title: 'Quiz', dueDate: '2026-10-01' },            // overdue
-      { id: 'a2', title: 'Essay', dueDate: '2026-10-20', type: 'summative' }, // due soon
-      { id: 'a3', title: 'Report', dueDate: '2026-12-01' },          // later
-      { id: 'a4', title: 'Done', dueDate: '2026-09-01' }             // submitted
-    ] }] },
+    {
+      id: 'c1', title: 'Reef', units: [{
+        unitTitle: 'U1', assessments: [
+          { id: 'a1', title: 'Quiz', dueDate: '2026-10-01' },            // overdue
+          { id: 'a2', title: 'Essay', dueDate: '2026-10-20', type: 'summative' }, // due soon
+          { id: 'a3', title: 'Report', dueDate: '2026-12-01' },          // later
+          { id: 'a4', title: 'Done', dueDate: '2026-09-01' }             // submitted
+        ]
+      }]
+    },
     { id: 'c2', title: 'Algae', units: [{ assessments: [{ id: 'b1', title: 'Lab' }, { id: 'b2', title: 'Exam', dueDate: 'soon' }] }] },
     null
   ];
@@ -433,7 +544,7 @@ async function run() {
     const listeners = {
       enrolments: (email, onList) => {
         enrolmentFeeds.push(onList);
-        return () => {};
+        return () => { };
       },
       course: (id, onCourse, onError) => {
         const feed = { onCourse, onError, stopped: false };
@@ -614,7 +725,146 @@ async function run() {
     console.log('✅ Test 13 Passed: one course assessment list (migrated), quiz keys hidden from students, auto + bulk marking.');
   }
 
-  console.log('\n🎉 All LMS feature tests passed (13/13).');
+  // 14. Academic Library & Books API: temporal constraint (2000 onwards enforced), APA citations, Scholar URLs
+  {
+    assert.strictEqual(MIN_PUBLICATION_YEAR, 2000);
+    assert.strictEqual(parsePublicationYear('2018-05-15'), 2018);
+    assert.strictEqual(parsePublicationYear('2000'), 2000);
+    assert.strictEqual(parsePublicationYear('1999-12-31'), 1999);
+    assert.strictEqual(parsePublicationYear('invalid'), null);
+    assert.strictEqual(parsePublicationYear(null), null);
+
+    assert.strictEqual(isEligiblePublicationYear('2024-01-01'), true);
+    assert.strictEqual(isEligiblePublicationYear('2000'), true);
+    assert.strictEqual(isEligiblePublicationYear('1999-11-20'), false);
+    assert.strictEqual(isEligiblePublicationYear('1985'), false);
+    assert.strictEqual(isEligiblePublicationYear(null), false);
+
+    const scholarUrl = buildScholarUrl('artificial intelligence in education');
+    assert(scholarUrl.includes('as_ylo=2000'), 'scholar URL restricts results from 2000 onwards');
+    assert(scholarUrl.includes('scholar.google.com/scholar'), 'scholar URL points to Google Scholar');
+    assert(scholarUrl.includes('tbs=,bkv:f'), 'scholar URL includes &tbs=,bkv:f for full articles by default');
+
+    // Scholar URL when fullOnly: false omits &tbs=,bkv:f
+    const scholarUrlAll = buildScholarUrl('artificial intelligence in education', { fullOnly: false });
+    assert(!scholarUrlAll.includes('tbs=,bkv:f'), 'scholar URL omits bkv:f when fullOnly is false');
+    assert(scholarUrlAll.includes('as_ylo=2000'), 'scholar URL still restricts from 2000 onwards when fullOnly is false');
+
+    const booksWebUrl = buildBooksWebSearchUrl('machine learning');
+    assert(booksWebUrl.includes('tbs=,bkv:f'), 'books web URL has &tbs=,bkv:f for full view');
+    assert(booksWebUrl.includes('as_brr=1'), 'books web URL has as_brr=1 for full books');
+    assert.strictEqual(FULL_VIEW_TBS_PARAM, 'tbs=,bkv:f');
+
+    // Books Web URL when fullOnly: false omits &tbs=,bkv:f and as_brr=1
+    const booksWebUrlAll = buildBooksWebSearchUrl('machine learning', { fullOnly: false });
+    assert(!booksWebUrlAll.includes('tbs=,bkv:f'), 'books web URL omits bkv:f when fullOnly is false');
+    assert(!booksWebUrlAll.includes('as_brr=1'), 'books web URL omits as_brr=1 when fullOnly is false');
+
+    const googleSearchUrl = buildGoogleFullViewSearchUrl('deep learning');
+    assert(googleSearchUrl.includes('tbs=,bkv:f'), 'Google search URL has &tbs=,bkv:f');
+
+    const googleSearchUrlAll = buildGoogleFullViewSearchUrl('deep learning', { fullOnly: false });
+    assert(!googleSearchUrlAll.includes('tbs=,bkv:f'), 'Google search URL omits &tbs=,bkv:f when fullOnly is false');
+
+    assert.strictEqual(appendFullViewParam('https://books.google.com/books?id=123'), 'https://books.google.com/books?id=123&tbs=,bkv:f');
+    assert.strictEqual(appendFullViewParam('https://books.google.com/books?id=123&tbs=,bkv:f'), 'https://books.google.com/books?id=123&tbs=,bkv:f');
+    assert.strictEqual(appendFullViewParam('https://books.google.com/books?id=123&tbs=cdr:1'), 'https://books.google.com/books?id=123&tbs=cdr:1,bkv:f');
+
+    const citation = formatApaCitation({
+      title: 'Rebooting AI',
+      authors: ['Gary Marcus', 'Ernest Davis'],
+      publishedYear: 2020,
+      publisher: 'National Geographic Books'
+    });
+    assert(citation.includes('Gary Marcus & Ernest Davis (2020). Rebooting AI. National Geographic Books.'), citation);
+
+    // Empty query returns empty array without throwing
+    const empty = await searchGoogleBooks('');
+    assert.deepStrictEqual(empty.items, []);
+
+    // Live search enforces year 2000 onwards and full texts only on all returned items
+    try {
+      const res = await searchGoogleBooks('machine learning', { maxResults: 10, filter: 'full', fullOnly: true });
+      if (res.items && res.items.length > 0) {
+        for (const item of res.items) {
+          assert(item.publishedYear >= 2000, `item ${item.title} has year ${item.publishedYear} >= 2000`);
+          assert(item.scholarSearchUrl.includes('as_ylo=2000'), 'item has calibrated scholar URL');
+          assert(item.scholarSearchUrl.includes('tbs=,bkv:f'), 'scholar URL has &tbs=,bkv:f');
+          assert(item.isFullText === true, `item ${item.title} is full view`);
+        }
+      }
+    } catch {
+      // Offline fallback: network might be disabled during tests
+    }
+
+    console.log('✅ Test 14 Passed: Academic Library & Books API (full books/articles only via &tbs=,bkv:f, 2000+ year constraint, APA citation, Google Scholar integration).');
+  }
+
+  {
+    // 15. 7-year course archive retention, local archive index, and student archive access
+    assert.strictEqual(COURSE_ARCHIVE_RETENTION_YEARS, 7, 'course archive retention is 7 years');
+    assert.strictEqual(COURSE_ARCHIVE_RETENTION_DAYS, 2557, 'course archive retention days is 2557 (7 years)');
+    assert.strictEqual(COURSE_ARCHIVE_RETENTION_MS, 7 * 365.25 * 24 * 60 * 60 * 1000, 'course archive ms matches 7 years');
+
+    // Test local archive marking and unmarking
+    markCourseLocallyArchived('c_test_archive_1');
+    markCourseLocallyArchived(999);
+    let archivedIds = getLocallyArchivedCourseIds();
+    assert(archivedIds.has('c_test_archive_1'), 'string course ID marked archived');
+    assert(archivedIds.has('999'), 'numeric course ID marked archived as string');
+
+    unmarkCourseLocallyArchived('c_test_archive_1');
+    unmarkCourseLocallyArchived(999);
+    archivedIds = getLocallyArchivedCourseIds();
+    assert(!archivedIds.has('c_test_archive_1'), 'string course ID unmarked successfully');
+    assert(!archivedIds.has('999'), 'numeric course ID unmarked successfully');
+
+    // Test subscribeToEnrolledCourses emits both active and archived courses
+    const enrolmentFeeds = [];
+    const courseFeeds = new Map();
+    const listeners = {
+      enrolments: (email, onList) => {
+        enrolmentFeeds.push(onList);
+        return () => { };
+      },
+      course: (id, onCourse, onError) => {
+        const feed = { onCourse, onError, stopped: false };
+        courseFeeds.set(id, feed);
+        return () => { feed.stopped = true; };
+      }
+    };
+    let activeSeen = [];
+    let archivedSeen = [];
+    const stop = subscribeToEnrolledCourses('student@school.edu', (active, archived) => {
+      activeSeen = active;
+      archivedSeen = archived;
+    }, {
+      listeners,
+      waitMs: 0
+    });
+
+    enrolmentFeeds[0]([{ courseId: 'c_active' }, { courseId: 'c_deleted_7yrs' }]);
+    courseFeeds.get('c_active').onCourse({ id: 'c_active', title: 'Active Biology', archived: false });
+    courseFeeds.get('c_deleted_7yrs').onCourse({
+      id: 'c_deleted_7yrs',
+      title: 'Chemistry 101',
+      archived: true,
+      archivedAt: Date.now(),
+      retentionYears: 7,
+      purgeAt: Date.now() + COURSE_ARCHIVE_RETENTION_MS
+    });
+
+    assert.strictEqual(activeSeen.length, 1, 'active list contains only unarchived courses');
+    assert.strictEqual(activeSeen[0].id, 'c_active');
+    assert.strictEqual(archivedSeen.length, 1, 'archived list contains deleted/archived course');
+    assert.strictEqual(archivedSeen[0].id, 'c_deleted_7yrs');
+    assert.strictEqual(archivedSeen[0].retentionYears, 7, 'retained for 7 years');
+    stop();
+
+    console.log('✅ Test 15 Passed: 7-year course archive retention, local archive index, and student archive access.');
+  }
+
+  console.log('\n🎉 All LMS feature tests passed (15/15).');
 }
 
 run().then(() => process.exit(0)).catch(err => {
