@@ -61,11 +61,12 @@ async function run() {
   console.log('✅ Test 2 Passed: Super Admin fee accepts whole numbers 0–10 only.');
 
   // 3. Standards sanitization & AQF-level routing
-  assert.strictEqual(CURRICULUM_STANDARDS.length, 5);
+  assert.strictEqual(CURRICULUM_STANDARDS.length, 6);
   assert.deepStrictEqual(sanitizeStandardIds(['teqsa', 'bogus', 'aacsb', 'teqsa', 42]), ['aacsb', 'teqsa']);
   assert.deepStrictEqual(resolveActiveStandards(['aacsb', 'teqsa'], 8).active.map(s => s.id), ['aacsb', 'teqsa']);
   assert.strictEqual(resolveActiveStandards(['aacsb'], 4).useBloomsFallback, true, 'AACSB must not apply at AQF 4');
   assert.deepStrictEqual(resolveActiveStandards(['uk_qaa'], 7).active.map(s => s.id), ['uk_qaa']);
+  assert.deepStrictEqual(resolveActiveStandards(['international'], 4).active.map(s => s.id), ['international']);
   console.log("✅ Test 3 Passed: AACSB/TEQSA gated to AQF 7–9; otherwise Bloom's fallback.");
 
   // 4. Standards persist through the course save normalizer
@@ -122,10 +123,13 @@ async function run() {
       apiKey: 'test-key'
     });
     assert.strictEqual(free.tokensCharged, 0);
+    assert(Array.isArray(free.course.curriculumStandards), 'curriculumStandards array is returned');
+    assert(Number.isInteger(free.course.aqfLevel), 'aqfLevel is returned as integer');
+    assert(free.course.curriculumStandards.length > 0, 'at least one standard selected by default');
   } finally {
     cap2.restore();
   }
-  console.log('✅ Test 6 Passed: Super Admin fee of 0 makes AI Assist free.');
+  console.log('✅ Test 6 Passed: Super Admin fee of 0 makes AI Assist free, and course has level & standards.');
 
   console.log('\n🎉 All ✨ AI Assist tests passed.');
 }

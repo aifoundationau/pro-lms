@@ -8,11 +8,13 @@ import teqsaSkill from '../../skills/teqsa-course-architect.md?raw';
 import acaraSkill from '../../skills/acara-course-architect.md?raw';
 import ukQaaSkill from '../../skills/uk-qaa-course-architect.md?raw';
 import ukOfstedSkill from '../../skills/uk-ofsted-secondary-architect.md?raw';
+import internationalSkill from '../../skills/international-unassigned.md?raw';
 
 export const SKILL_TEXTS = {
   aacsb: aacsbSkill,
   teqsa: teqsaSkill,
   acara: acaraSkill,
   uk_qaa: ukQaaSkill,
-  uk_ofsted: ukOfstedSkill
+  uk_ofsted: ukOfstedSkill,
+  international: internationalSkill
 };

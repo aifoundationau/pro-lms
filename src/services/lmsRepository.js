@@ -238,11 +238,82 @@ export async function saveCourse(id, course, { isNew = false } = {}) {
   });
 }
 
-/** Archives/restores using the full course payload, so legacy courses migrate intact. */
+export const COURSE_ARCHIVE_RETENTION_YEARS = 7;
+export const COURSE_ARCHIVE_RETENTION_DAYS = Math.round(7 * 365.25); // 2557 days
+export const COURSE_ARCHIVE_RETENTION_MS = 7 * 365.25 * 24 * 60 * 60 * 1000;
+const ARCHIVED_COURSES_STORAGE_KEY = 'ozedu_archived_course_ids';
+
+let memoryArchivedIds = new Set();
+
+/** Returns a Set of locally archived course IDs to prevent ghost restoration on logout/refresh. */
+export function getLocallyArchivedCourseIds() {
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage && typeof localStorage.getItem === 'function') {
+      const raw = localStorage.getItem(ARCHIVED_COURSES_STORAGE_KEY);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+    }
+  } catch {
+    // fallback to memory
+  }
+  return new Set(memoryArchivedIds);
+}
+
+/** Records a course ID in local archive index. */
+export function markCourseLocallyArchived(courseId) {
+  if (!courseId) return;
+  const cid = String(courseId);
+  memoryArchivedIds.add(cid);
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage && typeof localStorage.setItem === 'function') {
+      const current = getLocallyArchivedCourseIds();
+      current.add(cid);
+      localStorage.setItem(ARCHIVED_COURSES_STORAGE_KEY, JSON.stringify(Array.from(current)));
+    }
+  } catch (err) {
+    console.warn('Failed to record archived course id locally:', err);
+  }
+}
+
+/** Removes a course ID from local archive index when restored. */
+export function unmarkCourseLocallyArchived(courseId) {
+  if (!courseId) return;
+  const cid = String(courseId);
+  memoryArchivedIds.delete(cid);
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage && typeof localStorage.setItem === 'function') {
+      const current = getLocallyArchivedCourseIds();
+      current.delete(cid);
+      localStorage.setItem(ARCHIVED_COURSES_STORAGE_KEY, JSON.stringify(Array.from(current)));
+    }
+  } catch (err) {
+    console.warn('Failed to unmark archived course id locally:', err);
+  }
+}
+
+/** Archives/restores using the full course payload with 7-year retention metadata. */
 export async function setCourseArchived(course, archived) {
   if (!course?.id) throw new Error('setCourseArchived requires a course with an id');
   const { _legacy, ...rest } = course;
-  return saveCourse(course.id, { ...rest, archived: Boolean(archived), tag: 'lms' }, { isNew: Boolean(_legacy) });
+  const now = Date.now();
+  const purgeAt = now + COURSE_ARCHIVE_RETENTION_MS;
+  const courseId = String(course.id);
+
+  if (archived) {
+    markCourseLocallyArchived(courseId);
+  } else {
+    unmarkCourseLocallyArchived(courseId);
+  }
+
+  return saveCourse(course.id, {
+    ...rest,
+    archived: Boolean(archived),
+    archivedAt: archived ? (course.archivedAt || now) : null,
+    retentionYears: archived ? COURSE_ARCHIVE_RETENTION_YEARS : null,
+    purgeAt: archived ? (course.purgeAt || purgeAt) : null,
+    tag: 'lms'
+  }, { isNew: Boolean(_legacy) });
 }
 
 /** Copies a course (from the network catalog or elsewhere) into this site with lineage. */
@@ -645,10 +716,10 @@ export function subscribeToSiteCourses(onCourses, onError) {
     return onSnapshot(
       q,
       snap => {
-        const courses = snap.docs
-          .map(d => courseFromDoc(d.id, d.data()))
-          .filter(c => !c.archived);
-        onCourses(courses);
+        const allCourses = snap.docs.map(d => courseFromDoc(d.id, d.data()));
+        const active = allCourses.filter(c => !c.archived);
+        const archived = allCourses.filter(c => Boolean(c.archived));
+        onCourses(active, archived);
       },
       err => {
         onError?.(err);

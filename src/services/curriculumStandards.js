@@ -63,6 +63,16 @@ export const CURRICULUM_STANDARDS = [
     skillFile: 'skills/uk-ofsted-secondary-architect.md',
     aqfLevels: [0],
     enforceAqfLevels: false
+  },
+  {
+    id: 'international',
+    label: 'International / Unassigned',
+    flag: '🌐',
+    region: 'Global / Flexible',
+    description: 'Flexible global or unassigned curriculum (GCSE, A-Levels, bespoke enterprise, micro-credentials) not bound to a national auditing body.',
+    skillFile: 'skills/international-unassigned.md',
+    aqfLevels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    enforceAqfLevels: false
   }
 ];
 

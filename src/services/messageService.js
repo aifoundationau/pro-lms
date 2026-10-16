@@ -116,6 +116,11 @@ export function buildMessage({ sender, senderProfile, to, toName = '', body, sub
     ? [senderEmail, SUPERADMIN_INBOX, recipient]
     : [senderEmail, recipient];
 
+  const messageMeta = meta && typeof meta === 'object' ? { ...meta } : {};
+  if (!messageMeta.requestStatus) {
+    messageMeta.requestStatus = toSuperadmin || finalCategory === 'grant' || privileges.isSuperadmin ? 'accepted' : 'pending';
+  }
+
   return {
     id: newMessageId(now),
     data: {
@@ -135,7 +140,7 @@ export function buildMessage({ sender, senderProfile, to, toName = '', body, sub
       courseTitle: String(courseTitle || '').slice(0, 300),
       subject: String(subject || '').trim().slice(0, MAX_SUBJECT_CHARS),
       body: text,
-      meta: meta && typeof meta === 'object' ? meta : {},
+      meta: messageMeta,
       readBy: [senderEmail],
       createdAtMs: now
     }
@@ -547,3 +552,291 @@ export async function fetchInboxOnce({ email, isSuperadmin }) {
   }
   return Array.from(merged.values()).sort((a, b) => b.createdAtMs - a.createdAtMs);
 }
+
+// ---------- message requests, decline notifications & course group messaging ----------
+
+/**
+ * Returns true if this thread is an initial message received by the user that has not yet been accepted or declined.
+ */
+export function isThreadPending(thread, currentEmail) {
+  if (!thread || !Array.isArray(thread.messages) || thread.messages.length === 0) return false;
+  const me = normalizeEmail(currentEmail);
+  if (!me || thread.partnerEmail === SUPERADMIN_INBOX) return false;
+  // If already declined
+  if (thread.messages.some(m => m.meta?.requestStatus === 'declined')) return false;
+  // If already accepted
+  if (thread.messages.some(m => m.meta?.requestStatus === 'accepted')) return false;
+  // If current user already sent a message or replied in this thread, it's accepted
+  const mySent = thread.messages.filter(m => m.senderEmail === me);
+  if (mySent.length > 0) return false;
+  // If the initial message was sent by the partner to me
+  const initial = thread.messages[0];
+  return Boolean(initial && initial.senderEmail !== me);
+}
+
+/**
+ * Returns true if this thread was declined.
+ */
+export function isThreadDeclined(thread) {
+  if (!thread || !Array.isArray(thread.messages) || thread.messages.length === 0) return false;
+  return thread.messages.some(m => m.meta?.requestStatus === 'declined');
+}
+
+/**
+ * Builds the payload for a decline notification message sent back to the sender.
+ */
+export function buildDeclinedMessage({ receiver, senderEmail, courseId = '', courseTitle = '' }) {
+  const receiverName = receiver?.displayName || normalizeEmail(receiver?.email) || 'The recipient';
+  return {
+    to: normalizeEmail(senderEmail),
+    subject: 'Message request declined',
+    body: `${receiverName} did not accept the message.`,
+    courseId,
+    courseTitle,
+    meta: { requestStatus: 'declined', systemAction: 'declined' }
+  };
+}
+
+/**
+ * Sends a notification message back to the sender when a message request is declined.
+ */
+export async function sendDeclinedNotification({ sender, senderProfile, recipientEmail, courseId = '', courseTitle = '' }) {
+  const payload = buildDeclinedMessage({ receiver: sender, senderEmail: recipientEmail, courseId, courseTitle });
+  return sendMessage({
+    sender,
+    senderProfile,
+    to: payload.to,
+    subject: payload.subject,
+    body: payload.body,
+    courseId: payload.courseId,
+    courseTitle: payload.courseTitle,
+    meta: payload.meta
+  });
+}
+
+/**
+ * Teachers can message all students enrolled in a course as a group broadcast.
+ * @param {object} args
+ * @param {object} args.sender
+ * @param {object} args.senderProfile
+ * @param {object} args.course
+ * @param {string} [args.subject]
+ * @param {string} args.body
+ * @param {(courseId: string) => Promise<Array>} args.listMembers
+ * @param {number} [args.concurrency=4]
+ * @returns {Promise<{ sent: string[], failed: string[], total: number }>}
+ */
+export async function sendCourseGroupMessage({
+  sender,
+  senderProfile,
+  course,
+  subject = '',
+  body,
+  listMembers,
+  concurrency = 4
+}) {
+  const senderEmail = normalizeEmail(sender?.email);
+  if (!course?.id) throw messageError('Course is required for group messaging.', 'INVALID_COURSE');
+  const text = String(body || '').trim();
+  if (!text) throw messageError('Write a message first.', 'EMPTY_MESSAGE');
+
+  let members = [];
+  if (typeof listMembers === 'function') {
+    try {
+      members = await listMembers(course.id);
+    } catch (err) {
+      console.warn('Failed to list course members for group message:', err);
+    }
+  }
+
+  const studentRecipients = (members || []).filter(m => {
+    const email = normalizeEmail(m?.memberEmail || m?.email);
+    return email && email !== senderEmail && isValidEmail(email) && m?.status !== 'removed' && m?.memberRole !== 'teacher';
+  });
+
+  if (studentRecipients.length === 0) {
+    return { sent: [], failed: [], total: 0 };
+  }
+
+  const sent = [];
+  const failed = [];
+  const queue = [...studentRecipients];
+
+  const worker = async () => {
+    while (queue.length > 0) {
+      const member = queue.shift();
+      const email = normalizeEmail(member.memberEmail || member.email);
+      const name = member.memberName || member.name || email.split('@')[0];
+      try {
+        await sendMessage({
+          sender,
+          senderProfile,
+          to: email,
+          toName: name,
+          subject: subject ? `[${course.title}] ${subject}` : `Announcement: ${course.title}`,
+          body: text,
+          courseId: String(course.id),
+          courseTitle: String(course.title),
+          meta: {
+            courseGroup: true,
+            groupCourseId: String(course.id)
+          }
+        });
+        sent.push(email);
+      } catch (err) {
+        console.warn(`Failed to send group message to ${email}:`, err?.code || err);
+        failed.push(email);
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), queue.length) }, worker));
+  return { sent, failed, total: studentRecipients.length };
+}
+
+// ---------- 7-year retention message and thread archiving ----------
+
+export const ARCHIVE_RETENTION_YEARS = 7;
+export const ARCHIVE_RETENTION_MS = 7 * 365.25 * 24 * 60 * 60 * 1000;
+
+export function getArchiveStorageKey(email) {
+  return `ozedu_msg_archive_${normalizeEmail(email)}`;
+}
+
+/**
+ * Loads the user's archived threads and messages, purging any items exceeding the 7-year retention limit.
+ */
+export function loadUserArchive(email) {
+  const key = getArchiveStorageKey(email);
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage && typeof localStorage.getItem === 'function') {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const data = JSON.parse(raw);
+        const now = Date.now();
+        const threads = {};
+        for (const [tid, item] of Object.entries(data.threads || {})) {
+          if (item && item.purgeAt > now) threads[tid] = item;
+        }
+        const messages = {};
+        for (const [mid, item] of Object.entries(data.messages || {})) {
+          if (item && item.purgeAt > now) messages[mid] = item;
+        }
+        return { threads, messages };
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to load user message archive:', err);
+  }
+  return { threads: {}, messages: {} };
+}
+
+export function saveUserArchive(email, archive) {
+  const key = getArchiveStorageKey(email);
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage && typeof localStorage.setItem === 'function') {
+      localStorage.setItem(key, JSON.stringify(archive));
+    }
+  } catch (err) {
+    console.warn('Failed to save user message archive:', err);
+  }
+}
+
+export function archiveMessageRecord({ email, messageId, threadId, now = Date.now() }) {
+  const archive = loadUserArchive(email);
+  const purgeAt = now + ARCHIVE_RETENTION_MS;
+  archive.messages[messageId] = {
+    messageId,
+    threadId: String(threadId || ''),
+    archivedAt: now,
+    purgeAt,
+    retentionYears: ARCHIVE_RETENTION_YEARS
+  };
+  saveUserArchive(email, archive);
+  return archive;
+}
+
+export function archiveThreadRecord({ email, threadId, now = Date.now() }) {
+  const archive = loadUserArchive(email);
+  const purgeAt = now + ARCHIVE_RETENTION_MS;
+  archive.threads[threadId] = {
+    threadId,
+    archivedAt: now,
+    purgeAt,
+    retentionYears: ARCHIVE_RETENTION_YEARS
+  };
+  saveUserArchive(email, archive);
+  return archive;
+}
+
+export function restoreMessageRecord({ email, messageId }) {
+  const archive = loadUserArchive(email);
+  delete archive.messages[messageId];
+  saveUserArchive(email, archive);
+  return archive;
+}
+
+export function restoreThreadRecord({ email, threadId }) {
+  const archive = loadUserArchive(email);
+  delete archive.threads[threadId];
+  saveUserArchive(email, archive);
+  return archive;
+}
+
+/**
+ * Search registered users in Firestore (collection: 'users') by name or email.
+ * Includes fallback to provided contacts for offline/mock environments.
+ * @param {string} term
+ * @param {object} [options]
+ * @param {string} [options.currentEmail] Exclude the current sender
+ * @param {Array} [options.fallbackContacts] Fallback list of contacts
+ * @returns {Promise<Array<{ uid?: string, email: string, name: string, role: string }>>}
+ */
+export async function searchUsersInDb(term, { currentEmail = '', fallbackContacts = [] } = {}) {
+  const clean = String(term || '').trim().toLowerCase();
+  if (!clean) return [];
+  const me = normalizeEmail(currentEmail);
+  const map = new Map();
+
+  if (db) {
+    try {
+      const q = query(collection(db, 'users'), limit(100));
+      const snap = await getDocs(q);
+      for (const d of snap.docs) {
+        const u = d.data() || {};
+        const email = normalizeEmail(u.email);
+        if (!email || email === me || email === SUPERADMIN_INBOX || !isValidEmail(email)) continue;
+        const name = u.displayName || u.name || '';
+        if (name.toLowerCase().includes(clean) || email.toLowerCase().includes(clean)) {
+          map.set(email, {
+            uid: d.id,
+            email,
+            name: name || email,
+            role: u.role || 'user'
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('searchUsersInDb query failed:', err);
+    }
+  }
+
+  if (Array.isArray(fallbackContacts)) {
+    for (const c of fallbackContacts) {
+      const email = normalizeEmail(c.email);
+      if (!email || email === me || email === SUPERADMIN_INBOX || !isValidEmail(email)) continue;
+      const name = c.name || '';
+      if ((name.toLowerCase().includes(clean) || email.toLowerCase().includes(clean)) && !map.has(email)) {
+        map.set(email, {
+          email,
+          name: name || email,
+          role: c.kind || 'user'
+        });
+      }
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+

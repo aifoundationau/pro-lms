@@ -9,7 +9,7 @@
 
 import { getUserTokenBalance } from './tokenService.js';
 import { deductUserTokens, normalizeAiAssistCost } from './aiAssistTokenService.js';
-import { resolveActiveStandards } from './curriculumStandards.js';
+import { resolveActiveStandards, sanitizeStandardIds } from './curriculumStandards.js';
 import { isUserCharityTeacher } from './courseMarketplaceService.js';
 import { hasUnlimitedTokens } from './rolePrivileges.js';
 import {
@@ -284,10 +284,15 @@ export function sanitizeAiCourseFields(raw, { isUrlAllowed = () => false } = {})
     title: str(r.title, 300),
     code: str(r.code, 100),
     category: str(r.category, 200),
+    year: str(r.year, 100),
+    startDate: validIsoDate(r.startDate),
+    knowledge: stripUnapprovedUrls(str(r.knowledge, 5000), isUrlAllowed),
+    thumbnail: isUrlAllowed(r.thumbnail) ? str(r.thumbnail, 2000) : '',
     description: stripUnapprovedUrls(str(r.description), isUrlAllowed),
     aqfEquivalenceNotes: stripUnapprovedUrls(str(r.aqfEquivalenceNotes, 5000), isUrlAllowed),
     learningOutcomes: stringList(r.learningOutcomes, 20, 2000),
-    aqfLevel: int(r.aqfLevel, 0, 9)
+    aqfLevel: int(r.aqfLevel, 0, 9),
+    curriculumStandards: sanitizeStandardIds(r.curriculumStandards)
   };
 }
 

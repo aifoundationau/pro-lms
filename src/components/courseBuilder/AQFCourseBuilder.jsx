@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   AQF_LEVELS,
   CONTENT_BLOCK_TYPES,
@@ -81,6 +81,133 @@ function listToLines(list) {
   return Array.isArray(list) ? list.join('\n') : '';
 }
 
+/** Field descriptions and instructions for Course Builder info signs */
+const SPEC_FIELD_INFO = {
+  title: {
+    label: 'Course Title',
+    text: "The full descriptive name associated with that code (e.g., Introduction to Computer Science, Modern American Literature, Certificate IV in Business). All fields are optional. Plain text only."
+  },
+  code: {
+    label: 'Course Code',
+    text: "An alphanumeric shorthand used for administration and registration (e.g., CS101, ENG202, BSB40120). Optional. Plain text only."
+  },
+  aqfLevel: {
+    label: 'Level Taxonomy',
+    text: "The formal qualification tier—primarily mapped to the Australian Qualifications Framework (AQF Levels 1–9) or set to International/Unassigned (Level 0)—that determines the depth, academic complexity, and regulatory standard of the course."
+  },
+  standards: {
+    label: 'Curriculum Standards (AI Alignment)',
+    text: "Directs the AI to calibrate learning outcomes, syllabi, and rubrics against the specific auditing, quality, and compliance benchmarks of chosen educational regulatory bodies (e.g. TEQSA, AACSB, ACARA, UK QAA, UK Ofsted, or International / Unassigned)."
+  },
+  description: {
+    label: 'Course Description',
+    text: "Provides a comprehensive summary of the course's scope, core topics, target audience, and primary educational value to guide prospective learners and administrators. Written in Academic English. Optional. Plain text only."
+  },
+  category: {
+    label: 'Category',
+    text: "Classifies the course into its broad academic discipline or vocational industry sector (e.g., Information Technology, Business & Commerce, Health) to organize it cleanly within the platform's course catalog. Optional. Plain text only."
+  },
+  year: {
+    label: 'Year / Semester',
+    text: "Specifies the exact academic year and teaching term during which the course is scheduled to run (e.g., 2026 Semester 1, Term 2). Optional. Plain text only."
+  },
+  startDate: {
+    label: 'Start Date',
+    text: "Sets the official calendar day when instructional content, student access, and course activities formally commence. Format: YYYY-MM-DD. Optional."
+  },
+  learningOutcomes: {
+    label: 'Course Learning Outcomes',
+    text: "The core competencies and capabilities learners will master by the end of the course. Write one outcome per line starting with a Bloom's Taxonomy cognitive action verb in Academic English (e.g., 'Analyse...', 'Evaluate...'). Optional. Plain text only."
+  },
+  knowledge: {
+    label: 'Assumed Knowledge / Prerequisites',
+    text: "Defines the prior foundational concepts, technical competencies, or completed courses a student must possess to successfully engage with and complete the curriculum. Written in Academic English. Optional. Plain text only."
+  },
+  aqfEquivalenceNotes: {
+    label: 'Level Equivalence Notes',
+    text: "Documents how this custom, unassigned, or international course compares to recognized qualification frameworks (like the AQF) for credit transfer, articulation, or compliance audits. Strongly recommended when Level is 0. Optional. Plain text only."
+  },
+  thumbnail: {
+    label: 'Cover Image URL',
+    text: "The web address of the 16:9 widescreen banner image displayed as the visual header for the course across student dashboards and public catalogs (must begin with https://). Optional."
+  },
+  unitCode: {
+    label: 'Unit Code',
+    text: "Enter the unique official identifier or alphanumeric code assigned to this unit of study."
+  },
+  unitTitle: {
+    label: 'Unit Title',
+    text: "State a clear, descriptive name that reflects the primary subject or skill focus of the unit."
+  },
+  nominalHours: {
+    label: 'Nominal Hours',
+    text: "Input the total estimated number of structured learning hours required to complete this unit."
+  },
+  unitDescription: {
+    label: 'Unit Description',
+    text: "Provide a brief overview summarizing the unit's purpose, target audience, and key learning focus."
+  },
+  performanceCriteria: {
+    label: 'Performance Criteria',
+    text: "Outline the specific skills and measurable standards learners must demonstrate to achieve competency in this unit."
+  },
+  unitOutcomes: {
+    label: 'Unit Learning Outcomes (one per line)',
+    text: "List the specific knowledge or actionable skills students will acquire, formatted with one outcome per line starting with an active verb."
+  },
+  unitContent: {
+    label: 'Unit Content',
+    text: "Write the detailed lesson text, explanations, practical examples, and activities that guide students through the unit."
+  }
+};
+
+function FieldInfoButton({ fieldKey, activeInfoField, setActiveInfoField, label }) {
+  const isActive = activeInfoField === fieldKey;
+  return (
+    <button
+      type="button"
+      className={`field-info-trigger ${isActive ? 'active' : ''}`}
+      aria-label={`Info for ${label || fieldKey}`}
+      title="How to fill this out"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setActiveInfoField(prev => prev === fieldKey ? null : fieldKey);
+      }}
+      onMouseEnter={() => setActiveInfoField(fieldKey)}
+    >
+      ℹ
+    </button>
+  );
+}
+
+function FieldInfoCallout({ fieldKey, activeInfoField, setActiveInfoField, info }) {
+  if (activeInfoField !== fieldKey || !info) return null;
+  return (
+    <div
+      className="field-info-callout"
+      role="tooltip"
+      onClick={e => e.stopPropagation()}
+    >
+      <div className="field-info-callout-header">
+        <span style={{ fontSize: '0.95rem' }}>💡</span>
+        <strong>How to fill out {info.label}:</strong>
+        <button
+          type="button"
+          className="field-info-close"
+          onClick={() => setActiveInfoField(null)}
+          aria-label="Close description"
+          title="Close"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="field-info-callout-text">{info.text}</div>
+      <div className="field-info-callout-hint">👉 Move your mouse to the box below to close and start typing.</div>
+    </div>
+  );
+}
+
 /**
  * Error boundary: if the builder crashes, show a recoverable fallback instead of
  * blanking the whole app.
@@ -127,6 +254,42 @@ export default function AQFCourseBuilder(props) {
       <AQFCourseBuilderInner {...props} />
     </CourseBuilderErrorBoundary>
   );
+}
+
+function getCourseContentSnapshot(course) {
+  if (!course || typeof course !== 'object') return '';
+  const {
+    title = '',
+    code = '',
+    aqfLevel = 0,
+    curriculumStandards = [],
+    category = '',
+    year = '',
+    startDate = '',
+    description = '',
+    knowledge = '',
+    thumbnail = '',
+    aqfEquivalenceNotes = '',
+    learningOutcomes = [],
+    units = [],
+    assessments = []
+  } = course;
+  return JSON.stringify({
+    title,
+    code,
+    aqfLevel: Number(aqfLevel) || 0,
+    curriculumStandards: sanitizeStandardIds(curriculumStandards),
+    category,
+    year,
+    startDate,
+    description,
+    knowledge,
+    thumbnail,
+    aqfEquivalenceNotes,
+    learningOutcomes,
+    units,
+    assessments
+  });
 }
 
 function AQFCourseBuilderInner({
@@ -204,12 +367,11 @@ function AQFCourseBuilderInner({
   const [requestModalData, setRequestModalData] = useState(null);
   const [requestReason, setRequestReason] = useState('');
 
-  // Incoming Author Requests Modal State
-  const [isIncomingRequestsOpen, setIsIncomingRequestsOpen] = useState(false);
-  const [incomingRequests, setIncomingRequests] = useState([]);
-
   // Save feedback
   const [saveNotice, setSaveNotice] = useState(null);
+
+  // Field info sign description popup state
+  const [activeInfoField, setActiveInfoField] = useState(null);
 
   // AI Assist fee (Super Admin configured, default 10 tokens)
   const [aiAssistCost, setAiAssistCost] = useState(DEFAULT_AI_ASSIST_COST_TOKENS);
@@ -220,7 +382,7 @@ function AQFCourseBuilderInner({
   const selectedAqf = getAqfLevelMeta(currentCourse.aqfLevel);
   const selectedStandardIds = sanitizeStandardIds(currentCourse.curriculumStandards);
   const standardsRouting = resolveActiveStandards(selectedStandardIds, selectedAqf.level);
-  const aiAssistRouting = resolveActiveStandards(selectedStandardIds, aiTargetLevel);
+  const aiAssistRouting = resolveActiveStandards(selectedStandardIds, aiTargetLevel === 'auto' ? 0 : aiTargetLevel);
   const displayBalance = formatTokenBalance(userTokenBalance, userProfile || { email: currentUser?.email });
   const isAiAssistFree = isCharity || isUnlimited || aiAssistCost === 0;
 
@@ -416,6 +578,98 @@ function AQFCourseBuilderInner({
     setTimeout(() => setSaveNotice(null), 9000);
   };
 
+  // --- Auto-Save & Draft Tracking ---
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [lastSavedTime, setLastSavedTime] = useState(null);
+  const [autoSaveIntervalSec, setAutoSaveIntervalSec] = useState(() => {
+    try {
+      const stored = localStorage.getItem('ozedu_builder_autosave_interval');
+      return stored !== null ? Number(stored) : 60; // 60s recommended default
+    } catch {
+      return 60;
+    }
+  });
+  const [showUnsavedModal, setShowUnsavedModal] = useState(false);
+
+  // Track unsaved changes relative to last saved snapshot
+  const [lastSavedSnapshot, setLastSavedSnapshot] = useState(() => getCourseContentSnapshot(currentCourse));
+  const lastSavedSnapshotRef = useRef(lastSavedSnapshot);
+  const lastSavedJsonRef = useRef(JSON.stringify(currentCourse));
+  const currentCourseRef = useRef(currentCourse);
+  const hasUnsavedChangesRef = useRef(false);
+  const isSavingDraftRef = useRef(false);
+
+  const hasUnsavedChanges = getCourseContentSnapshot(currentCourse) !== lastSavedSnapshot;
+
+  useEffect(() => {
+    currentCourseRef.current = currentCourse;
+    hasUnsavedChangesRef.current = getCourseContentSnapshot(currentCourse) !== lastSavedSnapshotRef.current;
+  }, [currentCourse]);
+
+  // Window beforeunload warning if there are unsaved edits
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (hasUnsavedChangesRef.current) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
+
+  // Background Auto-Save
+  const performSilentAutoSave = useCallback(async (explicitCourse = null) => {
+    if (isSavingDraftRef.current) return;
+    const baseCourse = explicitCourse || currentCourseRef.current;
+    if (!explicitCourse && getCourseContentSnapshot(baseCourse) === lastSavedSnapshotRef.current) return;
+    isSavingDraftRef.current = true;
+    const draftTags = Array.from(new Set([...(Array.isArray(baseCourse.tags) ? baseCourse.tags : []), 'lms', 'Draft']));
+    const draftCourse = {
+      ...baseCourse,
+      isDraft: true,
+      isPublished: false,
+      status: 'draft',
+      visibility: 'site',
+      tag: 'lms',
+      tags: draftTags,
+      updatedAt: Date.now()
+    };
+    try {
+      await onSaveCourse?.(draftCourse);
+      const snapshot = getCourseContentSnapshot(draftCourse);
+      lastSavedSnapshotRef.current = snapshot;
+      setLastSavedSnapshot(snapshot);
+      lastSavedJsonRef.current = JSON.stringify(draftCourse);
+      hasUnsavedChangesRef.current = false;
+      setLastSavedTime(new Date());
+    } catch (err) {
+      console.warn('Auto-save note:', err?.code || err?.message || err);
+    } finally {
+      isSavingDraftRef.current = false;
+    }
+  }, [onSaveCourse]);
+
+  // Auto-save after every entry (debounced 1.2s to smoothly save completed edits)
+  useEffect(() => {
+    if (autoSaveIntervalSec === 0) return undefined;
+    if (getCourseContentSnapshot(currentCourse) === lastSavedSnapshotRef.current) return undefined;
+    const timer = setTimeout(() => {
+      performSilentAutoSave();
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [currentCourse, autoSaveIntervalSec, performSilentAutoSave]);
+
+  // Periodic Auto-Save interval backup
+  useEffect(() => {
+    if (!autoSaveIntervalSec || autoSaveIntervalSec <= 0) return undefined;
+    const intervalMs = autoSaveIntervalSec * 1000;
+    const timer = setInterval(() => {
+      performSilentAutoSave();
+    }, intervalMs);
+    return () => clearInterval(timer);
+  }, [autoSaveIntervalSec, performSilentAutoSave]);
+
   // AI Assist: full-course generation guided by the selected Curriculum Standards
   const handleRunAiIngestion = async () => {
     if (!aiSyllabusText.trim()) {
@@ -431,25 +685,43 @@ function AQFCourseBuilderInner({
         currentUser,
         userProfile,
         syllabusText: aiSyllabusText,
-        targetAqfLevel: aiTargetLevel,
+        targetAqfLevel: aiTargetLevel === 'auto' ? null : aiTargetLevel,
         curriculumStandards: selectedStandardIds,
         skillTexts: SKILL_TEXTS,
         costTokens: aiAssistCost
       });
 
-      // Keep the existing course identity/ownership and standards selection so saves
-      // still target the course being edited.
-      setCurrentCourse(prev => ({
+      const detectedLevel = Number.isInteger(res.course?.aqfLevel)
+        ? res.course.aqfLevel
+        : (Number.isInteger(Number(aiTargetLevel)) ? Number(aiTargetLevel) : 0);
+      const detectedStandards = Array.isArray(res.course?.curriculumStandards) && res.course.curriculumStandards.length > 0
+        ? sanitizeStandardIds(res.course.curriculumStandards)
+        : (selectedStandardIds.length > 0 ? selectedStandardIds : ['international']);
+
+      const updatedCourse = {
         ...upgradeCourseStructure(res.course),
-        id: prev.id ?? res.course.id,
-        authorId: prev.authorId ?? res.course.authorId,
-        authorName: prev.authorName ?? res.course.authorName,
-        curriculumStandards: sanitizeStandardIds(prev.curriculumStandards)
-      }));
+        id: currentCourse.id ?? res.course.id,
+        authorId: currentCourse.authorId ?? res.course.authorId,
+        authorName: currentCourse.authorName ?? res.course.authorName,
+        aqfLevel: detectedLevel,
+        curriculumStandards: detectedStandards
+      };
+
+      setCurrentCourse(updatedCourse);
       setActiveUnitId(res.course.units?.[0]?.id || null);
       setAiNotice({ type: 'success', message: res.message });
       if (onRefreshBalance) onRefreshBalance();
-      setTimeout(() => setIsAiIngestOpen(false), 1800);
+
+      // Auto save after every entry, even AI entry
+      await performSilentAutoSave(updatedCourse);
+
+      setTimeout(() => {
+        setIsAiIngestOpen(false);
+        setSaveNotice({
+          type: 'info',
+          message: '✨ Course populated and auto-saved! Review and edit the fields to improve and personalize your course. You can ask AI Assist to refine any section in Academic English, and save a draft anytime.'
+        });
+      }, 1800);
     } catch (err) {
       if (err.code === 'INSUFFICIENT_TOKENS_FOR_AI') {
         setAiNotice({
@@ -557,79 +829,6 @@ function AQFCourseBuilderInner({
     }
   };
 
-  const [isSavingDraft, setIsSavingDraft] = useState(false);
-  const [lastSavedTime, setLastSavedTime] = useState(null);
-  const [autoSaveIntervalSec, setAutoSaveIntervalSec] = useState(() => {
-    try {
-      const stored = localStorage.getItem('ozedu_builder_autosave_interval');
-      return stored !== null ? Number(stored) : 60; // 60s recommended default
-    } catch (_) {
-      return 60;
-    }
-  });
-  const [showUnsavedModal, setShowUnsavedModal] = useState(false);
-
-  // Track unsaved changes relative to last saved snapshot
-  const lastSavedJsonRef = useRef(JSON.stringify(currentCourse));
-  const currentCourseRef = useRef(currentCourse);
-  const hasUnsavedChangesRef = useRef(false);
-  const isSavingDraftRef = useRef(false);
-
-  const hasUnsavedChanges = JSON.stringify(currentCourse) !== lastSavedJsonRef.current;
-
-  useEffect(() => {
-    currentCourseRef.current = currentCourse;
-    hasUnsavedChangesRef.current = JSON.stringify(currentCourse) !== lastSavedJsonRef.current;
-  }, [currentCourse]);
-
-  // Window beforeunload warning if there are unsaved edits
-  useEffect(() => {
-    const handleBeforeUnload = (e) => {
-      if (hasUnsavedChangesRef.current) {
-        e.preventDefault();
-        e.returnValue = '';
-      }
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, []);
-
-  // Background Auto-Save
-  const performSilentAutoSave = async () => {
-    if (isSavingDraftRef.current || !hasUnsavedChangesRef.current) return;
-    isSavingDraftRef.current = true;
-    const draftCourseToSave = { ...currentCourseRef.current };
-    const draftTags = Array.from(new Set([...(Array.isArray(draftCourseToSave.tags) ? draftCourseToSave.tags : []), 'lms', 'Draft']));
-    const draftCourse = {
-      ...draftCourseToSave,
-      isDraft: true,
-      isPublished: false,
-      status: 'draft',
-      visibility: 'site',
-      tag: 'lms',
-      tags: draftTags,
-      updatedAt: Date.now()
-    };
-    lastSavedJsonRef.current = JSON.stringify(draftCourse);
-    try {
-      await onSaveCourse?.(draftCourse);
-      setLastSavedTime(new Date());
-    } catch (err) {
-      console.warn('Auto-save note:', err?.code || err?.message || err);
-    } finally {
-      isSavingDraftRef.current = false;
-    }
-  };
-
-  useEffect(() => {
-    if (!autoSaveIntervalSec || autoSaveIntervalSec <= 0) return undefined;
-    const intervalMs = autoSaveIntervalSec * 1000;
-    const timer = setInterval(() => {
-      performSilentAutoSave();
-    }, intervalMs);
-    return () => clearInterval(timer);
-  }, [autoSaveIntervalSec, onSaveCourse]);
-
   // Save Course as Draft — invoked immediately as soon as "Save Draft" is pressed
   const handleSave = async () => {
     if (isSavingDraft) return;
@@ -646,7 +845,11 @@ function AQFCourseBuilderInner({
       updatedAt: Date.now()
     };
     setCurrentCourse(draftCourse);
+    const draftSnapshot = getCourseContentSnapshot(draftCourse);
+    lastSavedSnapshotRef.current = draftSnapshot;
+    setLastSavedSnapshot(draftSnapshot);
     lastSavedJsonRef.current = JSON.stringify(draftCourse);
+    hasUnsavedChangesRef.current = false;
     try {
       await onSaveCourse(draftCourse);
       setLastSavedTime(new Date());
@@ -679,7 +882,11 @@ function AQFCourseBuilderInner({
       updatedAt: Date.now()
     };
     setCurrentCourse(publishedCourse);
+    const pubSnapshot = getCourseContentSnapshot(publishedCourse);
+    lastSavedSnapshotRef.current = pubSnapshot;
+    setLastSavedSnapshot(pubSnapshot);
     lastSavedJsonRef.current = JSON.stringify(publishedCourse);
+    hasUnsavedChangesRef.current = false;
     try {
       await publishCourseToMarketplace(publishedCourse);
       await onSaveCourse(publishedCourse);
@@ -700,7 +907,6 @@ function AQFCourseBuilderInner({
     }
   };
 
-  const currentUnit = currentCourse.units?.find(u => u.id === activeUnitId) || currentCourse.units?.[0];
   const courseAssessments = Array.isArray(currentCourse.assessments) ? currentCourse.assessments.filter(a => a && typeof a === 'object') : [];
   const assessmentWeightTotal = Math.round(courseAssessments.reduce((sum, a) => sum + (Number(a.nominalWeight) || 0), 0) * 100) / 100;
   const quizCount = listCourseQuizzes(currentCourse).length;
@@ -795,7 +1001,7 @@ function AQFCourseBuilderInner({
           <button
             className="nav-btn primary"
             onClick={() => {
-              setAiTargetLevel(currentCourse.aqfLevel !== undefined ? currentCourse.aqfLevel : 0);
+              setAiTargetLevel(currentCourse.aqfLevel !== undefined ? currentCourse.aqfLevel : 'auto');
               setIsAiIngestOpen(true);
               setAiNotice(null);
             }}
@@ -815,7 +1021,7 @@ function AQFCourseBuilderInner({
           </button>
 
           {/* Auto-Save Interval Selector */}
-          <div className="builder-autosave-wrap" title="Auto-save draft frequency (Recommended: 60s)">
+          <div className="builder-autosave-wrap" title="Auto-save draft frequency (Auto-saves after every entry)">
             <label htmlFor="builder-autosave-select" className="builder-autosave-label">
               ⏱️ Auto-save:
             </label>
@@ -826,14 +1032,14 @@ function AQFCourseBuilderInner({
               onChange={e => {
                 const val = Number(e.target.value);
                 setAutoSaveIntervalSec(val);
-                try { localStorage.setItem('ozedu_builder_autosave_interval', String(val)); } catch (_) {}
+                try { localStorage.setItem('ozedu_builder_autosave_interval', String(val)); } catch {}
               }}
               aria-label="Auto-save draft interval"
             >
-              <option value="0">Off (Manual)</option>
+              <option value="60">After every entry (Default)</option>
               <option value="30">Every 30s</option>
-              <option value="60">Every 60s (Recommended)</option>
               <option value="120">Every 2m</option>
+              <option value="0">Off (Manual only)</option>
             </select>
           </div>
 
@@ -998,52 +1204,82 @@ function AQFCourseBuilderInner({
                   </span>
                 )}
               </div>
-              <button
-                type="button"
-                className="nav-btn secondary"
-                style={{ padding: '4px 10px', fontSize: '0.8rem' }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setIsSpecsExpanded(prev => !prev);
-                }}
-              >
-                {isSpecsExpanded ? 'Collapse' : 'Expand'}
-              </button>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                <button
+                  type="button"
+                  className="nav-btn secondary"
+                  style={{ padding: '4px 10px', fontSize: '0.8rem', color: '#fef08a', borderColor: 'rgba(245, 158, 11, 0.7)' }}
+                  onClick={handleSave}
+                  disabled={isSavingDraft}
+                  title="Save Course Specifications draft"
+                >
+                  <span>{isSavingDraft ? '💾' : '📝'}</span> {isSavingDraft ? 'Saving Draft…' : 'Save Draft'}
+                </button>
+                <button
+                  type="button"
+                  className="nav-btn secondary"
+                  style={{ padding: '4px 10px', fontSize: '0.8rem' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsSpecsExpanded(prev => !prev);
+                  }}
+                >
+                  {isSpecsExpanded ? 'Collapse' : 'Expand'}
+                </button>
+              </div>
             </div>
 
             {isSpecsExpanded && (
               <div id="builder-specs-body" className="specs-grid">
                 <div className="specs-wide">
-                  <label className="field-label" htmlFor="spec-title">Course Title</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-title">Course Title</label>
+                    <FieldInfoButton fieldKey="title" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.title.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="title" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.title} />
                   <input
                     id="spec-title"
                     type="text"
                     className="form-input"
                     value={currentCourse.title || ''}
                     onChange={e => handleCourseFieldChange('title', e.target.value)}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                     placeholder="e.g. Diploma of Cyber Security"
                   />
                 </div>
 
                 <div>
-                  <label className="field-label" htmlFor="spec-code">Course Code</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-code">Course Code</label>
+                    <FieldInfoButton fieldKey="code" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.code.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="code" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.code} />
                   <input
                     id="spec-code"
                     type="text"
                     className="form-input"
                     value={currentCourse.code || ''}
                     onChange={e => handleCourseFieldChange('code', e.target.value)}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                     placeholder="e.g. ICT50220"
                   />
                 </div>
 
                 <div>
-                  <label className="field-label" htmlFor="spec-level">Level Taxonomy</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-level">Level Taxonomy</label>
+                    <FieldInfoButton fieldKey="aqfLevel" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.aqfLevel.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="aqfLevel" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.aqfLevel} />
                   <select
                     id="spec-level"
                     className="form-input"
                     value={currentCourse.aqfLevel !== undefined ? currentCourse.aqfLevel : 0}
                     onChange={e => handleCourseFieldChange('aqfLevel', Number(e.target.value))}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                   >
                     {AQF_LEVELS.map(lvl => (
                       <option key={lvl.level} value={lvl.level}>
@@ -1058,8 +1294,12 @@ function AQFCourseBuilderInner({
 
                 {/* Curriculum Standards: the AI Assist agent follows the matching /skills/*.md rules */}
                 <div className="specs-wide">
-                  <label className="field-label">Curriculum Standards (AI Alignment)</label>
-                  <div className="standards-chip-grid" role="group" aria-label="Curriculum standards">
+                  <div className="field-label-row">
+                    <label className="field-label">Curriculum Standards (AI Alignment)</label>
+                    <FieldInfoButton fieldKey="standards" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.standards.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="standards" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.standards} />
+                  <div className="standards-chip-grid" role="group" aria-label="Curriculum standards" onMouseEnter={() => setActiveInfoField(null)}>
                     {CURRICULUM_STANDARDS.map(std => {
                       const isSelected = selectedStandardIds.includes(std.id);
                       const isSkipped = standardsRouting.skipped.some(s => s.id === std.id);
@@ -1085,98 +1325,162 @@ function AQFCourseBuilderInner({
                 </div>
 
                 <div className="specs-wide">
-                  <label className="field-label" htmlFor="spec-description">Course Description</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-description">Course Description</label>
+                    <FieldInfoButton fieldKey="description" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.description.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="description" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.description} />
                   <textarea
                     id="spec-description"
                     rows="3"
                     className="form-input"
                     value={currentCourse.description || ''}
                     onChange={e => handleCourseFieldChange('description', e.target.value)}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                     placeholder="Comprehensive industry overview and target learning cohort..."
                   />
                 </div>
 
                 <div>
-                  <label className="field-label" htmlFor="spec-category">Category</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-category">Category</label>
+                    <FieldInfoButton fieldKey="category" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.category.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="category" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.category} />
                   <input
                     id="spec-category"
                     type="text"
                     className="form-input"
                     value={currentCourse.category || ''}
                     onChange={e => handleCourseFieldChange('category', e.target.value)}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                     placeholder="e.g. Information Technology"
                   />
                 </div>
 
                 <div>
-                  <label className="field-label" htmlFor="spec-year">Year / Semester</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-year">Year / Semester</label>
+                    <FieldInfoButton fieldKey="year" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.year.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="year" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.year} />
                   <input
                     id="spec-year"
                     type="text"
                     className="form-input"
                     value={currentCourse.year || ''}
                     onChange={e => handleCourseFieldChange('year', e.target.value)}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                     placeholder="2026 Semester 1"
                   />
                 </div>
 
                 <div>
-                  <label className="field-label" htmlFor="spec-start">Start Date</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-start">Start Date</label>
+                    <FieldInfoButton fieldKey="startDate" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.startDate.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="startDate" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.startDate} />
                   <input
                     id="spec-start"
                     type="date"
                     className="form-input"
                     value={currentCourse.startDate || ''}
                     onChange={e => handleCourseFieldChange('startDate', e.target.value)}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                   />
                 </div>
 
                 <div className="specs-wide">
-                  <label className="field-label" htmlFor="spec-outcomes">Course Learning Outcomes (one per line)</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-outcomes">Course Learning Outcomes (one per line)</label>
+                    <FieldInfoButton fieldKey="learningOutcomes" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.learningOutcomes.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="learningOutcomes" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.learningOutcomes} />
                   <textarea
                     id="spec-outcomes"
                     rows="4"
                     className="form-input"
                     value={listToLines(currentCourse.learningOutcomes)}
                     onChange={e => handleCourseFieldChange('learningOutcomes', linesToList(e.target.value))}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                     placeholder="Analyse…&#10;Apply…&#10;Evaluate…"
                   />
                 </div>
 
                 <div className="specs-wide">
-                  <label className="field-label" htmlFor="spec-knowledge">Assumed Knowledge / Prerequisites</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-knowledge">Assumed Knowledge / Prerequisites</label>
+                    <FieldInfoButton fieldKey="knowledge" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.knowledge.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="knowledge" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.knowledge} />
                   <textarea
                     id="spec-knowledge"
                     rows="2"
                     className="form-input"
                     value={currentCourse.knowledge || ''}
                     onChange={e => handleCourseFieldChange('knowledge', e.target.value)}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                     placeholder="What learners should already know"
                   />
                 </div>
 
                 <div className="specs-wide">
-                  <label className="field-label" htmlFor="spec-equivalence">Level Equivalence Notes</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-equivalence">Level Equivalence Notes</label>
+                    <FieldInfoButton fieldKey="aqfEquivalenceNotes" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.aqfEquivalenceNotes.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="aqfEquivalenceNotes" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.aqfEquivalenceNotes} />
                   <textarea
                     id="spec-equivalence"
                     rows="2"
                     className="form-input"
                     value={currentCourse.aqfEquivalenceNotes || ''}
                     onChange={e => handleCourseFieldChange('aqfEquivalenceNotes', e.target.value)}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                     placeholder="How this maps to AQF or international frameworks"
                   />
                 </div>
 
                 <div className="specs-wide">
-                  <label className="field-label" htmlFor="spec-cover">Cover Image URL</label>
+                  <div className="field-label-row">
+                    <label className="field-label" htmlFor="spec-cover">Cover Image URL</label>
+                    <FieldInfoButton fieldKey="thumbnail" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} label={SPEC_FIELD_INFO.thumbnail.label} />
+                  </div>
+                  <FieldInfoCallout fieldKey="thumbnail" activeInfoField={activeInfoField} setActiveInfoField={setActiveInfoField} info={SPEC_FIELD_INFO.thumbnail} />
                   <input
                     id="spec-cover"
                     type="url"
                     className="form-input"
                     value={currentCourse.thumbnail || ''}
                     onChange={e => handleCourseFieldChange('thumbnail', e.target.value)}
+                    onMouseEnter={() => setActiveInfoField(null)}
+                    onFocus={() => setActiveInfoField(null)}
                     placeholder="https://…"
                   />
+                </div>
+
+                <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '10px', paddingTop: '10px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                    {hasUnsavedChanges ? '● Unsaved changes in Course Specifications' : '✓ Specifications draft up to date'}
+                  </span>
+                  <button
+                    type="button"
+                    className="nav-btn secondary"
+                    style={{ color: '#fef08a', borderColor: 'rgba(245, 158, 11, 0.7)' }}
+                    onClick={handleSave}
+                    disabled={isSavingDraft}
+                    title="Save Course Specifications draft"
+                  >
+                    <span>{isSavingDraft ? '💾' : '📝'}</span> {isSavingDraft ? 'Saving Draft…' : 'Save Draft'}
+                  </button>
                 </div>
               </div>
             )}
@@ -1223,6 +1527,16 @@ function AQFCourseBuilderInner({
                 )}
               </div>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                <button
+                  type="button"
+                  className="nav-btn secondary"
+                  style={{ padding: '4px 10px', fontSize: '0.8rem', color: '#fef08a', borderColor: 'rgba(245, 158, 11, 0.7)' }}
+                  onClick={handleSave}
+                  disabled={isSavingDraft}
+                  title="Save Course Assessments & Rubrics draft"
+                >
+                  <span>{isSavingDraft ? '💾' : '📝'}</span> {isSavingDraft ? 'Saving Draft…' : 'Save Draft'}
+                </button>
                 <button className="nav-btn secondary" onClick={() => handleAddAssessment('formative')}>
                   + Formative Task
                 </button>
@@ -1266,46 +1580,60 @@ function AQFCourseBuilderInner({
                     return (
                       <div key={asmt.id} className="assessment-card glass" style={{ marginBottom: '14px' }}>
                         <div className="assessment-header-row">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'flex-end', gap: '10px', flex: 1, flexWrap: 'wrap' }}>
                             <button
                               type="button"
                               className="collapse-toggle-btn"
                               onClick={() => setExpandedAssessments(prev => ({ ...prev, [asmt.id]: !isCardOpen }))}
                               aria-label={isCardOpen ? "Collapse task" : "Expand task"}
-                              style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '2px 4px' }}
+                              style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '6px 4px', marginBottom: '6px' }}
                             >
                               {isCardOpen ? '▼' : '►'}
                             </button>
-                            <select
-                              className={`asmt-type-pill asmt-type-select ${asmt.type}`}
-                              value={asmt.type === 'summative' ? 'summative' : 'formative'}
-                              onChange={e => {
-                                const nextType = e.target.value === 'summative' ? 'summative' : 'formative';
-                                // A sample rubric the teacher has not changed follows the task type; an edited rubric is kept.
-                                const followsType = isSampleRubric(asmt.rubric, asmt.type === 'summative' ? 'summative' : 'formative');
-                                handleUpdateAssessment(asmt.id, followsType ? { type: nextType, rubric: createDefaultRubric(nextType) } : { type: nextType });
-                              }}
-                              aria-label="Assessment type"
-                            >
-                              <option value="formative">FORMATIVE</option>
-                              <option value="summative">SUMMATIVE</option>
-                            </select>
-                            <input
-                              type="text"
-                              className="form-input"
-                              style={{ fontWeight: 700 }}
-                              value={asmt.title || ''}
-                              onChange={e => handleUpdateAssessment(asmt.id, { title: e.target.value })}
-                              placeholder="Assessment Title"
-                            />
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', margin: 0 }}>
+                                Task Type
+                              </label>
+                              <select
+                                className={`asmt-type-pill asmt-type-select ${asmt.type}`}
+                                value={asmt.type === 'summative' ? 'summative' : 'formative'}
+                                onChange={e => {
+                                  const nextType = e.target.value === 'summative' ? 'summative' : 'formative';
+                                  // A sample rubric the teacher has not changed follows the task type; an edited rubric is kept.
+                                  const followsType = isSampleRubric(asmt.rubric, asmt.type === 'summative' ? 'summative' : 'formative');
+                                  handleUpdateAssessment(asmt.id, followsType ? { type: nextType, rubric: createDefaultRubric(nextType) } : { type: nextType });
+                                }}
+                                aria-label="Assessment type"
+                                style={{ height: '38px', boxSizing: 'border-box' }}
+                              >
+                                <option value="formative">FORMATIVE</option>
+                                <option value="summative">SUMMATIVE</option>
+                              </select>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', flex: 1, minWidth: '200px' }}>
+                              <label htmlFor={`asmt-title-${asmt.id}`} className="field-label" style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-secondary)', margin: 0 }}>
+                                Assessment Title
+                              </label>
+                              <input
+                                id={`asmt-title-${asmt.id}`}
+                                type="text"
+                                className="form-input"
+                                style={{ fontWeight: 700, height: '38px', padding: '8px 12px', boxSizing: 'border-box' }}
+                                value={asmt.title || ''}
+                                onChange={e => handleUpdateAssessment(asmt.id, { title: e.target.value })}
+                                placeholder="Assessment Title"
+                              />
+                            </div>
                             {asmt.nominalWeight !== null && asmt.nominalWeight !== undefined && (
-                              <span style={{ fontSize: '0.78rem', color: '#94a3b8', background: 'rgba(255,255,255,0.06)', padding: '2px 6px', borderRadius: '4px' }}>
-                                {asmt.nominalWeight}%
-                              </span>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', marginBottom: '8px' }}>
+                                <span style={{ fontSize: '0.78rem', color: '#94a3b8', background: 'rgba(255,255,255,0.06)', padding: '4px 8px', borderRadius: '4px', fontWeight: 600 }}>
+                                  {asmt.nominalWeight}%
+                                </span>
+                              </div>
                             )}
                           </div>
 
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
                             <button
                               type="button"
                               className="collapse-toggle-btn"
@@ -1326,14 +1654,20 @@ function AQFCourseBuilderInner({
 
                         {isCardOpen && (
                           <>
-                            <textarea
-                              rows="2"
-                              className="form-input"
-                              style={{ marginTop: '10px' }}
-                              value={asmt.description || ''}
-                              onChange={e => handleUpdateAssessment(asmt.id, { description: e.target.value })}
-                              placeholder="Task brief, submission requirements, and evidence portfolio..."
-                            />
+                            <div style={{ marginTop: '12px' }}>
+                              <label className="field-label" htmlFor={`asmt-desc-${asmt.id}`} style={{ display: 'block', marginBottom: '4px' }}>
+                                Task Brief &amp; Requirements
+                              </label>
+                              <textarea
+                                id={`asmt-desc-${asmt.id}`}
+                                rows="2"
+                                className="form-input"
+                                value={asmt.description || ''}
+                                onChange={e => handleUpdateAssessment(asmt.id, { description: e.target.value })}
+                                placeholder="Task brief, submission requirements, and evidence portfolio..."
+                                style={{ width: '100%', boxSizing: 'border-box' }}
+                              />
+                            </div>
 
                             {/* Due date, weighting, units covered & external submission link */}
                             <div className="asmt-meta-grid">
@@ -1372,13 +1706,40 @@ function AQFCourseBuilderInner({
                                 </select>
                               </div>
                               <div className="asmt-meta-wide">
-                                <label className="field-label">External Submission Link (Google Forms / Canvas / Teams)</label>
+                                <label className="field-label" htmlFor={`asmt-ext-link-${asmt.id}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px', marginBottom: '6px' }}>
+                                  <span>External Submission Link (Google Forms / Canvas / Teams)</span>
+                                  {asmt.externalSubmissionLinks?.[0] && /^https?:\/\//i.test(asmt.externalSubmissionLinks[0].trim()) && (
+                                    <a
+                                      href={asmt.externalSubmissionLinks[0].trim()}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      style={{
+                                        fontSize: '0.78rem',
+                                        color: '#38bdf8',
+                                        textDecoration: 'none',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '4px',
+                                        background: 'rgba(56, 189, 248, 0.1)',
+                                        padding: '2px 8px',
+                                        borderRadius: '4px',
+                                        border: '1px solid rgba(56, 189, 248, 0.3)'
+                                      }}
+                                      title="Open link in new tab to test"
+                                    >
+                                      <span>Test link</span>
+                                      <span>↗</span>
+                                    </a>
+                                  )}
+                                </label>
                                 <input
+                                  id={`asmt-ext-link-${asmt.id}`}
                                   type="text"
                                   className="form-input"
                                   value={asmt.externalSubmissionLinks?.[0] || ''}
                                   onChange={e => handleUpdateAssessment(asmt.id, { externalSubmissionLinks: [e.target.value] })}
                                   placeholder="https://forms.google.com/... or https://teams.microsoft.com/..."
+                                  style={{ width: '100%', boxSizing: 'border-box' }}
                                 />
                               </div>
                             </div>
@@ -1507,6 +1868,31 @@ function AQFCourseBuilderInner({
                     );
                   })
                 )}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginTop: '16px', paddingTop: '12px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button className="nav-btn secondary" onClick={() => handleAddAssessment('formative')}>
+                      + Formative Task
+                    </button>
+                    <button className="nav-btn primary" onClick={() => handleAddAssessment('summative')}>
+                      + Summative Task
+                    </button>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                      {hasUnsavedChanges ? '● Unsaved assessment edits' : '✓ Assessments up to date'}
+                    </span>
+                    <button
+                      type="button"
+                      className="nav-btn secondary"
+                      style={{ color: '#fef08a', borderColor: 'rgba(245, 158, 11, 0.7)' }}
+                      onClick={handleSave}
+                      disabled={isSavingDraft}
+                      title="Save Course Assessments & Rubrics draft"
+                    >
+                      <span>{isSavingDraft ? '💾' : '📝'}</span> {isSavingDraft ? 'Saving Draft…' : 'Save Draft'}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </section>
@@ -1548,6 +1934,16 @@ function AQFCourseBuilderInner({
                 </span>
               </div>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                <button
+                  type="button"
+                  className="nav-btn secondary"
+                  style={{ padding: '4px 10px', fontSize: '0.8rem', color: '#fef08a', borderColor: 'rgba(245, 158, 11, 0.7)' }}
+                  onClick={handleSave}
+                  disabled={isSavingDraft}
+                  title="Save Units of Study draft"
+                >
+                  <span>{isSavingDraft ? '💾' : '📝'}</span> {isSavingDraft ? 'Saving Draft…' : 'Save Draft'}
+                </button>
                 <button className="nav-btn primary" onClick={handleAddUnit}>
                   + Add Unit
                 </button>
@@ -1962,18 +2358,95 @@ function AQFCourseBuilderInner({
                     );
                   })
                 )}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginTop: '18px', paddingTop: '14px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+                  <button className="nav-btn primary" onClick={handleAddUnit}>
+                    + Add Unit
+                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                      {hasUnsavedChanges ? '● Unsaved unit changes' : '✓ Units draft up to date'}
+                    </span>
+                    <button
+                      type="button"
+                      className="nav-btn secondary"
+                      style={{ color: '#fef08a', borderColor: 'rgba(245, 158, 11, 0.7)' }}
+                      onClick={handleSave}
+                      disabled={isSavingDraft}
+                      title="Save Units of Study draft"
+                    >
+                      <span>{isSavingDraft ? '💾' : '📝'}</span> {isSavingDraft ? 'Saving Draft…' : 'Save Draft'}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </section>
+
+          {/* 🏁 BOTTOM OF MAIN WINDOW ACTION BAR */}
+          <div
+            className="builder-bottom-bar glass"
+            style={{
+              marginTop: '32px',
+              padding: '16px 20px',
+              borderRadius: '14px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '12px',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              background: 'rgba(15, 23, 42, 0.65)'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+              <span
+                className={`aqf-save-status-pill ${hasUnsavedChanges ? 'unsaved' : 'saved'}`}
+                onClick={() => hasUnsavedChanges && handleSave()}
+                title={hasUnsavedChanges ? 'Click to save draft now' : 'Draft saved'}
+                style={hasUnsavedChanges ? { cursor: 'pointer' } : undefined}
+              >
+                <span>{hasUnsavedChanges ? '●' : '✓'}</span>
+                <span>{hasUnsavedChanges ? 'Unsaved changes' : 'Draft saved'}</span>
+              </span>
+              {lastSavedTime && (
+                <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  Last saved {lastSavedTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="nav-btn secondary"
+                style={{ color: '#fef08a', borderColor: 'rgba(245, 158, 11, 0.7)', fontWeight: 700 }}
+                onClick={handleSave}
+                disabled={isSavingDraft}
+                title="Save complete course as draft"
+              >
+                <span>{isSavingDraft ? '💾' : '📝'}</span> {isSavingDraft ? 'Saving Draft…' : 'Save Draft'}
+              </button>
+              <button
+                type="button"
+                className="nav-btn primary"
+                style={{ fontWeight: 800 }}
+                onClick={handlePublish}
+                disabled={isSavingDraft}
+                title="Publish course"
+              >
+                🚀 Publish Course
+              </button>
+            </div>
+          </div>
         </main>
       </div>
 
       {/* MODAL 1: ✨ AI ASSIST (Gemini) — from syllabus text or from course spreadsheets */}
       {isAiIngestOpen && (
-        <div className="builder-modal-overlay" onClick={() => !isAiLoading && !isSpreadsheetBusy && setIsAiIngestOpen(false)}>
+        <div className="builder-modal-overlay ai-assist-overlay" onClick={() => !isAiLoading && !isSpreadsheetBusy && setIsAiIngestOpen(false)}>
           <div
-            className="builder-modal-dialog glass"
-            style={aiSourceMode === 'spreadsheet' ? { maxWidth: '780px' } : undefined}
+            className="builder-modal-dialog glass ai-assist-dialog"
+            style={aiSourceMode === 'spreadsheet' ? { maxWidth: '1040px' } : undefined}
             onClick={e => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -1984,43 +2457,45 @@ function AQFCourseBuilderInner({
               <button className="close-btn" onClick={() => setIsAiIngestOpen(false)} disabled={isAiLoading || isSpreadsheetBusy} aria-label="Close">✕</button>
             </div>
 
-            <div className="ai-token-cost-badge">
-              <span>🪙 Cost: <strong>{isAiAssistFree ? '0 Tokens' : `${aiAssistCost} Tokens`}</strong></span>
-              {isUnlimited ? (
-                <span className="charity-badge">🛡️ Super Admin — UNL tokens</span>
-              ) : isCharity ? (
-                <span className="charity-badge">🎉 Free for Charity Teachers</span>
-              ) : (
-                <span>(Your balance: {displayBalance} tokens)</span>
-              )}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', margin: '4px 0 10px 0' }}>
+              <div className="ai-source-toggle" role="tablist" aria-label="Build from" style={{ marginTop: 0 }}>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={aiSourceMode === 'text'}
+                  className={aiSourceMode === 'text' ? 'active' : ''}
+                  onClick={() => !isSpreadsheetBusy && setAiSourceMode('text')}
+                  disabled={isAiLoading || isSpreadsheetBusy}
+                >
+                  📝 Syllabus text
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={aiSourceMode === 'spreadsheet'}
+                  className={aiSourceMode === 'spreadsheet' ? 'active' : ''}
+                  onClick={() => !isAiLoading && setAiSourceMode('spreadsheet')}
+                  disabled={isAiLoading || isSpreadsheetBusy}
+                >
+                  📊 Spreadsheets
+                </button>
+              </div>
+
+              <div className="ai-token-cost-badge" style={{ margin: 0 }}>
+                <span>🪙 Cost: <strong>{isAiAssistFree ? '0 Tokens' : `${aiAssistCost} Tokens`}</strong></span>
+                {isUnlimited ? (
+                  <span className="charity-badge">🛡️ Super Admin — UNL tokens</span>
+                ) : isCharity ? (
+                  <span className="charity-badge">🎉 Free for Charity Teachers</span>
+                ) : (
+                  <span>(Your balance: {displayBalance} tokens)</span>
+                )}
+              </div>
             </div>
 
-            <div className="ai-source-toggle" role="tablist" aria-label="Build from">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={aiSourceMode === 'text'}
-                className={aiSourceMode === 'text' ? 'active' : ''}
-                onClick={() => !isSpreadsheetBusy && setAiSourceMode('text')}
-                disabled={isAiLoading || isSpreadsheetBusy}
-              >
-                📝 Syllabus text
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={aiSourceMode === 'spreadsheet'}
-                className={aiSourceMode === 'spreadsheet' ? 'active' : ''}
-                onClick={() => !isAiLoading && setAiSourceMode('spreadsheet')}
-                disabled={isAiLoading || isSpreadsheetBusy}
-              >
-                📊 Spreadsheets
-              </button>
-            </div>
-
-            <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', margin: '8px 0 14px 0' }}>
+            <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', margin: '8px 0 14px 0', lineHeight: 1.5 }}>
               {aiSourceMode === 'text'
-                ? 'Paste your raw course outline, syllabus file, or lesson notes below. Gemini will automatically structure units, unit content, content blocks, quizzes, assessment tasks, and rubrics mapped to your target level.'
+                ? 'Paste your whole course content (syllabus, lecture schedule, topic outline, textbook contents, or notes) into the box below. The AI Agent will sort it out into a complete course across the 3 dropdown sections: Course Specifications, Course Assessments & Rubrics, and Units of Study. Changes are auto-saved upon generation.'
                 : 'Upload your completed course spreadsheet(s). Gemini keeps everything you entered exactly as written, builds out every blank unit, block, assessment and rubric, and never invents links.'}
             </p>
 
@@ -2028,7 +2503,7 @@ function AQFCourseBuilderInner({
               Curriculum Standards:{' '}
               <strong style={{ color: '#86efac' }}>
                 {selectedStandardIds.length === 0
-                  ? 'None selected (choose them in the sidebar)'
+                  ? 'Auto-selected by AI (or pre-select in Course Specifications)'
                   : CURRICULUM_STANDARDS.filter(s => selectedStandardIds.includes(s.id)).map(s => s.label).join(', ')}
               </strong>
               {aiAssistRouting.advisories.map(msg => (
@@ -2041,9 +2516,10 @@ function AQFCourseBuilderInner({
               id="ai-target-level"
               className="form-input"
               value={aiTargetLevel}
-              onChange={e => setAiTargetLevel(Number(e.target.value))}
+              onChange={e => setAiTargetLevel(e.target.value === 'auto' ? 'auto' : Number(e.target.value))}
               disabled={isAiLoading || isSpreadsheetBusy}
             >
+              <option value="auto">🤖 Auto-Detect Level from Syllabus</option>
               {AQF_LEVELS.map(lvl => (
                 <option key={lvl.level} value={lvl.level}>
                   {lvl.title}
@@ -2053,13 +2529,13 @@ function AQFCourseBuilderInner({
 
             {aiSourceMode === 'text' ? (
               <>
-                <label className="field-label" style={{ marginTop: '10px' }}>Syllabus / Course Outline</label>
+                <label className="field-label" style={{ marginTop: '10px' }}>Whole Course Content / Syllabus / Outline</label>
                 <textarea
                   rows="7"
                   className="form-input"
                   value={aiSyllabusText}
                   onChange={e => setAiSyllabusText(e.target.value)}
-                  placeholder="Paste course syllabus, lecture schedule, topic list, or learning objectives..."
+                  placeholder="Paste your whole course content here (syllabus, lecture schedule, topic outline, textbook contents, or notes)... The AI Agent will sort it out into Course Specifications, Course Assessments & Rubrics, and Units of Study."
                 />
 
                 {aiNotice && (
@@ -2446,6 +2922,96 @@ function AQFCourseBuilderInner({
           color: var(--text-secondary);
           margin-bottom: 4px;
         }
+        .field-label-row {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          margin-bottom: 4px;
+        }
+        .field-label-row .field-label,
+        .field-label-row .unit-field-label {
+          margin-bottom: 0;
+        }
+        .field-info-trigger {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 17px;
+          height: 17px;
+          border-radius: 50%;
+          background: rgba(56, 189, 248, 0.16);
+          color: #38bdf8;
+          border: 1px solid rgba(56, 189, 248, 0.35);
+          font-family: Georgia, serif;
+          font-size: 0.72rem;
+          font-style: italic;
+          font-weight: 700;
+          cursor: pointer;
+          padding: 0;
+          line-height: 1;
+          transition: all 0.18s ease;
+        }
+        .field-info-trigger:hover,
+        .field-info-trigger.active {
+          background: #38bdf8;
+          color: #0f172a;
+          border-color: #38bdf8;
+          box-shadow: 0 0 8px rgba(56, 189, 248, 0.55);
+          transform: scale(1.12);
+        }
+        .field-info-callout {
+          display: block;
+          margin: 6px 0 10px 0;
+          padding: 10px 14px;
+          border-radius: 10px;
+          background: linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.96));
+          border: 1px solid rgba(56, 189, 248, 0.4);
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 14px rgba(56, 189, 248, 0.2);
+          color: #f1f5f9;
+          font-size: 0.81rem;
+          line-height: 1.5;
+          animation: infoCalloutFade 0.18s ease-out;
+          backdrop-filter: blur(10px);
+          position: relative;
+          z-index: 5;
+        }
+        @keyframes infoCalloutFade {
+          from { opacity: 0; transform: translateY(-4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .field-info-callout-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          margin-bottom: 5px;
+          color: #38bdf8;
+          font-size: 0.8rem;
+          font-weight: 700;
+        }
+        .field-info-callout-text {
+          color: #e2e8f0;
+          font-weight: 400;
+        }
+        .field-info-callout-hint {
+          margin-top: 6px;
+          font-size: 0.73rem;
+          color: #94a3b8;
+          font-style: italic;
+        }
+        .field-info-close {
+          background: transparent;
+          border: none;
+          color: #94a3b8;
+          font-size: 0.85rem;
+          cursor: pointer;
+          padding: 0 4px;
+          border-radius: 4px;
+          line-height: 1;
+        }
+        .field-info-close:hover {
+          color: #f87171;
+        }
         .units-nav-list {
           display: flex;
           flex-direction: column;
@@ -2678,20 +3244,67 @@ function AQFCourseBuilderInner({
         .builder-modal-overlay {
           position: fixed;
           inset: 0;
-          background: rgba(0, 0, 0, 0.75);
+          background: rgba(0, 0, 0, 0.78);
+          backdrop-filter: blur(8px);
+          -webkit-backdrop-filter: blur(8px);
           display: flex;
-          align-items: center;
+          align-items: flex-start;
           justify-content: center;
           z-index: 1000;
-          padding: 20px;
+          padding: 1cm clamp(12px, 3vw, 24px) 24px;
+          box-sizing: border-box;
+          overflow-y: auto;
         }
         .builder-modal-dialog {
+          margin: 0 auto;
           width: 100%;
-          max-width: 640px;
-          padding: 24px;
+          max-width: 680px;
+          max-height: calc(100vh - 1cm - 32px);
+          padding: clamp(16px, 3vw, 28px);
           border-radius: 16px;
-          max-height: 90vh;
           overflow-y: auto;
+          box-sizing: border-box;
+          position: relative;
+          box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+        }
+        @media (max-width: 640px) {
+          .builder-modal-overlay {
+            padding: 1cm 8px 16px;
+          }
+          .builder-modal-dialog {
+            padding: 14px;
+            max-height: calc(100vh - 1cm - 20px);
+            border-radius: 12px;
+          }
+        }
+        /* ✨ AI Assist wide & scrollbar-free presentation */
+        .ai-assist-overlay {
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+        }
+        .ai-assist-overlay::-webkit-scrollbar {
+          display: none;
+          width: 0;
+          height: 0;
+        }
+        .ai-assist-dialog {
+          max-width: min(94vw, 1020px) !important;
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+        }
+        .ai-assist-dialog::-webkit-scrollbar {
+          display: none;
+          width: 0;
+          height: 0;
+        }
+        .ai-assist-dialog textarea {
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+        }
+        .ai-assist-dialog textarea::-webkit-scrollbar {
+          display: none;
+          width: 0;
+          height: 0;
         }
         .modal-header {
           display: flex;
@@ -2880,13 +3493,39 @@ function AQFCourseBuilderInner({
         .asmt-type-select option { color: #0f172a; background: #ffffff; }
         .asmt-meta-grid {
           display: grid;
-          grid-template-columns: 160px 160px 1fr;
-          gap: 8px;
-          margin-top: 8px;
+          grid-template-columns: minmax(140px, 180px) minmax(140px, 180px) minmax(180px, 1fr);
+          gap: 10px;
+          margin-top: 10px;
+          align-items: start;
+        }
+        .asmt-meta-wide {
+          grid-column: 1 / -1;
+          width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
+          margin-top: 2px;
+        }
+        .asmt-meta-wide .field-label {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-bottom: 6px;
+          font-size: 0.84rem;
+          line-height: 1.4;
+          word-break: break-word;
+        }
+        .asmt-meta-wide .form-input {
+          width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
         }
         @media (max-width: 760px) {
           .asmt-meta-grid { grid-template-columns: 1fr 1fr; }
-          .asmt-meta-wide { grid-column: 1 / -1; }
+        }
+        @media (max-width: 480px) {
+          .asmt-meta-grid { grid-template-columns: 1fr; }
         }
         .matrix-empty-cell { color: #64748b; text-align: center; }
         .ai-source-toggle {

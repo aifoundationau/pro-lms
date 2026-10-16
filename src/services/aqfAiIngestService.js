@@ -21,6 +21,7 @@ import {
 } from './aiCourseShared.js';
 import { extractUrls, normalizeKey } from './courseSpreadsheetSchema.js';
 import { finalizeCourseDraft } from './courseSpreadsheetImport.js';
+import { sanitizeStandardIds } from './curriculumStandards.js';
 
 export { buildStandardsGuidance };
 
@@ -33,15 +34,36 @@ const AI_ASSIST_DEADLINE_MS = 180000;
  * Compiles a rich system prompt directing Gemini to generate AQF-compliant JSON
  */
 function buildAqfIngestPrompt(syllabusText, targetAqfLevel, curriculumStandards = [], skillTexts = {}) {
-  const aqfInfo = getAqfLevelMeta(targetAqfLevel ?? 0);
+  const hasTarget = targetAqfLevel !== null && targetAqfLevel !== undefined && targetAqfLevel !== 'auto' && targetAqfLevel !== '';
+  const levelNum = hasTarget && Number.isInteger(Number(targetAqfLevel)) ? Number(targetAqfLevel) : 0;
+  const aqfInfo = getAqfLevelMeta(levelNum);
   const standardsGuidance = buildStandardsGuidance(curriculumStandards, aqfInfo.level, skillTexts);
 
   return `You are an expert Australian Qualifications Framework (AQF) Educational Systems Architect and Curriculum Designer.
 Your objective is to ingest the following raw syllabus/course material and transform it into a comprehensive, high-quality, fully populated Course JSON object adhering strictly to the AQF Level taxonomy.
 
-Target AQF Level: Level ${aqfInfo.level} — ${aqfInfo.credential} (${aqfInfo.summary})
-Expected Autonomy & Cognitive Demand: ${aqfInfo.competencySummary}
-Note for International Courses: If the source material comes from outside Australia (e.g., US, UK, EU, India, Asia), evaluate its international equivalence and map the competencies, learning outcomes, and nominal hours to match AQF standards.
+CRITICAL INSTRUCTION — LEVEL TAXONOMY & CURRICULUM STANDARDS SELECTION:
+1. Level Taxonomy ("aqfLevel"): Analyze the syllabus to determine and select the appropriate Level Taxonomy tier (integer 0 to 9):
+   - 0: International / Non-AQF / Unassigned / High School / Preparatory
+   - 1: Certificate I (Foundational operational skills)
+   - 2: Certificate II (Basic procedural skills & routine operational work)
+   - 3: Certificate III (Theoretical understanding & skilled operational work)
+   - 4: Certificate IV (Specialised technical competence & analytical problem-solving)
+   - 5: Diploma (Broad theoretical expertise, technical depth & self-directed coordination)
+   - 6: Associate Degree / Advanced Diploma (High-level technical/management analysis & specialized planning)
+   - 7: Bachelor Degree (Comprehensive theoretical foundation & systematic critical inquiry)
+   - 8: Bachelor Honours / Graduate Certificate / Graduate Diploma (Advanced critical research & complex professional practice)
+   - 9: Masters Degree (Expert mastery, autonomous original research & specialised scholarship)
+   ${hasTarget ? `Target preference: Level ${aqfInfo.level} — ${aqfInfo.credential} (confirm or adjust based on syllabus content).` : 'Select the exact level matching the depth and prerequisites of the material.'}
+
+2. Curriculum Standards (AI Alignment) ("curriculumStandards"): Analyze the syllabus scope and select the matching regulatory & auditing standards (array of string IDs):
+   - "international": International / Unassigned (Global courses, flexible, bespoke, micro-credentials, or courses not governed by a specific national auditing body)
+   - "teqsa": TEQSA (Australian Higher Education HESF, typically AQF Levels 7–9)
+   - "aacsb": AACSB (Business schools & management accreditation, typically AQF Levels 7–9)
+   - "acara": ACARA (Australian primary / secondary schools F-12, Level 0)
+   - "uk_qaa": UK QAA / FHEQ (United Kingdom Higher Education, Levels 4–7)
+   - "uk_ofsted": UK Ofsted (United Kingdom Secondary KS3–5, GCSE / A-Levels)
+   Select all IDs that apply based on the content. If the syllabus is global or not tied to a specific national regulator, select ["international"].
 
 ${standardsGuidance}
 
@@ -50,18 +72,26 @@ Source Material to Ingest:
 ${syllabusText.slice(0, 15000)}
 """
 
-Structure: each unit has its "content" (the lesson paragraphs students read: accurate, engaging instructional text, 500-1,000 words, simple Markdown allowed) and its "blocks" — there are no lessons. The course has ONE "assessments" list (nominalWeight = % of the course grade, all tasks add up to 100; "unitCode" = the unit a task mainly assesses, or "" for the whole course). End each unit's blocks with one "quiz" block of 4-6 questions ("multiple_choice" with "options" and zero-based "correct" indexes, "true_false" with "correctAnswer", "short_answer" with "acceptedAnswers", and one "open" question with a "modelAnswer").
+Structure: each unit has its "content" (the lesson paragraphs students read: accurate, engaging instructional text written in formal Academic English, 500-1,000 words, simple Markdown allowed) and its "blocks" — there are no lessons. The course has ONE "assessments" list (nominalWeight = % of the course grade, all tasks add up to 100; "unitCode" = the unit a task mainly assesses, or "" for the whole course). End each unit's blocks with one "quiz" block of 4-6 questions ("multiple_choice" with "options" and zero-based "correct" indexes, "true_false" with "correctAnswer", "short_answer" with "acceptedAnswers", and one "open" question with a "modelAnswer").
+
+Academic English: Write all titles, descriptions, outcomes, unit content, and assessments in polished, publication-ready Academic English using formal vocabulary, objective tone, and Bloom's Taxonomy cognitive action verbs.
 
 Links: never invent URLs. Only use URLs that appear in the source material. Create "youtube_video" (YouTube Video), "google_drive_link" (Google Drive Resource) or "notebook_link" (Gemini Notebook) blocks only for such URLs, one block per link (a unit may have several of each); otherwise suggest videos or resources inside the teacher_guide text.
 
 You MUST respond with pure JSON only (no markdown quotes, no triple backticks, no preamble).
 The JSON MUST follow this exact structure:
 {
-  "title": "Clear formal course title",
+  "title": "Clear formal course title in Academic English",
   "code": "Course Code e.g. BSB40120 or ICT50220",
-  "aqfLevel": ${Number(targetAqfLevel) || 0},
+  "aqfLevel": ${hasTarget ? Number(targetAqfLevel) || 0 : 4},
+  "curriculumStandards": ["international"],
+  "category": "Broad academic discipline or vocational sector",
+  "year": "e.g. 2026 Semester 1",
+  "startDate": "YYYY-MM-DD",
+  "description": "Comprehensive course description in Academic English detailing industry scope, learner cohorts, and educational value",
+  "knowledge": "Assumed prior knowledge, technical competencies, or prerequisites",
   "aqfEquivalenceNotes": "Brief explanation of how this maps to the AQF and international equivalence",
-  "description": "Comprehensive course description detailing industry scope, learner cohorts, and career pathways",
+  "thumbnail": "",
   "learningOutcomes": [
     "Outcome 1: Bloom's taxonomy action verb...",
     "Outcome 2: ...",
@@ -147,14 +177,18 @@ The JSON MUST follow this exact structure:
 /**
  * Resilient deterministic fallback generator when AI API is unavailable
  */
-function generateFallbackAqfCourse(syllabusText, targetAqfLevel) {
+function generateFallbackAqfCourse(syllabusText, targetAqfLevel, preferredStandards = []) {
   const aqfMeta = getAqfLevelMeta(targetAqfLevel ?? 0);
   const sampleTitle = syllabusText.split('\n')[0].replace(/^[#\s*]+/, '').trim() || 'Applied Professional Studies';
+  const standards = Array.isArray(preferredStandards) && preferredStandards.length > 0
+    ? sanitizeStandardIds(preferredStandards)
+    : ['international'];
 
   return {
     title: sampleTitle.length > 5 ? sampleTitle : `Certificate IV in ${sampleTitle || 'Modern Technology'}`,
     code: `CRS-${aqfMeta.level}01`,
     aqfLevel: aqfMeta.level,
+    curriculumStandards: standards,
     aqfEquivalenceNotes: `Mapped to AQF Level ${aqfMeta.level} (${aqfMeta.credential}). Calibrated with Bloom's Taxonomy cognitive standards.`,
     description: `A competency-based qualification satisfying ${aqfMeta.title} requirements. Prepares learners with operational knowledge, analytical methods, and practical discipline skills.`,
     learningOutcomes: [
@@ -261,7 +295,7 @@ export async function ingestCourseSyllabusWithAI({
 
   // Fallback if API returned nothing usable
   if (!generatedData || !Array.isArray(generatedData.units) || generatedData.units.length === 0) {
-    generatedData = generateFallbackAqfCourse(syllabusText, targetAqfLevel);
+    generatedData = generateFallbackAqfCourse(syllabusText, targetAqfLevel, curriculumStandards);
   }
 
   // 3. Validate & normalise into the full Course schema with unique IDs (links: only those in the syllabus)
@@ -279,16 +313,27 @@ export async function ingestCourseSyllabusWithAI({
     unitIndex: unitIndexByCode.get(normalizeKey(unitCode)) ?? -1,
     rubric: normalizeRubricWeights(task.rubric)
   }));
+  const aiLevel = Number.isInteger(fields.aqfLevel) && fields.aqfLevel >= 0 && fields.aqfLevel <= 9 ? fields.aqfLevel : null;
   const targetLevel = Number(targetAqfLevel);
-  const level = Number.isInteger(targetLevel) && targetLevel >= 0 && targetLevel <= 9 ? targetLevel : (fields.aqfLevel ?? 0);
+  const fallbackLevel = Number.isInteger(targetLevel) && targetLevel >= 0 && targetLevel <= 9 ? targetLevel : 0;
+  const level = aiLevel !== null ? aiLevel : fallbackLevel;
+
+  const selectedStandards = Array.isArray(fields.curriculumStandards) && fields.curriculumStandards.length > 0
+    ? sanitizeStandardIds(fields.curriculumStandards)
+    : (Array.isArray(curriculumStandards) && curriculumStandards.length > 0 ? sanitizeStandardIds(curriculumStandards) : ['international']);
 
   const hydratedCourse = finalizeCourseDraft({
     course: {
       title: fields.title || 'AQF Certified Course',
       code: fields.code || `CRS-${level}01`,
       aqfLevel: level,
+      curriculumStandards: selectedStandards,
       category: fields.category || 'General Academic',
+      year: fields.year || '',
+      startDate: fields.startDate || '',
       description: fields.description,
+      knowledge: fields.knowledge || '',
+      thumbnail: fields.thumbnail || '',
       aqfEquivalenceNotes: fields.aqfEquivalenceNotes,
       learningOutcomes: fields.learningOutcomes
     },
@@ -311,6 +356,6 @@ export async function ingestCourseSyllabusWithAI({
     tokensCharged,
     charityPassApplied: metering.isCharity,
     superadminPass: metering.isSuperadmin,
-    message: `✨ Course built with AI Assist! ${passNote}`
+    message: `✨ Course built with AI Assist! ${passNote} Please review and edit the fields to improve them. AI Assist can help write or polish other parts in Academic English.`
   };
 }

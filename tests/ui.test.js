@@ -209,7 +209,7 @@ async function run() {
     const labels = Array.from(view.container.querySelectorAll('label.field-label')).map(l => l.textContent.trim());
     assert(labels.includes('Level Taxonomy'), 'renamed label');
     assert(!labels.includes('AQF Level Taxonomy'));
-    assert.strictEqual(view.container.querySelectorAll('.standard-chip input[type=checkbox]').length, 5, 'all Curriculum Standards tick boxes kept');
+    assert.strictEqual(view.container.querySelectorAll('.standard-chip input[type=checkbox]').length, 6, 'all Curriculum Standards tick boxes kept');
     const specs = view.container.querySelector('#builder-specs-panel');
     assert(specs, 'Course Specifications panel');
     assert(specs.compareDocumentPosition(view.container.querySelector('#builder-assessments-panel')) & window.Node.DOCUMENT_POSITION_FOLLOWING, 'specifications sit above Course Assessments');
@@ -477,32 +477,35 @@ async function run() {
     await view.unmount();
   });
 
-  await test('Token Fund: sponsor & emergency fund panels behind the signed-in button', async () => {
+  await test('Token Fund: Emergency Token Fund panel for disadvantaged students', async () => {
     const { default: TokenFundModal } = await load('/src/components/TokenFundModal.jsx');
     let donationOpened = false;
     const view = await render(React.createElement(TokenFundModal, { isOpen: true, currentUser: teacher, onClose: () => {}, onOpenDonation: () => { donationOpened = true; } }));
     const text = textOf(view.container);
-    for (const phrase of ["Donate to fund a specific student's access for a year.", 'Fund Account', 'Emergency Token Fund', 'Contribute to our token pool for disadvantaged students around the world.', 'Donate to Token Fund']) {
-      assert(text.includes(phrase), `shows: ${phrase}`);
-    }
-    assert.strictEqual(view.container.querySelector('input[type=email]').placeholder, "Student's Email Address");
+    assert(text.includes('Emergency Token Fund'), 'shows: Emergency Token Fund');
+    assert(text.includes('Contribute to our token pool for disadvantaged students around the world.'), 'shows: description');
+    assert(text.includes('Donate to Token Fund'), 'shows: Donate to Token Fund button');
+    assert(!text.includes('Sponsor a Student'), 'Sponsor a Student is removed');
+    assert(!text.includes("Student's Email Address"), "Student's Email Address is removed");
+    assert(!text.includes('Fund Account'), 'Fund Account is removed');
     assert(!text.includes('$'), 'no prices are shown');
-    await type(view.container.querySelector('input[type=email]'), 'not-an-email');
-    await submit(view.container.querySelector('form'));
-    assert(textOf(view.container).includes("Enter the student's email address"));
     await click(buttonWith(view.container, 'Donate to Token Fund'));
     assert.strictEqual(donationOpened, true);
     await view.unmount();
   });
 
-  await test('Front page (signed out): donation panels removed, no Token Fund button', async () => {
+  await test('Front page (signed out): donation panels removed, Token Fund button present', async () => {
     const { default: App } = await load('/src/App.jsx');
     const view = await render(React.createElement(App));
     await waitFor(() => buttonWith(view.container, 'Sign in with Google'), 'sign-in button');
     const text = textOf(view.container);
     assert(!text.includes('Sponsor a Student'), 'sponsor panel removed from the public page');
     assert(!text.includes('Emergency Token Fund'), 'emergency fund panel removed from the public page');
-    assert(!buttonWith(view.container, 'Token Fund'), 'Token Fund only after sign-in');
+    assert(buttonWith(view.container, 'Token Fund'), 'Token Fund is kept on the front webpage before people log in');
+    await click(buttonWith(view.container, 'Token Fund'));
+    assert(textOf(view.container).includes('Emergency Token Fund'), 'Token Fund modal opens for signed-out users');
+    assert(!textOf(view.container).includes('Sponsor a Student'), 'Sponsor a Student removed from Token Fund modal');
+    await click(view.container.querySelector('[aria-labelledby="token-fund-title"] .close-btn'));
     assert(text.includes('Transforming Education Through AI & Community'));
     // Contact: register with Google -> Supporter -> message the Super Admin (or email support).
     await click(buttonWith(view.container.querySelector('nav.header-nav'), 'Contact'));
@@ -524,6 +527,25 @@ async function run() {
     assert(textOf(view.container).includes('AI Foundation Australia'));
     assert(view.container.querySelector('img[src="/david-photo.jpg"]'), 'David image is rendered');
     await click(view.container.querySelector('.close-btn'));
+
+    // Geolocation bubble in footer right of About David
+    const geoBubble = view.container.querySelector('footer.footer .footer-ai-foundation-bubble');
+    assert(geoBubble, 'AI Foundation geolocation bubble exists in footer');
+    const bubbleText = textOf(geoBubble);
+    assert(bubbleText.includes('AI Foundation'), 'bubble includes AI Foundation text');
+    assert(bubbleText.includes('South Bank') || bubbleText.includes('Brisbane'), 'bubble includes suburb');
+    assert(bubbleText.includes('°C'), 'bubble includes weather temp');
+
+    // Clicking the bubble opens the centered responsive popup with no scrollbars
+    await click(geoBubble);
+    await waitFor(() => textOf(view.container).includes('Regional Geolocation'), 'Geolocation modal opens');
+    const geoModalCard = view.container.querySelector('.geo-modal-card');
+    assert(geoModalCard, 'geolocation modal card exists');
+    assert(geoModalCard.style.overflow === 'hidden', 'modal has overflow: hidden for no scroll bars');
+    assert(textOf(geoModalCard).includes('South Bank'), 'modal displays suburb');
+    assert(textOf(geoModalCard).includes('Weather'), 'modal displays weather');
+    assert(textOf(geoModalCard).includes('Live Time'), 'modal displays time');
+    await click(geoModalCard.querySelector('.close-btn'));
 
     // Front page 4 postcards: exactly 4 postcards rendered with icon and title
     const frontCards = view.container.querySelectorAll('.front-card');
@@ -1018,10 +1040,11 @@ async function run() {
     return view;
   };
 
-  await test('Teacher dashboard: role menu, Token Fund, Students & People and Submissions open', async () => {
+  await test('Teacher dashboard: role menu, Students & People and Submissions open', async () => {
     const view = await renderAs({ uid: 't1', email: teacher.email, displayName: 'Ms T' }, { role: 'teacher', email: teacher.email });
     const nav = view.container.querySelector('nav.header-nav');
-    for (const label of ['My Courses', 'Student Registration', 'Global Search', 'Token Fund', 'Tokens']) assert(buttonWith(nav, label), `teacher sees ${label}`);
+    for (const label of ['My Courses', 'Student Registration', 'Global Search', 'Tokens']) assert(buttonWith(nav, label), `teacher sees ${label}`);
+    assert(!buttonWith(nav, 'Token Fund'), 'Token Fund is removed from admin navbar');
     const myCourseCards = view.container.querySelector('.cards-grid');
     assert(myCourseCards && textOf(myCourseCards).includes('Introduction to AI'), 'My Courses cards');
     assert(!/🪙\s*\d+\s*Tokens/.test(textOf(myCourseCards)), 'course cards show no enrolment cost');
@@ -1033,9 +1056,6 @@ async function run() {
     await click(buttonWith(view.container, 'Submissions'));
     await waitFor(() => textOf(view.container).includes('📥 Submissions'), 'submissions modal');
     await click(view.container.querySelector('.cs-modal .close-btn'));
-    await click(buttonWith(nav, 'Token Fund'));
-    assert(textOf(view.container).includes('Sponsor a Student'));
-    await click(view.container.querySelector('[aria-labelledby="token-fund-title"] .close-btn'));
     await click(buttonWith(nav, 'Global Search'));
     await waitFor(() => textOf(view.container).includes('Published OzEdu courses could not be loaded'), 'offline published-courses notice');
     assert(/Curated Course Catalog/i.test(textOf(view.container)));
@@ -1046,7 +1066,8 @@ async function run() {
   await test('Student dashboard: Student Panel, Join as Teacher, Global Search, no teacher tools', async () => {
     const view = await renderAs({ uid: 's1', email: 'stu@school.edu', displayName: 'Stu' }, { role: 'Supporter', email: 'stu@school.edu' });
     const nav = view.container.querySelector('nav.header-nav');
-    for (const label of ['Student Panel', 'Join as Teacher', 'Global Search', 'Token Fund']) assert(buttonWith(nav, label), `student sees ${label}`);
+    for (const label of ['Student Panel', 'Join as Teacher', 'Global Search']) assert(buttonWith(nav, label), `student sees ${label}`);
+    assert(!buttonWith(nav, 'Token Fund'), 'student does not see Token Fund in admin navbar');
     for (const label of ['My Courses', 'Student Registration']) assert(!buttonWith(nav, label), `student does not see ${label}`);
     await waitFor(() => textOf(view.container).includes('You are not enrolled in any courses yet'), 'student landing page');
     assert(textOf(view.container).includes('stu@school.edu'));
@@ -1078,12 +1099,12 @@ async function run() {
 
   await test('Phone header (signed in): the Google button opens a role menu whose first item is the role status', async () => {
     const menuButtons = (nav) => Array.from(nav.children).filter(el => el.tagName === 'BUTTON').map(b => b.textContent.replace(/\s+/g, ' ').trim());
-    const memberItems = ['Student Panel', 'Global Search', 'Join as Teacher', 'Token Fund', 'Tokens', 'Logout'];
+    const memberItems = ['Student Panel', 'Global Search', 'Library', 'Join as Teacher', 'Messages', 'Tokens', 'Logout'];
     const roles = [
       { user: { uid: 's1', email: 'stu@school.edu', displayName: 'Stu' }, profile: { role: 'Supporter', email: 'stu@school.edu' }, label: 'Supporter', items: memberItems },
       { user: { uid: 's2', email: 'lee@school.edu', displayName: 'Lee' }, profile: { role: 'student', email: 'lee@school.edu' }, label: 'Student', items: memberItems },
-      { user: { uid: 't1', email: teacher.email, displayName: 'Ms T' }, profile: { role: 'teacher', email: teacher.email }, label: 'Teacher', items: ['My Courses', 'Student Registration', 'Global Search', 'Token Fund', 'Tokens', 'Logout'] },
-      { user: { uid: 'a1', email: 'support@aifoundation.net.au', displayName: 'Admin' }, profile: { role: 'Superadmin', email: 'support@aifoundation.net.au' }, label: 'Super Admin', items: ['My Courses', 'Student Registration', 'Global Search', 'Token Fund', 'UNL Tokens', 'Super Admin Control', 'Logout'] }
+      { user: { uid: 't1', email: teacher.email, displayName: 'Ms T' }, profile: { role: 'teacher', email: teacher.email }, label: 'Teacher', items: ['My Courses', 'Student Registration', 'Global Search', 'Library', 'Messages', 'Tokens', 'Logout'] },
+      { user: { uid: 'a1', email: 'support@aifoundation.net.au', displayName: 'Admin' }, profile: { role: 'Superadmin', email: 'support@aifoundation.net.au' }, label: 'Super Admin', items: ['My Courses', 'Student Registration', 'Global Search', 'Library', 'Messages', 'UNL Tokens', 'Super Admin Control', 'Logout'] }
     ];
     // jsdom has no matchMedia: a stand-in lets the test widen the window to the desktop layout.
     const widthListeners = new Set();
@@ -1141,7 +1162,7 @@ async function run() {
       await click(header.querySelector('.mobile-account-btn'));
       assert(nav.classList.contains('mobile-open'));
       assert(nav.firstElementChild.classList.contains('mobile-role-status') && textOf(nav.firstElementChild).includes('Role: Teacher'));
-      assert.deepStrictEqual(menuButtons(nav).map(t => t.replace(/^\W+/u, '')), ['Contact', 'Go to Admin', 'Token Fund', 'Logout']);
+      assert.deepStrictEqual(menuButtons(nav).map(t => t.replace(/^\W+/u, '')), ['Contact', 'Token Fund', 'Library', 'Go to Admin', 'Logout']);
       // Logging out from the menu closes it and brings back Sign in with Google.
       await click(buttonWith(nav, 'Logout'));
       await waitFor(() => view.container.querySelector('header.header .mobile-signin-btn'), 'signed out');
@@ -1198,6 +1219,123 @@ async function run() {
     assert(text && !/display:\s*none/.test(text), 'the paragraph is shown on phones');
     const app = readFileSync(fileURLToPath(new URL('../src/App.jsx', import.meta.url)), 'utf8');
     assert(!/tap to flip|is-flipped|flippedFrontCards/i.test(app), 'the postcards do not flip');
+  });
+
+  await test('Academic Library: Books API & Scholar search, 2000+ constraint, and navigation', async () => {
+    const { default: App } = await load('/src/App.jsx');
+    const view = await render(React.createElement(App));
+    
+    // Front page has Library button
+    const libBtn = buttonWith(view.container.querySelector('nav.header-nav'), 'Library');
+    assert(libBtn, 'Library button is present in front page navbar');
+    
+    // Clicking Library opens Academic Library page
+    await click(libBtn);
+    await waitFor(() => textOf(view.container).includes('Academic Library'), 'Academic Library page opened');
+    assert(textOf(view.container).includes('2000–Present Only'), 'temporal constraint badge is shown');
+    assert(textOf(view.container).includes('Books & Academic Articles'), 'books badge is shown by default');
+    assert(textOf(view.container).includes('published from 2000 onwards'), 'year constraint message shown');
+    assert(!textOf(view.container).includes('(&tbs=,bkv:f)'), 'raw parameter string is not shown in UI');
+    assert(!textOf(view.container).includes('Temporal Filter'), 'does not display Temporal Filter label');
+    assert(!textOf(view.container).includes('Only complete full books and articles published from year 2000 to present are allowed'), 'does not display redundant verbose notice');
+    
+    // Tick button to select full books only
+    const fullBooksCheckbox = view.container.querySelector('#library-full-books-checkbox');
+    assert(fullBooksCheckbox, 'Full books only checkbox is present');
+    assert.strictEqual(fullBooksCheckbox.checked, false, 'Full books only checkbox is unchecked by default');
+
+    // Toggling tick button switches mode to Full Books & Articles Only
+    await click(fullBooksCheckbox);
+    assert.strictEqual(fullBooksCheckbox.checked, true, 'Full books only checkbox is checked after toggle');
+    assert(textOf(view.container).includes('Full Books & Articles Only'), 'full books badge is shown when checked');
+
+    const searchInput = view.container.querySelector('#library-search-input');
+    assert(searchInput, 'single search box exists');
+    
+    // Scholar links and back button
+    const backBtn = buttonWith(view.container, '← Back');
+    assert(backBtn, 'back button exists');
+    await click(backBtn);
+    await waitFor(() => textOf(view.container).includes('Transforming Education'), 'back on front page');
+    
+    await view.unmount();
+  });
+
+  await test('Teacher course deletion: confirmation prompt, 7-year archive retention notice, and restore', async () => {
+    let confirmPrompt = '';
+    const oldConfirm = window.confirm;
+    window.confirm = (msg) => {
+      confirmPrompt = msg;
+      return true;
+    };
+    try {
+      const view = await renderAs({ uid: 't_del', email: 'teacher_del@school.edu', displayName: 'Teacher Del' }, { role: 'teacher', email: 'teacher_del@school.edu' });
+      const deleteButtons = Array.from(view.container.querySelectorAll('button')).filter(b => textOf(b).trim() === 'Delete');
+      assert(deleteButtons.length > 0, 'Delete buttons exist on My Courses cards');
+
+      await click(deleteButtons[0]);
+      assert(confirmPrompt.includes('7 years'), 'Confirmation prompt mentions 7 years retention');
+      assert(textOf(view.container).includes('deleted and archived for 7 years'), 'Global notice confirms deletion and 7-year archive');
+
+      // Click "View Archive"
+      const viewArchiveBtn = Array.from(view.container.querySelectorAll('button')).find(b => textOf(b).includes('View Archive'));
+      assert(viewArchiveBtn, 'View Archive button exists');
+      await click(viewArchiveBtn);
+
+      await waitFor(() => textOf(view.container).includes('Preserved for 7 years'), 'Archive header displays 7 years retention');
+      assert(textOf(view.container).includes('Retained for 7 years'), 'Card shows 7 years retention notice');
+
+      // Restore course
+      const restoreBtn = buttonWith(view.container, 'Restore Course');
+      assert(restoreBtn, 'Restore Course button exists');
+      await click(restoreBtn);
+
+      await waitFor(() => textOf(view.container).includes('restored to active courses'), 'Global notice confirms restoration');
+      await view.unmount();
+    } finally {
+      window.confirm = oldConfirm;
+    }
+  });
+
+  await test('Student Learning Panel: displays 7-year archived courses with read-only view and locked submissions', async () => {
+    const { default: StudentLearningPanel } = await signedIn.ssrLoadModule('/src/components/student/StudentLearningPanel.jsx');
+    const studentUser = { uid: 's_arch', email: 'student_arch@school.edu', displayName: 'Archive Student' };
+    const archivedCourse = {
+      id: 'arch_c1',
+      title: 'Historical Geology',
+      archived: true,
+      archivedAt: Date.now(),
+      retentionYears: 7,
+      purgeAt: Date.now() + 7 * 365.25 * 24 * 60 * 60 * 1000,
+      authorName: 'Prof Rock',
+      units: [{ id: 'u1', unitCode: 'GEO-101', unitTitle: 'Rock Cycles', lessons: [] }],
+      assessments: [{ id: 'a1', title: 'Sediment Analysis', type: 'formative' }]
+    };
+
+    const view = await render(React.createElement(StudentLearningPanel, {
+      currentUser: studentUser,
+      courses: [],
+      archivedCourses: [archivedCourse]
+    }));
+
+    // Archived toggle exists
+    const toggleBtn = Array.from(view.container.querySelectorAll('button')).find(b => textOf(b).includes('View Archived Courses (1)'));
+    assert(toggleBtn, 'View Archived Courses button displayed');
+    await click(toggleBtn);
+
+    await waitFor(() => textOf(view.container).includes('Historical Geology'), 'Archived course card rendered');
+    assert(textOf(view.container).includes('Archived (7 Years)'), '7-year archive badge displayed');
+    assert(textOf(view.container).includes('Preserved for 7 years'), '7-year retention notice displayed');
+
+    // Click "View Course Records"
+    const viewRecordsBtn = buttonWith(view.container, '📖 View Course Records');
+    assert(viewRecordsBtn, 'View Course Records button displayed');
+    await click(viewRecordsBtn);
+
+    await waitFor(() => textOf(view.container).includes('Archived (7-Year Retention)'), 'CourseViewer opens with 7-year retention badge');
+    assert(textOf(view.container).includes('This course was archived by your teacher and is preserved for 7 years'), 'Read-only compliance notice shown');
+
+    await view.unmount();
   });
 
   console.log(`\n🎉 All UI interaction tests passed (${passed}).`);

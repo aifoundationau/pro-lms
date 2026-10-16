@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   listMySubmissions,
   submitAssessment,
@@ -160,7 +160,7 @@ function QuestionsView({ assessment }) {
   );
 }
 
-function SubmissionBox({ course, unit, assessment, currentUser, submission, onSubmitted, isDraftCourse = false }) {
+function SubmissionBox({ course, unit, assessment, currentUser, submission, onSubmitted, isDraftCourse = false, isArchivedCourse = false }) {
   const localDraft = currentUser?.uid ? getLocalDraft(course.id, assessment.id, currentUser.uid) : null;
   const initialText = submission?.text ?? localDraft?.text ?? '';
   const initialLink = submission?.linkUrl ?? localDraft?.linkUrl ?? '';
@@ -180,6 +180,7 @@ function SubmissionBox({ course, unit, assessment, currentUser, submission, onSu
   }, [submission]);
 
   const handleSaveDraft = async () => {
+    if (isArchivedCourse) return;
     setBusy(true);
     setNotice(null);
     try {
@@ -195,6 +196,10 @@ function SubmissionBox({ course, unit, assessment, currentUser, submission, onSu
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isArchivedCourse) {
+      setNotice({ type: 'error', message: 'Assessments cannot be submitted for archived courses.' });
+      return;
+    }
     if (isDraftCourse) {
       setNotice({ type: 'error', message: 'Assessments cannot be submitted while the course is in draft mode.' });
       return;
@@ -214,11 +219,15 @@ function SubmissionBox({ course, unit, assessment, currentUser, submission, onSu
 
   return (
     <div className="sl-submit">
-      {isDraftCourse && (
+      {isArchivedCourse ? (
+        <div className="sl-draft-submission-notice" style={{ padding: '8px 12px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#fca5a5', marginBottom: '10px', fontSize: '0.85rem' }}>
+          📁 <strong>Assessments Locked in Archive:</strong> This course was archived by your teacher and is preserved for 7 years for compliance and accreditation. All submissions and materials are read-only.
+        </div>
+      ) : isDraftCourse ? (
         <div className="sl-draft-submission-notice" style={{ padding: '8px 12px', borderRadius: '8px', background: 'rgba(234, 179, 8, 0.15)', border: '1px solid rgba(234, 179, 8, 0.4)', color: '#fef08a', marginBottom: '10px', fontSize: '0.85rem' }}>
           🔒 <strong>Assessments Locked in Draft Mode:</strong> You can view tasks and prepare notes, but assessment submissions are disabled while the course is in draft. Once your teacher publishes the course, you will be able to submit your work.
         </div>
-      )}
+      ) : null}
       {submission && (
         <div className={`sl-status ${graded ? 'graded' : isDraft ? 'draft' : 'submitted'}`}>
           {graded ? (
@@ -273,17 +282,17 @@ function SubmissionBox({ course, unit, assessment, currentUser, submission, onSu
                 type="button"
                 className="nav-btn secondary sl-draft-btn"
                 onClick={handleSaveDraft}
-                disabled={busy || (!text.trim() && !link.trim())}
+                disabled={busy || isArchivedCourse || (!text.trim() && !link.trim())}
               >
                 {busy ? 'Saving…' : '💾 Save Draft'}
               </button>
               <button
                 type="submit"
                 className="nav-btn primary"
-                disabled={busy || isDraftCourse || (!text.trim() && !link.trim())}
-                title={isDraftCourse ? 'Assessments cannot be submitted while the course is in draft' : undefined}
+                disabled={busy || isDraftCourse || isArchivedCourse || (!text.trim() && !link.trim())}
+                title={isArchivedCourse ? 'Archived course is view-only' : isDraftCourse ? 'Assessments cannot be submitted while the course is in draft' : undefined}
               >
-                {busy ? 'Submitting…' : isDraftCourse ? 'Locked in Draft' : submission?.status === 'submitted' ? 'Resubmit' : 'Submit'}
+                {busy ? 'Submitting…' : isArchivedCourse ? 'Archived (View-Only)' : isDraftCourse ? 'Locked in Draft' : submission?.status === 'submitted' ? 'Resubmit' : 'Submit'}
               </button>
             </div>
           </div>
@@ -425,6 +434,7 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
   const units = Array.isArray(course.units) ? course.units : [];
   const [activeUnitId, setActiveUnitId] = useState(units[0]?.id || null);
   const isDraftCourse = Boolean(course.isDraft || course.status === 'draft' || (Array.isArray(course.tags) && course.tags.includes('Draft')));
+  const isArchivedCourse = Boolean(course.archived);
 
   const allAssessments = (Array.isArray(course.assessments) ? course.assessments : [])
     .filter(asmt => asmt && typeof asmt === 'object')
@@ -483,7 +493,11 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
                   {course.code}
                 </span>
               )}
-              {isDraftCourse ? (
+              {isArchivedCourse ? (
+                <span className="aqf-badge-pill" style={{ background: '#b91c1c', color: '#fff', border: '1px solid #f87171' }}>
+                  📁 Archived (7-Year Retention)
+                </span>
+              ) : isDraftCourse ? (
                 <span className="aqf-badge-pill" style={{ background: '#d97706', color: '#fff', border: '1px dashed #fef08a' }}>
                   📝 Draft Course (View-Only)
                 </span>
@@ -530,6 +544,12 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
           )}
         </div>
       </header>
+
+      {isArchivedCourse && (
+        <div style={{ padding: '12px 16px', borderRadius: '12px', background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#fca5a5', marginBottom: '16px', fontSize: '0.88rem' }}>
+          📁 <strong>Archived Course (7-Year Retention):</strong> This course was archived by your teacher and is preserved for 7 years for academic compliance, official records, and accreditation. Course content, units, assessments, and prior submissions are view-only.
+        </div>
+      )}
 
       {/* Main 2-Column Grid Emulating Teacher View */}
       <div className={`builder-workspace-grid sl-viewer-grid ${showQuickNavigator ? '' : 'no-sidebar'}`}>
@@ -794,6 +814,7 @@ function CourseViewer({ course: rawCourse, currentUser, onBack, onMessageTeacher
                               currentUser={currentUser}
                               submission={submissions[assessment.id]}
                               isDraftCourse={isDraftCourse}
+                              isArchivedCourse={isArchivedCourse}
                               onSubmitted={saved => setSubmissionState(prev => ({
                                 ...prev,
                                 byAssessment: { ...prev.byAssessment, [assessment.id]: { ...prev.byAssessment[assessment.id], ...saved } }
@@ -906,6 +927,7 @@ async function loadAllSubmissions(courses, uid) {
 export default function StudentLearningPanel({
   currentUser,
   courses = [],
+  archivedCourses = [],
   loading = false,
   error = '',
   onRetry,
@@ -915,11 +937,13 @@ export default function StudentLearningPanel({
   tokenBalanceLabel = ''
 }) {
   const [openCourseId, setOpenCourseId] = useState(null);
+  const [showStudentArchive, setShowStudentArchive] = useState(false);
   // Bumped when the student returns to the overview, so progress reflects work just submitted.
   const [overviewVisit, setOverviewVisit] = useState(0);
   const [progress, setProgress] = useState({ key: null, byCourse: {}, quizzesByCourse: {} });
   const topRef = useRef(null);
-  const openCourse = courses.find(c => String(c.id) === String(openCourseId));
+  const allCourses = [...courses, ...archivedCourses];
+  const openCourse = allCourses.find(c => String(c.id) === String(openCourseId));
   const uid = currentUser?.uid;
   const progressKey = `${uid || ''}|${courses.map(c => c.id).join(',')}|${overviewVisit}`;
   const wantsProgress = !openCourseId && courses.length > 0 && Boolean(uid);
@@ -940,7 +964,8 @@ export default function StudentLearningPanel({
     };
   }, [wantsProgress, progressKey, courses, uid]);
 
-  const { stats, perCourse, upcoming } = summarizeStudentProgress(courses, progress.byCourse, Date.now(), progress.quizzesByCourse);
+  const nowMs = useMemo(() => Date.now(), [overviewVisit]);
+  const { stats, perCourse, upcoming } = summarizeStudentProgress(courses, progress.byCourse, nowMs, progress.quizzesByCourse);
 
   return (
     <div className="admin-section sl-root" ref={topRef}>
@@ -973,7 +998,7 @@ export default function StudentLearningPanel({
               {error} {onRetry && <button type="button" className="nav-btn secondary sl-small" onClick={onRetry}>Retry</button>}
             </div>
           )}
-          {!loading && !error && courses.length === 0 && (
+          {!loading && !error && courses.length === 0 && archivedCourses.length === 0 && (
             <div className="glass sl-card" style={{ maxWidth: 640, textAlign: 'center', margin: '20px auto' }}>
               <h3>You are not enrolled in any courses yet</h3>
               <p className="sl-text" style={{ marginTop: '10px' }}>
@@ -994,6 +1019,15 @@ export default function StudentLearningPanel({
                   💬 Contact a Teacher
                 </button>
               </div>
+            </div>
+          )}
+
+          {!loading && !error && courses.length === 0 && archivedCourses.length > 0 && (
+            <div className="glass sl-card" style={{ maxWidth: 640, textAlign: 'center', margin: '20px auto' }}>
+              <h3>No Active Enrolled Courses</h3>
+              <p className="sl-text" style={{ marginTop: '10px' }}>
+                You have no active courses currently in progress. Your past courses have been archived and are preserved below for 7 years for academic records and accreditation.
+              </p>
             </div>
           )}
 
@@ -1035,6 +1069,66 @@ export default function StudentLearningPanel({
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {archivedCourses.length > 0 && (
+            <div style={{ marginTop: '28px', width: '100%', maxWidth: 1100, borderTop: '1px solid rgba(255,255,255,0.15)', paddingTop: '20px', textAlign: 'center' }}>
+              <button
+                type="button"
+                className="nav-btn secondary"
+                onClick={() => setShowStudentArchive(!showStudentArchive)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '8px 18px', fontSize: '0.88rem' }}
+              >
+                📁 {showStudentArchive ? 'Hide Archived Courses' : `View Archived Courses (${archivedCourses.length})`}
+              </button>
+
+              {showStudentArchive && (
+                <div style={{ width: '100%', marginTop: '20px' }}>
+                  <h3 style={{ color: 'var(--text-secondary)', marginBottom: '8px', textAlign: 'center', fontSize: '1.1rem' }}>
+                    📁 Archived Courses (Preserved for 7 Years)
+                  </h3>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', textAlign: 'center', margin: '0 auto 16px', maxWidth: '640px' }}>
+                    Courses archived by your teacher are preserved here for 7 years for academic compliance, student records, and transcript verification.
+                  </p>
+                  <div className="cards-grid" style={{ width: '100%', maxWidth: 1100, margin: '0 auto' }}>
+                    {archivedCourses.map(course => {
+                      const courseArchivedAt = course.archivedAt || nowMs;
+                      const daysLeft = Math.max(0, 2557 - Math.floor((nowMs - courseArchivedAt) / (1000 * 60 * 60 * 24)));
+                      const yearsLeft = (daysLeft / 365.25).toFixed(1);
+                      return (
+                        <div key={course.id} className="glass card sl-course-card" style={{ opacity: 0.88, borderColor: 'rgba(239, 68, 68, 0.35)' }}>
+                          <div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                              <div className="card-icon" style={{ margin: 0, filter: 'grayscale(1)' }}>📁</div>
+                              <span style={{ fontSize: '0.72rem', fontWeight: 800, padding: '2px 7px', borderRadius: '6px', background: 'rgba(239, 68, 68, 0.2)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.4)' }}>
+                                Archived (7 Years)
+                              </span>
+                            </div>
+                            <h3 style={{ margin: '4px 0 2px 0', textDecoration: 'line-through' }}>
+                              {course.title}
+                            </h3>
+                            <p className="sl-muted">{course.authorName ? `Teacher: ${course.authorName}` : 'Course'}</p>
+                            <p style={{ color: '#f87171', fontWeight: 'bold', fontSize: '0.78rem', margin: '6px 0 0' }}>
+                              Preserved for 7 years (Deletes in {daysLeft} days / ~{yearsLeft} yrs)
+                            </p>
+                          </div>
+                          <div style={{ marginTop: 'auto', width: '100%' }}>
+                            <button
+                              type="button"
+                              className="nav-btn secondary"
+                              style={{ width: '100%', padding: '7px 8px', fontSize: '0.8rem' }}
+                              onClick={() => setOpenCourseId(course.id)}
+                            >
+                              📖 View Course Records
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </>

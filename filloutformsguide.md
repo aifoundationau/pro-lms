@@ -216,9 +216,21 @@ graded. Submitting reaches the teacher, so confirm with the human first.
 **My Courses** has no fields. Its buttons: **⚡ Upload Sheet (AI)** (new course, opens 📊 Spreadsheet),
 **+ Create Course** (blank course), and on each card **👥 Students & People** (section 9), **📥 Submissions**
 (section 10), **✏️ Edit Draft** / **Manage** (Course Builder), and **Delete**. Delete moves the course to
-the Archive for 28 days; **Restore Course** brings it back.
+the Archive for 7 years (for compliance and accreditation record retention); **Restore Course** brings it back.
 
-### 8.1 Builder header
+### 8.1 Builder layout and headers
+
+The Course Builder editor is structured into **3 collapsible dropdown boxes (accordions)**:
+1. **Dropdown Box 1: Course Specifications** (section 8.2)
+2. **Dropdown Box 2: Course Assessments & Rubrics** (section 8.3)
+3. **Dropdown Box 3: Units of Study** (section 8.4)
+
+The teacher can **Save as Draft in every dropdown box and at the bottom of the main window**:
+- **Box 1 (Course Specifications)**: via the header bar "Save Draft" button and the bottom row when expanded.
+- **Box 2 (Course Assessments & Rubrics)**: via the header bar "Save Draft" button and the bottom row when expanded.
+- **Box 3 (Units of Study)**: via the header bar "Save Draft" button and the bottom row when expanded.
+- **Bottom of the main window**: via the bottom glass action bar with live save status, "Save Draft" button, and "Publish Course" button.
+- **Top header**: always accessible via the top-right header action bar.
 
 | Field | Input | Description | How to fill it in | Why it matters |
 | --- | --- | --- | --- | --- |
@@ -251,96 +263,90 @@ year `<this year> Semester 1`, start date today, and two generic sample outcomes
 
 ### 8.3 🎯 Course Assessments & Rubrics
 
-One list for the whole course. **+ Formative Task** adds a practice task (title "Formative Task", weight
-20%); **+ Summative Task** adds a graded task (title "Summative Task", weight 50%). Each starts with a
-sample rubric for its type. Press ▶ / **Expand** on a task to edit its details. The header shows
-Σ of all weightings; it should be 100%.
+One list for the whole course. **Multiple formative and summative assessments can be created.** **+ Formative Task** adds an assessment meant for ongoing feedback (default weight 20%); **+ Summative Task** adds an assessment meant for formal grading (default weight 50%). Each starts with a sample rubric for its type. Press ▶ / **Expand** on a task to edit its details. The header shows Σ of all weightings; across the course it should ideally total 100%.
 
 | Field | Input | Description | How to fill it in | Why it matters |
 | --- | --- | --- | --- | --- |
-| Type (`aria-label="Assessment type"`) | Select: FORMATIVE / SUMMATIVE | Practice (feedback) or graded (evidence). | Choose the purpose. An untouched sample rubric switches to the other type's sample; an edited rubric is kept. | Students see the type; it shapes the rubric. |
-| **Assessment Title** | Text | Task name. | e.g. `Workplace Sustainability Audit`. | Shown in the Student Panel, Submissions and messages. |
-| **Task brief, submission requirements, and evidence portfolio...** | Textarea | What students do and submit. | Steps, length (e.g. 1,500 words), format, and what evidence to include. | Students' instructions; vague briefs produce weak submissions. |
-| **Due Date** | Date (`YYYY-MM-DD`) | Deadline. | Pick from the calendar. | Drives the Student Panel's due and overdue list. |
-| **Weighting (% of course)** | Number 0–100 (clamped) | Share of the course grade. | Whole numbers; all tasks should total 100. | Tells students how much each task counts. |
-| **Covers** (`aria-label="Units covered"`) | Select: Whole course, or one unit | The unit the task assesses. | Pick a unit, or Whole course. | Links the task to unit content for students and in Submissions. |
-| **External Submission Link (Google Forms / Canvas / Teams)** | Text (one link) | Optional external place to submit. | An `https://` link. Text that is not a web link is not shown to students. | Use when work must be lodged elsewhere; students still get the OzEdu submission box. |
+| **Task Type** (`aria-label="Assessment type"`) | Select: FORMATIVE / SUMMATIVE | Select whether the assessment is meant for ongoing feedback (Formative) or formal grading (Summative). | Choose Formative or Summative. An untouched sample rubric switches to the other type's sample; an edited rubric is kept. | Students see the type; it shapes the rubric. |
+| **Assessment Title** | Text | Enter a clear, concise title that uniquely identifies the assignment for students. | e.g. `Workplace Sustainability Audit` or `Critical Research Report`. | Shown in the Student Panel, Submissions, and notifications. |
+| **Task Brief & Requirements** | Textarea | Write a full description outlining the instructions, required deliverables, and evidence expected from students. | Detail the scenario, objectives, required deliverables (word count, format, file types), step-by-step instructions, and evidence expected. | Instructions for students; vague briefs produce weak submissions. |
+| **Due Date** | Date (`YYYY-MM-DD`) | Enter the exact calendar deadline date by which students must submit their work. | Pick from the calendar. | Drives the Student Panel's due and overdue list. |
+| **Weighting (% of course)** | Number 0–100 (clamped) | Input the numerical percentage indicating how much this specific task contributes toward the overall course grade. | Whole numbers; summative tasks across the course should ideally total 100%. | Tells students how much each task counts. |
+| **Covers** (`aria-label="Units covered"`) | Select: Whole course, or one unit | Choose the corresponding course unit, week, or module content that this assessment evaluates. | Pick a unit, or Whole course. | Links the task to unit content for students and in Submissions. |
+| **External Submission Link (Google Forms / Canvas / Teams)** | Text (one link) | Paste the direct URL to the external LMS or tool where students submit or access the task. | An `https://` link (e.g. Google Forms, Microsoft Teams, Canvas). Text that is not a web link is not shown to students. | Fully responsive field for external submissions; students still retain the OzEdu submission portal. |
 
-**📊 Assessment Rubric Matrix** (inside each task). Rows are criteria; columns are performance levels
-(default Novice 0–49%, Competent 50–74%, Proficient 75–89%, Advanced 90–100%; uploaded rubrics may use 2–10
-levels, e.g. HD/D/C/P/F).
+**📊 Assessment Rubric Matrix** (inside each task). Rows are criteria; columns are performance levels across the 4 standardized mastery levels (Novice 0–49%, Competent 50–74%, Proficient 75–89%, Advanced 90–100%; uploaded rubrics may use 2–10 levels).
 
 | Field | Input | Description | How to fill it in | Why it matters |
 | --- | --- | --- | --- | --- |
-| **Criterion Title** | Text | What is judged. | e.g. `Analysis of current practice`. | Students see exactly how they are marked ("How this is marked"). |
-| **% weight** | Number | The criterion's share of this task. | Criterion weights in one rubric should total 100 (Σ is shown green at 100). | Sets how marks combine. |
-| Level descriptor (one box per level) | Textarea | What work at that level looks like. | One or two observable sentences per level, from lowest to highest. | Makes marking consistent and transparent. |
+| **Criterion & Weight** | Text & Number | Define the individual skill or learning outcome being assessed along with its percentage weight within the task rubric. | e.g. `Analysis of current practice` (25%). Criterion weights in one rubric should total 100% (Σ is shown green at 100%). | Defines the skill assessed and sets how marks combine. |
+| **Novice (0–49%)** | Textarea | Describe performance that demonstrates minimal understanding or fails to meet passing standards for the criterion. | Outline observable gaps, missing evidence, or unacceptable errors. | Clear baseline threshold for passing standards. |
+| **Competent (50–74%)** | Textarea | Describe performance that satisfies fundamental requirements and demonstrates a basic, acceptable level of understanding. | Focus on satisfactory execution, meeting baseline standards, and basic competence. | Establishes passing threshold. |
+| **Proficient (75–89%)** | Textarea | Describe performance that exceeds basic requirements through thorough understanding, strong execution, and clear insights. | Highlight analytical rigor, depth of understanding, and sound execution. | Distinguishes high-level performance. |
+| **Advanced (90–100%)** | Textarea | Describe performance that demonstrates complete mastery, exceptional quality, and original application of knowledge. | Describe innovative synthesis, flawless technical execution, and publication-quality insights. | Sets the bar for outstanding excellence. |
 
-Buttons: **+ Add Criterion Row** (copies the rubric's levels), **×** removes a row, **⬆ Upload Rubric**
-(spreadsheet, see 13.4; then **Replace rubric** or **➕ Add to current rubric**), **⬇ Rubric (.xlsx)**.
-Older text rubrics show **Convert to a rubric matrix**.
+Buttons: **+ Add Criterion Row** (copies the rubric's levels), **×** removes a row, **⬆ Upload Rubric** (spreadsheet, see 13.4; then **Replace rubric** or **➕ Add to current rubric**), **⬇ Rubric (.xlsx)**. Older text rubrics show **Convert to a rubric matrix**.
 
 ### 8.4 📚 Units of Study
 
-**+ Add Unit** creates a unit (code `<Course Code>-<n>`) and opens it. A unit holds its fields, then its
-blocks (max 150 blocks per unit). Delete with 🗑️ (confirmation).
+**A course can have multiple Units of Study.** **+ Add Unit** creates a unit (code automatically derived from `<Course Code>-<n>`) and opens it. A unit holds its core fields, followed by its modular content blocks (max 150 blocks per unit). Delete with 🗑️ (confirmation prompt).
 
 | Field | Input | Description | How to fill it in | Why it matters |
 | --- | --- | --- | --- | --- |
-| **Unit Code** `#unit-code-<unitId>` | Text; auto-filled | Unique unit code. | Keep the automatic code or enter a national code, e.g. `BSBTEC301`. | Identifies the unit in tasks, quizzes, marking and spreadsheets. |
-| **Unit Title** `#unit-title-<unitId>` | Text | Unit name. | e.g. `Design and produce business documents`. | Shown to students as the unit heading. |
-| **Nominal Hours** `#unit-hours-<unitId>` | Number ≥ 1 ("hrs") | Guided study hours for the unit. | Whole number, e.g. `40`. | Shows students the expected workload. |
-| **Unit Description** `#unit-description-<id>` | Textarea | What the unit is about, who it is for, what learners will do. Shown above Performance Criteria. | 2–4 sentences. Add more with **Add Block → 📝 Unit Description**; × removes one. | Students' introduction to the unit. |
-| **Performance Criteria** `#unit-performance-criteria-<unitId>` | Textarea | What a learner must demonstrate to be competent. | Observable statements, e.g. `Explains sustainability principles and applies systems thinking`. | Defines competence for teacher and student. |
-| **Unit Learning Outcomes (one per line)** `#unit-outcomes-<unitId>` | Textarea; one outcome per line | What the learner can do after this unit. | 2–5 lines starting with verbs. | Aligns content, quizzes and tasks. |
-| **Unit Content** `#unit-content-<unitId>` | Textarea, max 50,000 characters | The lesson paragraphs students read. | Explanations, examples and activities in plain language, with blank lines between paragraphs. | The core teaching text of the unit. |
+| **Unit Code** `#unit-code-<unitId>` | Text; auto-filled | Enter the unique official identifier or alphanumeric code assigned to this unit of study. | Keep the automatic code or enter a national qualification code, e.g. `BSBTEC301`. | Identifies the unit in tasks, quizzes, marking, and spreadsheets. |
+| **Unit Title** `#unit-title-<unitId>` | Text | State a clear, descriptive name that reflects the primary subject or skill focus of the unit. | e.g. `Design and produce business documents` or `Network Security Principles`. | Shown to students as the unit heading. |
+| **Nominal Hours** `#unit-hours-<unitId>` | Number ≥ 1 ("hrs") | Input the total estimated number of structured learning hours required to complete this unit. | Whole number, e.g. `40`. | Guided learning hours including instructional reading and activities. |
+| **Unit Description** `#unit-description-<id>` | Textarea | Provide a brief overview summarizing the unit's purpose, target audience, and key learning focus. | 2–4 sentences. Add more with **Add Block → 📝 Unit Description**; × removes one. | Summarizes unit purpose; shown above Performance Criteria. |
+| **Performance Criteria** `#unit-performance-criteria-<unitId>` | Textarea | Outline the specific skills and measurable standards learners must demonstrate to achieve competency in this unit. | Observable statements, e.g. `Identifies organizational requirements, applies ergonomic principles`. | Defines competence standards for educators and students. |
+| **Unit Learning Outcomes (one per line)** `#unit-outcomes-<unitId>` | Textarea; one outcome per line | List the specific knowledge or actionable skills students will acquire, formatted with one outcome per line starting with an active verb. | 2–5 lines starting with Bloom's Taxonomy active verbs (Explain…, Apply…). | Aligns content, quizzes, and assessments. |
+| **Unit Content** `#unit-content-<unitId>` | Textarea, max 50,000 characters | Write the detailed lesson text, explanations, practical examples, and activities that guide students through the unit. | Explanations, examples, and activities in plain language, with blank lines between paragraphs. | The core teaching text of the unit (500–1,000 words recommended). |
 
-**Add Block** (each block has its own **Title** box with a type-specific placeholder):
+**Add Block** (each content block includes a customizable title input and dedicated configuration fields):
 
-| Block | Field | How to fill it in | Why it matters |
+| Block | Field | Description / How to fill it in | Why it matters |
 | --- | --- | --- | --- |
-| 🧑‍🏫 **Teacher Guide** | Textarea "Classroom timings, discussion scaffolding, common misconceptions..." | Facilitation notes for teachers. | **Never shown to students.** |
-| ▶️ **YouTube Video** | Text "Paste YouTube Video URL" | A `youtube.com/watch?v=…`, `youtu.be/…`, `/shorts/`, `/embed/` or `/live/` link. "▶️ YouTube Streaming Embed Active" confirms it was recognised. | Plays inside the Student Panel. |
-| 📁 **Google Drive Resource** | Text "Paste Google Drive shared link" | A Docs, Slides, Sheets, file or folder link shared as "Anyone with the link can view". | Students open the resource; private links fail. |
-| 📓 **Gemini Notebook** | URL "Paste the Gemini Notebook share link" | An `https://notebooklm.google.com/notebook/…` (or other Google notebook) share link. A warning appears if it does not look like one; "📓 Gemini Notebook link ready" confirms it. | Gives students guided AI study notes. |
-| 📎 **Direct File Attachment** | Disabled ("Soon") | Use a Google Drive Resource instead. Older attachment blocks still show a URL box. | — |
-| ❓ **Quiz & Questions** | See 8.4.1 | — | Auto-marked unit quiz. |
-| 📝 **Unit Description** | Adds another Unit Description box | — | — |
+| 🧑‍🏫 **Teacher Guide** | **Heading** & **Internal Pedagogy & Facilitation Guide (Invisible to students)** | **Teacher Guide - Heading**: Enter a descriptive section heading for your teacher resources and pedagogical guidance. This is to help teachers you share the course with understand the unit.<br>**Teacher Guide - Internal Pedagogy & Facilitation Guide (Invisible to students)**: Write internal instructional notes, timing breakdowns, discussion scaffolding, and common misconceptions for educators that remain hidden from students. | **Strictly hidden from students**; internal pedagogical collaboration. |
+| ▶️ **YouTube Video** | **Video Title** & **Link / URL** | **YouTube Video - Video Title**: Input a clear title or topic label for the video resource.<br>**YouTube Video - Link / URL**: Paste the direct YouTube URL (e.g., `https://www.youtube.com/watch?v=...`) to display the embedded video in the unit. | Responsive embedded video player within the unit. |
+| 📁 **Google Drive Resource** | **Resource Title** & **Share Link** | **Google Drive Resource - Resource Title**: Enter a descriptive name for the linked document, presentation, or spreadsheet.<br>**Google Drive Resource - Share Link**: Paste the public or shared Google Drive link (Docs, Slides, Sheets, or Folders) after ensuring viewing permissions are enabled ("Anyone with the link can view"). | Gives students direct access to cloud learning resources. |
+| 📓 **Gemini Notebook** | **Notebook Title** & **Share Link** | **Gemini Notebook - Notebook Title**: Enter a descriptive label for the interactive AI study notebook.<br>**Gemini Notebook - Share Link**: Paste the share link from NotebookLM or Gemini Notebook to give students access to guided AI study materials. | Provides interactive AI grounded study materials. |
+| 📎 **Direct File Attachment** | Disabled ("Soon") | Use a Google Drive Resource instead. Older attachment blocks still preserve existing URLs. | — |
+| ❓ **Quiz & Questions** | **Unit Quiz Title** & **Instructions for students** | **Quiz & Questions - Unit Quiz Title**: Enter a heading or title for the embedded self-assessment quiz.<br>**Quiz & Questions - Instructions for students**: Write optional guidelines or expectations for students before they begin taking the quiz. (See 8.4.1 for question types). | Self-assessment checks with answer keys stored securely for teachers. |
+| 📝 **Unit Description** | Adds another Unit Description box | Provide a brief overview summarizing the unit's purpose, target audience, and key learning focus. | Allows adding multiple section descriptions above Performance Criteria. |
 
 #### 8.4.1 Quiz editor (inside a ❓ Quiz & Questions block)
 
-Up to 100 questions. "🔒 Answers hidden from students": correct answers are stored separately for teachers.
-The summary shows the question count, total points and how many are marked automatically.
+Up to 100 questions. "🔒 Answers hidden from students": correct answers are stored separately for teachers. The summary shows the question count, total points, and how many are marked automatically.
 
-| Field | Input | Description | How to fill it in | Why it matters |
-| --- | --- | --- | --- | --- |
-| Instructions (`aria-label="Quiz instructions"`) | Textarea, optional | Shown above the questions. | e.g. `Answer all questions. You can resubmit until results are released.` | Sets expectations. |
-| Question type (`aria-label="Question N type"`) | Select: Multiple choice, True / False, Short answer, Open question (teacher-marked) | — | Changing the type keeps the question text. | Closed types are marked automatically. |
-| Points (`aria-label="Question N points"`) | Number 0–100, step 0.5; default 1 (open questions 5) | Marks for the question. | Weight harder questions higher. | Sets the score. |
-| Question (`aria-label="Question N"`) | Textarea, max 2,000 characters | The question students see. | One clear question. | — |
-| Option A, B, … (`aria-label="Question N option A"`) | Text, max 500 characters; 2–10 options; **+ Option**, × removes | Answer choices. | Plausible, distinct options. | — |
-| Correct option (`aria-label="Option A is correct"`) | Radio (one) or checkbox (several) | The answer key. | **Tick the correct answer**; a warning shows until you do. | Without it the question is not auto-marked. |
-| **More than one correct answer** | Checkbox | Allows several correct options. | Tick for "select all that apply". | Students then see checkboxes. |
-| Correct answer (True / False) | Radio: True / False | The answer key. | Choose one. | Auto-marking. |
-| Accepted answers (`aria-label="Question N accepted answers"`) | Textarea, one per line, max 20, not case-sensitive | Answers counted as correct. | Every acceptable spelling or variant, e.g. `Canberra` and `canberra city`. Blank = teacher marks it. | Auto-marking; the teacher can still override. |
-| Model answer (`aria-label="Question N model answer"`) | Textarea, max 5,000 characters, teachers only | What a good answer includes. | Key points and a marking guide. | Shown to the teacher during bulk marking. |
+| Question Type | Definition / Instructions | Fields & Inputs | Auto-Marking |
+| --- | --- | --- | --- |
+| **Question Type - Multiple Choice** | Enter the question text, list answer choices, add extra options if needed, and select the correct option along with setting the question point value. | Text prompt (`aria-label="Question N"`), 2–10 options, radio/checkbox for correct option (`aria-label="Option A is correct"`), point value (0–100). | Automatically marked against the designated correct option. |
+| **Question Type - True / False** | Enter the true/false statement, set the point value, and select whether "True" or "False" is the correct answer. | Statement prompt, True/False radio toggle, point value. | Automatically marked. |
+| **Question Type - Short Answer** | Input the prompt along with the exact accepted correct answers (one per line) for auto-marking. | Prompt text, accepted answers textarea (one variant per line, case-insensitive), point value. | Automatically marked against listed acceptable variants. |
+| **Question Type - Open Question (Teacher Marked)** | Enter an essay or open-ended prompt alongside a teacher-only model answer/marking guide for manual evaluation. | Essay prompt, model answer / marking guide (teachers only, up to 5,000 chars), point value. | Teacher-marked; model answer hidden from students. |
 
 ### 8.5 ✨ AI Assist (Gemini) — builds a complete course
+
+The **✨ AI Assist: Build Your Complete Course** modal window is responsive and centered in the middle of the screen across desktop, laptop, tablet, and mobile devices.
+
+Educators can paste their whole course content (syllabus, lecture schedule, topic outline, textbook contents, or notes) directly into the window under the **📝 Syllabus text** tab. The AI Agent then scans through and sorts it out into a complete course across the **3 dropdown boxes**:
+1. **Dropdown Box 1: Course Specifications** (section 8.2)
+2. **Dropdown Box 2: Course Assessments & Rubrics** (section 8.3)
+3. **Dropdown Box 3: Units of Study** (section 8.4)
 
 The cost badge shows the fee (default 10 tokens, set by the Super Admin; free for Charity Teachers and the
 Super Admin). Confirm with the human before generating.
 
 | Field | Input | Description | How to fill it in | Why it matters |
 | --- | --- | --- | --- | --- |
-| **📝 Syllabus text / 📊 Spreadsheets** | Tabs | Source to build from. | Syllabus text for notes or outlines; Spreadsheets for a completed course spreadsheet (8.6 panel). | — |
-| **Target Level** `#ai-target-level` | Select: Level 0–9 | Level the AI writes at (Spreadsheets: used when the spreadsheet sets none). | Match the course's Level Taxonomy. | Sets depth and difficulty. |
-| **Syllabus / Course Outline** | Textarea; at least 15 characters; the first 15,000 are used | Raw outline, lecture schedule, topic list or objectives. | Paste the real syllabus, including any links students should get. | The AI only uses links found here. |
+| **📝 Syllabus text / 📊 Spreadsheets** | Tabs | Source to build from. | Syllabus text for pasting whole course content, notes, or outlines; Spreadsheets for completed course spreadsheets (8.6 panel). | — |
+| **Target Level** `#ai-target-level` | Select: Auto-Detect Level from Syllabus, or Level 0–9 | Level the AI writes at (Spreadsheets: used when the spreadsheet sets none). | Select auto-detect or match the course's Level Taxonomy. | Sets depth and difficulty. |
+| **Whole Course Content / Syllabus / Outline** | Textarea; at least 15 characters; the first 15,000 are used | Raw whole course content, syllabus, lecture schedule, topic outline, or notes. | Paste your whole course content here. The AI Agent will sort it out into Course Specifications, Course Assessments & Rubrics, and Units of Study. | The AI extracts, calibrates, and populates the 3 dropdown boxes from this text. |
 
 **Generate Course (N Tokens)** replaces the course's content (details, units, blocks, assessments, rubrics)
 with the result; the course ID, owner and Curriculum Standards are kept. **The syllabus fee is charged when
 you press Generate**; if Gemini is unavailable, a basic template course is built from your text instead.
 On the Spreadsheets tab, the fee is charged only after Gemini returns content. Review the result, then
-**📝 Save Draft**.
+**📝 Save Draft**. Teachers can save as draft in every dropdown box and at the bottom of the main window.
 
 ### 8.6 📊 Course Spreadsheet window
 

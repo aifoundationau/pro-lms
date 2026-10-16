@@ -303,7 +303,8 @@ const STANDARD_ALIASES = {
   teqsa: ['teqsa', 'hesf'],
   acara: ['acara', 'australian curriculum'],
   uk_qaa: ['uk qaa', 'qaa', 'fheq', 'uk quality code', 'uk_qaa'],
-  uk_ofsted: ['ofsted', 'uk ofsted', 'gcse', 'a level', 'uk_ofsted']
+  uk_ofsted: ['ofsted', 'uk ofsted', 'gcse', 'a level', 'uk_ofsted'],
+  international: ['international', 'unassigned', 'flexible', 'bespoke', 'global', 'international unassigned']
 };
 
 /**

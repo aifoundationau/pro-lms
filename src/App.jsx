@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   listSiteCourses, saveCourse, newCourseId, setCourseArchived,
   copyCourseForTeacher, listNetworkCourses,
-  incrementCourseEnrolments, isDbAvailable, subscribeToSiteCourses
+  incrementCourseEnrolments, isDbAvailable, subscribeToSiteCourses,
+  COURSE_ARCHIVE_RETENTION_YEARS, COURSE_ARCHIVE_RETENTION_DAYS, COURSE_ARCHIVE_RETENTION_MS,
+  getLocallyArchivedCourseIds, markCourseLocallyArchived, unmarkCourseLocallyArchived
 } from './services/lmsRepository';
 import { parseCourseSheetWithAI, SAMPLE_SHEET_CSV, DEFAULT_GEMINI_KEY, formatLocalizedDate } from './services/geminiCourseService';
 import StudentRegistration from './components/StudentRegistration';
@@ -16,8 +18,11 @@ import CourseSubmissionsModal from './components/course/CourseSubmissionsModal';
 import TokenFundModal from './components/TokenFundModal';
 import MessageDock from './components/messaging/MessageDock';
 import StudentLearningPanel from './components/student/StudentLearningPanel';
+import AcademicLibrary from './components/library/AcademicLibrary';
+import GeolocationModal from './components/GeolocationModal';
+import { getInitialLocation, fetchWeather, DEFAULT_LOCATION, DEFAULT_WEATHER } from './services/geolocationWeatherService';
 import { HEADER_MENU_ID, MobileAccountButton, MobileRoleStatus, MobileSignInButton } from './components/HeaderAccountMenu';
-import { createBlankCourse, generateEntityId, createBlankUnit } from './types/courseBuilderTypes';
+import { createBlankCourse, generateEntityId } from './types/courseBuilderTypes';
 import { confirmCheckoutSession } from './services/stripeService';
 import { getUserTokenBalance } from './services/tokenService';
 import { subscribeToEnrolledCourses } from './services/enrolledCourses';
@@ -38,6 +43,11 @@ const IMGBB_API_KEY = import.meta.env.VITE_IMGBB_API_KEY || '';
 
 // Tabs only staff (teachers, admins, Super Admin) can open.
 const STAFF_TABS = ['my-courses', 'students'];
+
+const INITIAL_DEMO_COURSES = [
+  { id: 1, title: 'Introduction to AI', students: 42, startDate: '2026-03-02' },
+  { id: 2, title: 'Web Development Bootcamp', students: 118, startDate: '2026-03-16' },
+];
 
 async function uploadToImgbb(file) {
   if (!IMGBB_API_KEY) throw new Error('Image uploads are not configured (VITE_IMGBB_API_KEY missing).');
@@ -64,6 +74,43 @@ async function uploadToImgbb(file) {
 function App() {
   const [isContactOpen, setIsContactOpen] = useState(false);
   const [isAboutDavidOpen, setIsAboutDavidOpen] = useState(false);
+  const [isGeoModalOpen, setIsGeoModalOpen] = useState(false);
+  const [geoLoc, setGeoLoc] = useState(DEFAULT_LOCATION);
+  const [geoWeather, setGeoWeather] = useState(DEFAULT_WEATHER);
+  const [footerTime, setFooterTime] = useState(() => new Date());
+  const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
+
+  // Ticking time for footer geolocation bubble
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setFooterTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Initial Geolocation & Weather
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      try {
+        const loc = await getInitialLocation();
+        if (!isMounted) return;
+        setGeoLoc(loc);
+        const w = await fetchWeather(loc.latitude, loc.longitude);
+        if (!isMounted) return;
+        setGeoWeather(w);
+      } catch {
+        // Fallback safely preserved
+      }
+    })();
+    return () => { isMounted = false; };
+  }, []);
+
+  const handleGeoLocationUpdate = (newLoc, newWeather) => {
+    if (newLoc) setGeoLoc(newLoc);
+    if (newWeather) setGeoWeather(newWeather);
+  };
+
   // Set when "Message the Super Admin" is pressed on the front page: the admin panel opens, then the composer.
   const [pendingSuperadminMessage, setPendingSuperadminMessage] = useState(false);
 
@@ -84,12 +131,14 @@ function App() {
   const [isSuperAdminPanelOpen, setIsSuperAdminPanelOpen] = useState(false);
   const [userTokenBalance, setUserTokenBalance] = useState(0);
   const [showFrontPage, setShowFrontPage] = useState(false);
+  const [showLibrary, setShowLibrary] = useState(false);
   // Android / iPhone: the role menu opened from the Google button at the top right of the header.
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const accountButtonRef = useRef(null);
 
   // Student panel: courses this account is enrolled in (found by sign-in email)
   const [enrolledCourses, setEnrolledCourses] = useState([]);
+  const [enrolledArchivedCourses, setEnrolledArchivedCourses] = useState([]);
   const [isLoadingEnrolments, setIsLoadingEnrolments] = useState(false);
   const [enrolmentsError, setEnrolmentsError] = useState('');
   const [enrolmentsVersion, setEnrolmentsVersion] = useState(0);
@@ -144,6 +193,7 @@ function App() {
         setAuthUser(res.user);
         setUserProfile(res.profile);
         setShowFrontPage(false);
+        setShowLibrary(false);
       }
     } catch (err) {
       console.error('Google Sign-In failed:', err);
@@ -160,7 +210,12 @@ function App() {
       setUserProfile(null);
       setEditingCourse(null);
       setShowFrontPage(false);
+      setShowLibrary(false);
       setEnrolledCourses([]);
+      setEnrolledArchivedCourses([]);
+      // Ensure locally archived/deleted courses never reappear on logout
+      const archivedIds = getLocallyArchivedCourseIds();
+      setMyCourses(prev => prev.filter(c => !archivedIds.has(String(c.id))));
       setActiveTab('my-courses');
     } catch (err) {
       console.error('Logout failed:', err);
@@ -285,12 +340,23 @@ function App() {
     };
   }, [isMobileMenuOpen]);
   
-  const [myCourses, setMyCourses] = useState([
-    { id: 1, title: 'Introduction to AI', students: 42, startDate: '2026-03-02' },
-    { id: 2, title: 'Web Development Bootcamp', students: 118, startDate: '2026-03-16' },
-  ]);
+  const [myCourses, setMyCourses] = useState(() => {
+    const archivedIds = getLocallyArchivedCourseIds();
+    return INITIAL_DEMO_COURSES.filter(c => !archivedIds.has(String(c.id)));
+  });
   
-  const [archivedCourses, setArchivedCourses] = useState([]);
+  const [archivedCourses, setArchivedCourses] = useState(() => {
+    const archivedIds = getLocallyArchivedCourseIds();
+    return INITIAL_DEMO_COURSES
+      .filter(c => archivedIds.has(String(c.id)))
+      .map(c => ({
+        ...c,
+        archived: true,
+        archivedAt: Date.now(),
+        retentionYears: COURSE_ARCHIVE_RETENTION_YEARS,
+        purgeAt: Date.now() + COURSE_ARCHIVE_RETENTION_MS
+      }));
+  });
   const [showArchive, setShowArchive] = useState(false);
 
   useEffect(() => {
@@ -302,10 +368,14 @@ function App() {
   // teacher's saved changes reach the Student Panel (and "message my teacher") without a reload.
   // Refs keep the listener from restarting when these values change.
   const myCoursesRef = useRef(myCourses);
+  const archivedCoursesRef = useRef(archivedCourses);
   const profileRoleRef = useRef(userProfile?.role);
   useEffect(() => {
     myCoursesRef.current = myCourses;
   }, [myCourses]);
+  useEffect(() => {
+    archivedCoursesRef.current = archivedCourses;
+  }, [archivedCourses]);
   useEffect(() => {
     profileRoleRef.current = userProfile?.role;
   }, [userProfile?.role]);
@@ -319,14 +389,17 @@ function App() {
 
     const unsubscribe = subscribeToEnrolledCourses(
       authUser.email,
-      (activeCourses) => {
+      (activeCourses, archivedEnrolled = []) => {
         if (cancelled) return;
-        setEnrolledCourses(activeCourses);
+        const archivedIds = getLocallyArchivedCourseIds();
+        const safeActive = (activeCourses || []).filter(c => !archivedIds.has(String(c.id)));
+        setEnrolledCourses(safeActive);
+        setEnrolledArchivedCourses(archivedEnrolled || []);
         setEnrolmentsError('');
         setIsLoadingEnrolments(false);
 
         // If the logged in person has supporter status, upgrade to student as soon as they are enrolled!
-        if (activeCourses.length > 0) {
+        if (safeActive.length > 0) {
           setUserProfile(prev => {
             if (prev && String(prev.role || '').toLowerCase() === 'supporter') {
               return { ...prev, role: 'student', classification: 'student' };
@@ -340,7 +413,12 @@ function App() {
       },
       {
         // Courses created in this browser (not yet saved) still open for their teacher.
-        localCourse: (courseId) => myCoursesRef.current.find(c => String(c.id) === String(courseId)) || null,
+        localCourse: (courseId) => {
+          const cid = String(courseId);
+          return myCoursesRef.current.find(c => String(c.id) === cid)
+            || archivedCoursesRef.current.find(c => String(c.id) === cid)
+            || null;
+        },
         onError: (err) => {
           console.warn('Real-time enrolment listener notice:', err);
           if (cancelled) return;
@@ -366,11 +444,12 @@ function App() {
   // PLUS courses currently in draft mode created on the platform, so registered students see live updates as teachers start creating courses.
   const studentVisibleCourses = useMemo(() => {
     const map = new Map();
+    const archivedIds = getLocallyArchivedCourseIds();
 
     // 1. If user is a registered student or staff, include draft site courses so they see courses being created in real time
     if (privileges.isStudent || privileges.isStaff || privileges.canViewDraftCourses) {
       for (const c of myCourses) {
-        if (!c || !c.id || c.archived) continue;
+        if (!c || !c.id || c.archived || archivedIds.has(String(c.id))) continue;
         const isDraft = Boolean(c.isDraft || c.status === 'draft' || (Array.isArray(c.tags) && c.tags.includes('Draft')));
         if (isDraft) {
           map.set(String(c.id), c);
@@ -380,13 +459,44 @@ function App() {
 
     // 2. Merge all enrolled courses (which take precedence for student state / submissions)
     for (const c of enrolledCourses) {
-      if (!c || !c.id || c.archived) continue;
+      if (!c || !c.id || c.archived || archivedIds.has(String(c.id))) continue;
       const existing = map.get(String(c.id));
       map.set(String(c.id), existing ? { ...existing, ...c } : c);
     }
 
     return Array.from(map.values());
   }, [myCourses, enrolledCourses, privileges.isStudent, privileges.isStaff, privileges.canViewDraftCourses]);
+
+  // Student-visible archived courses (retained for 7 years for academic records and compliance):
+  const studentArchivedCourses = useMemo(() => {
+    const map = new Map();
+    const archivedIds = getLocallyArchivedCourseIds();
+
+    // 1. All archived courses from enrolled listener
+    for (const c of enrolledArchivedCourses) {
+      if (c && c.id) map.set(String(c.id), c);
+    }
+
+    // 2. Any course in enrolledCourses that is marked locally or in doc as archived
+    for (const c of enrolledCourses) {
+      if (!c || !c.id) continue;
+      if (c.archived || archivedIds.has(String(c.id))) {
+        map.set(String(c.id), { ...c, archived: true });
+      }
+    }
+
+    // 3. For teachers / staff previewing the student panel, include site archived courses
+    if (privileges.isStaff) {
+      for (const c of archivedCourses) {
+        if (c && c.id) {
+          const existing = map.get(String(c.id));
+          map.set(String(c.id), existing ? { ...existing, ...c } : c);
+        }
+      }
+    }
+
+    return Array.from(map.values());
+  }, [enrolledArchivedCourses, enrolledCourses, archivedCourses, privileges.isStaff]);
 
   // Synchronize courses from Cloud Firestore (lms_courses + unmigrated legacy) on mount and live updates
   useEffect(() => {
@@ -396,10 +506,16 @@ function App() {
       try {
         const { courses } = await listSiteCourses();
         if (cancelled || !courses.length) return;
-        const active = courses.filter(c => !c.archived);
-        const archived = courses.filter(c => c.archived);
+        const archivedIds = getLocallyArchivedCourseIds();
+        const active = courses.filter(c => !c.archived && !archivedIds.has(String(c.id)));
+        const archived = courses.filter(c => c.archived || archivedIds.has(String(c.id)));
         if (active.length > 0) setMyCourses(active);
-        setArchivedCourses(archived);
+        setArchivedCourses(prev => {
+          const map = new Map();
+          for (const c of prev) if (c && c.id) map.set(String(c.id), c);
+          for (const c of archived) if (c && c.id) map.set(String(c.id), c);
+          return Array.from(map.values());
+        });
       } catch (err) {
         console.warn("Firestore sync note:", err);
       }
@@ -410,21 +526,39 @@ function App() {
     if (isDbAvailable()) {
       try {
         unsubscribeCourses = subscribeToSiteCourses(
-          (liveCourses) => {
+          (liveCourses, liveArchived = []) => {
             if (cancelled || !Array.isArray(liveCourses)) return;
-            const active = liveCourses.filter(c => !c.archived);
-            if (active.length > 0) {
-              setMyCourses(prev => {
-                const map = new Map();
-                for (const c of prev) {
-                  if (c && c.id) map.set(String(c.id), c);
+            const archivedIds = getLocallyArchivedCourseIds();
+            const active = liveCourses.filter(c => !c.archived && !archivedIds.has(String(c.id)));
+            const allArchived = [...liveArchived, ...liveCourses.filter(c => c.archived || archivedIds.has(String(c.id)))];
+
+            setMyCourses(prev => {
+              const incomingMap = new Map();
+              for (const c of active) {
+                if (c && c.id) incomingMap.set(String(c.id), c);
+              }
+              const result = new Map();
+              // Preserve existing unsaved / local courses, as long as they are NOT archived
+              for (const c of prev) {
+                const id = String(c.id);
+                if (!archivedIds.has(id) && !liveArchived.some(a => String(a.id) === id)) {
+                  result.set(id, incomingMap.get(id) || c);
                 }
-                for (const c of active) {
-                  if (c && c.id) map.set(String(c.id), c);
+              }
+              for (const [id, c] of incomingMap) {
+                if (!archivedIds.has(id)) {
+                  result.set(id, c);
                 }
-                return Array.from(map.values());
-              });
-            }
+              }
+              return Array.from(result.values());
+            });
+
+            setArchivedCourses(prev => {
+              const map = new Map();
+              for (const c of prev) if (c && c.id) map.set(String(c.id), c);
+              for (const c of allArchived) if (c && c.id) map.set(String(c.id), c);
+              return Array.from(map.values());
+            });
           },
           (err) => {
             console.warn("Real-time site courses listener note:", err?.message || err);
@@ -442,14 +576,58 @@ function App() {
   }, []);
 
   const handleDeleteCourse = (course) => {
-    setMyCourses(prev => prev.filter(c => c.id !== course.id));
-    setArchivedCourses(prev => [{ ...course, archived: true, archivedAt: Date.now() }, ...prev]);
+    if (!course || !course.id) return;
+    const courseTitle = course.title || 'Untitled Course';
+    const confirmed = typeof window !== 'undefined' && typeof window.confirm === 'function'
+      ? window.confirm(`Are you sure you want to delete "${courseTitle}"?\n\nIt will be moved to the Archive and preserved for 7 years for academic records and student compliance. Enrolled students will retain read-only access to their past course records and submissions.`)
+      : true;
+
+    if (!confirmed) return;
+
+    const courseId = String(course.id);
+    markCourseLocallyArchived(courseId);
+
+    const now = Date.now();
+    const archivedCourse = {
+      ...course,
+      archived: true,
+      archivedAt: course.archivedAt || now,
+      retentionYears: COURSE_ARCHIVE_RETENTION_YEARS,
+      purgeAt: now + COURSE_ARCHIVE_RETENTION_MS
+    };
+
+    setMyCourses(prev => prev.filter(c => String(c.id) !== courseId));
+    setArchivedCourses(prev => [archivedCourse, ...prev.filter(c => String(c.id) !== courseId)]);
+
+    setGlobalNotice({
+      type: 'success',
+      message: `Course "${courseTitle}" has been deleted and archived for 7 years (academic records preserved).`
+    });
+
     setCourseArchived(course, true).catch(err => console.warn("Archive save note:", err));
   };
 
   const handleRestoreCourse = (course) => {
-    setArchivedCourses(prev => prev.filter(c => c.id !== course.id));
-    setMyCourses(prev => [{ ...course, archived: false, archivedAt: undefined }, ...prev]);
+    if (!course || !course.id) return;
+    const courseId = String(course.id);
+    unmarkCourseLocallyArchived(courseId);
+
+    const restoredCourse = {
+      ...course,
+      archived: false,
+      archivedAt: undefined,
+      retentionYears: undefined,
+      purgeAt: undefined
+    };
+
+    setArchivedCourses(prev => prev.filter(c => String(c.id) !== courseId));
+    setMyCourses(prev => [restoredCourse, ...prev.filter(c => String(c.id) !== courseId)]);
+
+    setGlobalNotice({
+      type: 'success',
+      message: `Course "${course.title || 'Untitled Course'}" has been restored to active courses.`
+    });
+
     setCourseArchived(course, false).catch(err => console.warn("Restore save note:", err));
   };
 
@@ -1115,7 +1293,6 @@ function App() {
                 }
               }}
             />
-            <div className="message-dock-spacer" aria-hidden="true" />
           </main>
           <MessageDock
             currentUser={authUser}
@@ -1124,6 +1301,8 @@ function App() {
             enrolledCourses={enrolledCourses}
             networkCourses={networkCourses}
             ref={messageDockRef}
+            hideBar={true}
+            onUnreadChange={setUnreadMessagesCount}
             onBalanceChanged={() => authUser?.uid && getUserTokenBalance(authUser.uid).then(bal => setUserTokenBalance(bal || 0))}
           />
         </div>
@@ -1442,7 +1621,7 @@ function App() {
                 <p style={{color: 'var(--text-secondary)', lineHeight: '1.6', marginBottom: '24px'}}>
                   Declare the Course is ready for upload to the Global Search Database.
                   <br /><br />
-                  If not ready, it can be saved as a Draft for up to 28 days. If after 28 days it is not uploaded to the Global Search, it will be automatically deleted.
+                  If not ready, it can be saved as a Draft and archived for up to 7 years. In accordance with Australian educational records compliance, courses and drafts are preserved for 7 years.
                 </p>
                 <div style={{display: 'flex', gap: '16px', flexWrap: 'wrap'}}>
                   <button className="nav-btn primary" onClick={async () => {
@@ -1534,6 +1713,14 @@ function App() {
               <button className={`nav-btn ${activeTab === 'global' ? 'primary' : 'secondary'}`} onClick={() => { openGlobalSearch(); setIsMobileMenuOpen(false); }}>Global Search</button>
             )}
 
+            <button
+              className={`nav-btn ${activeTab === 'library' ? 'primary' : 'secondary'}`}
+              onClick={() => { setActiveTab('library'); setIsMobileMenuOpen(false); }}
+              title="Academic Library: Search full texts and academic articles (2000+)"
+            >
+              📚 Library
+            </button>
+
             {/* Teacher Postcard Registration Tab (not needed once someone is a teacher) */}
             {!privileges.isStaff && (
               <button
@@ -1546,14 +1733,23 @@ function App() {
               </button>
             )}
 
-            {/* Token Fund: sponsor a student or donate to the emergency fund */}
+            {/* Messages button in Navbar */}
             <button
-              className="nav-btn secondary"
-              onClick={() => { setIsTokenFundOpen(true); setIsMobileMenuOpen(false); }}
-              style={{ borderColor: 'rgba(250, 204, 21, 0.6)', color: '#fef08a', display: 'flex', alignItems: 'center', gap: '6px' }}
-              title="Sponsor a student's year of access or donate to the Emergency Token Fund"
+              type="button"
+              className="nav-btn secondary md-bar md-nav-btn"
+              onClick={() => {
+                messageDockRef.current?.open();
+                setIsMobileMenuOpen(false);
+              }}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+              title="Open Messages"
             >
-              💛 Token Fund
+              <span>💬 Messages</span>
+              {unreadMessagesCount > 0 && (
+                <span className="md-unread" style={{ fontSize: '0.72rem', padding: '1px 6px', borderRadius: '10px' }}>
+                  {unreadMessagesCount}
+                </span>
+              )}
             </button>
 
             {/* Token balance: UNL (unlimited) for the Super Admin; others can buy tokens */}
@@ -1630,6 +1826,7 @@ function App() {
             <StudentLearningPanel
               currentUser={authUser}
               courses={studentVisibleCourses}
+              archivedCourses={studentArchivedCourses}
               loading={isLoadingEnrolments}
               error={enrolmentsError}
               onRetry={() => setEnrolmentsVersion(v => v + 1)}
@@ -1816,23 +2013,39 @@ function App() {
 
               {showArchive && (
                 <div style={{width: '100%', marginTop: '24px'}}>
-                  <h3 style={{color: 'var(--text-secondary)', marginBottom: '16px', textAlign: 'center'}}>Archived Courses (Kept for 28 days)</h3>
+                  <h3 style={{color: 'var(--text-secondary)', marginBottom: '16px', textAlign: 'center'}}>
+                    Archived Courses (Preserved for 7 years for compliance & accreditation)
+                  </h3>
                   <div className="cards-grid">
                     {archivedCourses.length === 0 ? (
                       <p style={{color: 'white', textAlign: 'center', width: '100%'}}>Archive is empty.</p>
                     ) : (
                       archivedCourses.map(course => {
-                        const daysLeft = 28 - Math.floor((Date.now() - course.archivedAt) / (1000 * 60 * 60 * 24));
+                        const nowMs = footerTime.getTime();
+                        const courseArchivedAt = course.archivedAt || nowMs;
+                        const daysLeft = Math.max(0, COURSE_ARCHIVE_RETENTION_DAYS - Math.floor((nowMs - courseArchivedAt) / (1000 * 60 * 60 * 24)));
+                        const yearsLeft = (daysLeft / 365.25).toFixed(1);
                         return (
                           <div key={course.id} className="glass card" style={{ opacity: 0.85, justifyContent: 'space-between' }}>
                             <div>
-                              <div className="card-icon" style={{ filter: 'grayscale(1)', marginBottom: '6px' }}>🗑️</div>
+                              <div className="card-icon" style={{ filter: 'grayscale(1)', marginBottom: '6px' }}>📁</div>
                               <h3 style={{ textDecoration: 'line-through', fontSize: '0.92rem' }}>{course.title}</h3>
-                              <p style={{ color: '#f87171', fontWeight: 'bold', fontSize: '0.78rem' }}>Deletes in {daysLeft} days</p>
+                              <p style={{ color: '#f87171', fontWeight: 'bold', fontSize: '0.78rem' }}>
+                                Retained for 7 years ({daysLeft} days remaining / ~{yearsLeft} yrs)
+                              </p>
+                              <p style={{ color: 'var(--text-secondary)', fontSize: '0.74rem', marginTop: '4px' }}>
+                                Students retain read-only access to past submission records.
+                              </p>
                             </div>
-                            <button className="nav-btn secondary" style={{ marginTop: 'auto', width: '100%', padding: '7px 10px', fontSize: '0.8rem' }} onClick={() => handleRestoreCourse(course)}>Restore Course</button>
+                            <button
+                              className="nav-btn secondary"
+                              style={{ marginTop: 'auto', width: '100%', padding: '7px 10px', fontSize: '0.8rem' }}
+                              onClick={() => handleRestoreCourse(course)}
+                            >
+                              Restore Course
+                            </button>
                           </div>
-                        )
+                        );
                       })
                     )}
                   </div>
@@ -2094,6 +2307,14 @@ function App() {
               onSubmitted={() => {}}
             />
           )}
+
+          {activeTab === 'library' && (
+            <AcademicLibrary
+              onBack={() => setActiveTab(privileges.isStaff ? 'my-courses' : 'learning')}
+              currentUser={authUser}
+              userProfile={userProfile}
+            />
+          )}
           <div className="message-dock-spacer" aria-hidden="true" />
         </main>
         {isUserRolesOpen && (
@@ -2173,6 +2394,8 @@ function App() {
           enrolledCourses={enrolledCourses}
           networkCourses={networkCourses}
           ref={messageDockRef}
+          hideBar={true}
+          onUnreadChange={setUnreadMessagesCount}
           onBalanceChanged={() => authUser?.uid && getUserTokenBalance(authUser.uid).then(bal => setUserTokenBalance(bal || 0))}
         />
       </div>
@@ -2214,6 +2437,21 @@ function App() {
           {/* Phones: the first item is always the role status */}
           {isLoggedIn && <MobileRoleStatus user={authUser} privileges={privileges} />}
           <button className="nav-btn secondary" onClick={() => { setIsContactOpen(true); setIsMobileMenuOpen(false); }}>Contact</button>
+          <button
+            className="nav-btn secondary"
+            onClick={() => { setIsTokenFundOpen(true); setIsMobileMenuOpen(false); }}
+            style={{ borderColor: 'rgba(250, 204, 21, 0.6)', color: '#fef08a' }}
+            title="Donate to the Emergency Token Fund for disadvantaged students"
+          >
+            💛 Token Fund
+          </button>
+          <button
+            className="nav-btn secondary"
+            onClick={() => { setShowLibrary(true); setIsMobileMenuOpen(false); }}
+            title="Academic Library: Search full texts and academic articles (2000+)"
+          >
+            📚 Library
+          </button>
           {isLoggedIn ? (
             <>
               <button
@@ -2223,14 +2461,6 @@ function App() {
                 title="Return to OzEdu Admin Dashboard"
               >
                 <span>🛡️ Go to Admin</span>
-              </button>
-              <button
-                className="nav-btn secondary"
-                onClick={() => { setIsTokenFundOpen(true); setIsMobileMenuOpen(false); }}
-                style={{ borderColor: 'rgba(250, 204, 21, 0.6)', color: '#fef08a' }}
-                title="Sponsor a student's year of access or donate to the Emergency Token Fund"
-              >
-                💛 Token Fund
               </button>
               <div className="user-profile-badge">
                 {authUser?.photoURL ? (
@@ -2294,32 +2524,66 @@ function App() {
       )}
 
       <main className="main-content">
-        <div className="hero-text animate-fade-in-up">
-          <h2>Transforming Education Through AI & Community</h2>
-          <p>
-            Bridging the gap between world-class tertiary education and under-resourced classrooms across Southeast Asia with a self-sustaining, ultra-lightweight ecosystem.
-          </p>
-        </div>
-
-        <div className="cards-grid front-cards-grid">
-          {cards.map((card, index) => (
-            <div 
-              key={index} 
-              className={`glass card front-card animate-fade-in-up delay-${index + 1}`}
-            >
-              <div className="card-icon">{card.icon}</div>
-              <h3>{card.title}</h3>
-              <p>{card.content}</p>
+        {showLibrary ? (
+          <AcademicLibrary
+            onBack={() => setShowLibrary(false)}
+            currentUser={authUser}
+            userProfile={userProfile}
+          />
+        ) : (
+          <>
+            <div className="hero-text animate-fade-in-up">
+              <h2>Transforming Education Through AI & Community</h2>
+              <p>
+                Bridging the gap between world-class tertiary education and under-resourced classrooms across Southeast Asia with a self-sustaining, ultra-lightweight ecosystem.
+              </p>
             </div>
-          ))}
-        </div>
 
+            <div className="cards-grid front-cards-grid">
+              {cards.map((card, index) => (
+                <div 
+                  key={index} 
+                  className={`glass card front-card animate-fade-in-up delay-${index + 1}`}
+                >
+                  <div className="card-icon">{card.icon}</div>
+                  <h3>{card.title}</h3>
+                  <p>{card.content}</p>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </main>
 
       <footer className="footer glass animate-fade-in-up delay-5">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '14px', flexWrap: 'wrap' }}>
-          <span>© {new Date().getFullYear()} AI Foundation Australia</span>
-          <span style={{ opacity: 0.35 }}>•</span>
+          <button
+            type="button"
+            className="nav-btn secondary footer-ai-foundation-bubble"
+            onClick={() => setIsGeoModalOpen(true)}
+            title="AI Foundation Geolocation, Weather & Local Time"
+            aria-label="AI Foundation Geolocation, Weather and Time"
+            style={{
+              padding: '4px 14px',
+              fontSize: '0.82rem',
+              borderRadius: '20px',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+          >
+            <span style={{ fontSize: '0.9rem' }}>🏛️</span>
+            <span style={{ fontWeight: 600 }}>© AI Foundation</span>
+            <span style={{ opacity: 0.35 }}>•</span>
+            <span style={{ color: '#fef08a' }}>📍 {geoLoc?.suburb || 'South Bank'}</span>
+            <span style={{ opacity: 0.35 }}>•</span>
+            <span style={{ color: '#38bdf8' }}>{geoWeather?.icon || '☀️'} {typeof geoWeather?.temperature === 'number' ? `${geoWeather.temperature}°C` : '24°C'}</span>
+            <span style={{ opacity: 0.35 }}>•</span>
+            <span style={{ color: '#cbd5e1', fontVariantNumeric: 'tabular-nums' }}>
+              🕒 {footerTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
+            </span>
+          </button>
           <button 
             type="button" 
             className="nav-btn secondary" 
@@ -2361,7 +2625,7 @@ function App() {
               <details className="info-box">
                 <summary>If you are a donor and want to know how to sponsor students</summary>
                 <div className="dropdown-content">
-                  Sign in with Google and press the 💛 Token Fund button to sponsor a specific student or donate to the Emergency Token Fund, or contact us to sponsor larger groups and entire classrooms.
+                  Press the 💛 Token Fund button to donate to the Emergency Token Fund for disadvantaged students, or contact us to sponsor larger groups and entire classrooms.
                 </div>
               </details>
             </div>
@@ -2505,14 +2769,14 @@ function App() {
         </div>
       )}
       {isAiImportOpen && renderAiModal()}
-      {isDonationModalOpen && isLoggedIn && (
+      {isDonationModalOpen && (
         <DonationModal
           currentUser={authUser}
           isOpen={isDonationModalOpen}
           onClose={() => setIsDonationModalOpen(false)}
         />
       )}
-      {isTokenFundOpen && isLoggedIn && (
+      {isTokenFundOpen && (
         <TokenFundModal
           isOpen={isTokenFundOpen}
           currentUser={authUser}
@@ -2523,6 +2787,13 @@ function App() {
           }}
         />
       )}
+      <GeolocationModal
+        isOpen={isGeoModalOpen}
+        onClose={() => setIsGeoModalOpen(false)}
+        location={geoLoc}
+        weather={geoWeather}
+        onLocationUpdate={handleGeoLocationUpdate}
+      />
     </div>
   );
 }

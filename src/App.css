@@ -2232,9 +2232,25 @@ details.info-box[open] summary::after {
 
 /* ---- Message dock spacing, notices, Global Search published courses ---- */
 .message-dock-spacer {
-  height: 72px;
-  width: 100%;
-  flex-shrink: 0;
+  display: none !important;
+  height: 0 !important;
+}
+
+.header-nav .md-nav-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  border-color: rgba(52, 211, 153, 0.4) !important;
+  color: #f8fafc !important;
+}
+
+.header-nav .md-nav-btn:hover {
+  border-color: rgba(52, 211, 153, 0.8) !important;
+  box-shadow: 0 0 12px rgba(52, 211, 153, 0.25) !important;
+}
+
+.header-nav .md-nav-btn .md-bar-legend {
+  display: none !important;
 }
 
 .app-global-notice {
@@ -2351,3 +2367,56 @@ details.info-box[open] summary::after {
     white-space: nowrap;
   }
 }
+
+/* AI Foundation Geolocation Footer Bubble */
+.footer-ai-foundation-bubble {
+  background: rgba(16, 185, 129, 0.12) !important;
+  border: 1px solid rgba(52, 211, 153, 0.35) !important;
+  color: #f8fafc !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+.footer-ai-foundation-bubble:hover {
+  background: rgba(16, 185, 129, 0.22) !important;
+  border-color: rgba(52, 211, 153, 0.6) !important;
+  box-shadow: 0 0 16px rgba(52, 211, 153, 0.3);
+  transform: translateY(-1px);
+}
+
+.geo-modal-card {
+  animation: geoModalPopIn 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  scrollbar-width: none !important; /* Firefox: strictly no scrollbars */
+  -ms-overflow-style: none !important; /* IE and Edge */
+}
+
+.geo-modal-card::-webkit-scrollbar {
+  display: none !important; /* Chrome, Safari, Opera: strictly no scrollbars */
+  width: 0 !important;
+  height: 0 !important;
+}
+
+@keyframes geoModalPopIn {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@media (max-width: 640px) {
+  .footer-ai-foundation-bubble {
+    font-size: 0.76rem !important;
+    padding: 4px 10px !important;
+    gap: 5px !important;
+  }
+  .geo-modal-card {
+    padding: 20px 18px !important;
+    max-width: 95% !important;
+    gap: 12px !important;
+  }
+}
+

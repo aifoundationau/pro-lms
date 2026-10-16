@@ -81,11 +81,13 @@ export function subscribeToEnrolledCourses(email, onCourses, {
       clearTimeout(waitTimer);
       waitTimer = null;
     }
-    const courses = enrolments
+    const all = enrolments
       .map(e => live.get(e.courseId)?.course || fallbackFor(e))
-      .filter(c => c && !c.archived);
+      .filter(Boolean);
+    const courses = all.filter(c => !c.archived);
+    const archived = all.filter(c => Boolean(c.archived));
     try {
-      onCourses(courses);
+      onCourses(courses, archived);
     } catch (err) {
       console.warn('Enrolled courses listener callback failed:', err);
     }
