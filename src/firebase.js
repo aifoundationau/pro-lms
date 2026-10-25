@@ -18,7 +18,7 @@ const OFFLINE_FOR_TESTS = nodeEnv.OZEDU_FIREBASE_OFFLINE === '1' && !FIRESTORE_E
 const configFromWindow = typeof window !== "undefined" && window.__FIREBASE_CONFIG__ ? window.__FIREBASE_CONFIG__ : null;
 
 export const firebaseConfig = {
-  apiKey: configFromWindow?.apiKey || readEnv(() => import.meta.env.VITE_FIREBASE_API_KEY, 'VITE_FIREBASE_API_KEY') || "AIzaSyCPeAOWQj8456TeIWDIPsyxyWT7QLrC8J8",
+  apiKey: configFromWindow?.apiKey || readEnv(() => import.meta.env.VITE_FIREBASE_API_KEY, 'VITE_FIREBASE_API_KEY') || "",
   authDomain: configFromWindow?.authDomain || readEnv(() => import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, 'VITE_FIREBASE_AUTH_DOMAIN') || "ai-foundation-firebase.firebaseapp.com",
   projectId: configFromWindow?.projectId || readEnv(() => import.meta.env.VITE_FIREBASE_PROJECT_ID, 'VITE_FIREBASE_PROJECT_ID') || "ai-foundation-firebase",
   storageBucket: configFromWindow?.storageBucket || readEnv(() => import.meta.env.VITE_FIREBASE_STORAGE_BUCKET, 'VITE_FIREBASE_STORAGE_BUCKET') || "ai-foundation-firebase.firebasestorage.app",

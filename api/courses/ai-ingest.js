@@ -6,7 +6,7 @@ export const config = {
   runtime: 'edge'
 };
 
-const GEMINI_API_KEY = process.env.VITE_GEMINI_API_KEY || 'AIzaSy' + 'CPeAOWQj8456TeIWDIPsyxyWT7QLrC8J8';
+const GEMINI_API_KEY = process.env.VITE_GEMINI_API_KEY || '';
 
 export default async function handler(req) {
   const origin = req.headers.get('origin') || '*';
@@ -24,6 +24,10 @@ export default async function handler(req) {
 
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers });
+  }
+
+  if (!GEMINI_API_KEY) {
+    return new Response(JSON.stringify({ error: 'AI ingestion is not configured' }), { status: 503, headers });
   }
 
   try {
